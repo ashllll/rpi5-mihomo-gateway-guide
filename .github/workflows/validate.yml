@@ -1,0 +1,72 @@
+name: Validate documentation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate archive structure and sanitization
+        run: |
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import re
+          import xml.etree.ElementTree as ET
+
+          required = [
+              Path("README.md"),
+              Path("LICENSE"),
+              Path("SECURITY.md"),
+              Path("docs/deployment-debugging-summary.zh-CN.md"),
+              Path("assets/network-topology.svg"),
+              Path("assets/network-topology.png"),
+              Path("web/index.html"),
+          ]
+          missing = [str(path) for path in required if not path.is_file()]
+          if missing:
+              raise SystemExit(f"Missing required files: {missing}")
+
+          ET.parse("assets/network-topology.svg")
+
+          class Parser(HTMLParser):
+              def error(self, message):
+                  raise RuntimeError(message)
+
+          html = Path("web/index.html").read_text(encoding="utf-8")
+          Parser().feed(html)
+          if "../assets/network-topology.svg" not in html:
+              raise SystemExit("HTML does not reference the archived SVG")
+
+          text_paths = [
+              Path("README.md"),
+              Path("SECURITY.md"),
+              Path("docs/deployment-debugging-summary.zh-CN.md"),
+              Path("assets/network-topology.svg"),
+              Path("web/index.html"),
+          ]
+          content = "\n".join(path.read_text(encoding="utf-8") for path in text_paths)
+
+          forbidden = {
+              "macOS absolute user path": r"/Users/[A-Za-z0-9._-]+/",
+              "GLaDOS subscription token": r"glados-config\\.com/.{12,}",
+              "InfraAPI subscription token": r"infraapi\\.cloud/link/.+",
+              "BWB subscription token": r"bwbwbw\\.cc/subscribe/.+",
+          }
+          for label, pattern in forbidden.items():
+              if re.search(pattern, content, re.IGNORECASE):
+                  raise SystemExit(f"Potential secret or private path found: {label}")
+
+          if Path("assets/network-topology.png").stat().st_size < 100_000:
+              raise SystemExit("PNG preview is unexpectedly small")
+
+          print("Documentation archive validation passed")
+          PY
