@@ -31,6 +31,13 @@ backup_root=/var/lib/mihomo-subscription-backups
 if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
+# Shell-sourced parameters must also reach the Python overlay on manual runs.
+if [ -n "${MIHOMO_CAPABILITIES:-}" ]; then
+  export MIHOMO_CAPABILITIES
+else
+  # An empty setting uses the overlay's default, including inherited exports.
+  unset MIHOMO_CAPABILITIES
+fi
 : "${GATEWAY_LAN_IP:=10.77.0.1}"
 : "${MIHOMO_MIXED_PORT:=7890}"
 proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}

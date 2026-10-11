@@ -15,8 +15,9 @@ with tempfile.TemporaryDirectory() as temp:
     assert config["bind-address"] == site["lan_address"]
     assert config["tun"]["include-interface"] == [site["lan_interface"]]
     assert len(config["secret"]) == 64
-    assert {"general-a", "general-b", "download-only"} == set(config["proxy-groups"][2]["use"])
-    assert "ai-only" not in config["proxy-groups"][2]["use"]
+    download = next(group for group in config["proxy-groups"] if group["name"] == "Download")
+    assert {"general-a", "general-b", "download-only"} == set(download["use"])
+    assert "ai-only" not in download["use"]
     assert 'iifname "lan0" accept' in (output / "nftables.conf").read_text()
     assert "flush ruleset" not in (output / "nftables.conf").read_text()
     assert all(p.stat().st_mode & 0o777 == 0o600 for p in output.rglob("*") if p.is_file())
