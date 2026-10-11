@@ -1,0 +1,13 @@
+flowchart TB
+  accTitle: 生产 DNS 分层与公开模板的区别
+  accDescr: 客户端查询 dnsmasq。生产环境经 MosDNS 按域名集合和国内 IP 校验分流至国内 DNS 或 Mihomo DNS。公开模板直接从 dnsmasq 转至 Mihomo DNS，不包含 MosDNS 配置。
+  client["LAN 客户端"]
+  dnsmasq["dnsmasq · 网关 :53<br/>DHCP 下发网关与 DNS"]
+  mosdns["MosDNS · 127.0.0.1:5335<br/>域名集合 / CN IP 校验 / 延迟回退<br/>生产分层 · 公开仓库不生成配置"]
+  domestic["国内 DNS<br/>国内真实答案缓存于 MosDNS"]
+  mihomo["Mihomo DNS · 127.0.0.1:1053<br/>独占 fake-IP 映射<br/>不由 MosDNS 长期缓存 fake-IP"]
+  client --> dnsmasq
+  dnsmasq -->|生产路径| mosdns
+  mosdns -->|国内域名 / 国内 IP 校验通过| domestic
+  mosdns -->|代理域名 / 回退| mihomo
+  dnsmasq -. "公开模板默认路径 · 不经 MosDNS" .-> mihomo
