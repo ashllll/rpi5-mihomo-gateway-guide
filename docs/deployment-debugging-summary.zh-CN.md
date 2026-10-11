@@ -1,5 +1,9 @@
 # Raspberry Pi 5 + Mihomo 网关部署、调试与优化完整总结
 
+> 历史档案：本文记录 2026-07 的部署，拓扑、供应商、选路和 DNS 已有变化。
+> 当前状态及可部署模板请阅读 [2026-10-11 方案](current-architecture.zh-CN.md)。
+> 本文的地址和测试数据是旧记录，不应作为当前配置直接复制。
+
 > 文档日期：2026-07-24
 > 适用设备：Raspberry Pi 5、瑞莎双 2.5GbE 扩展板、独立无线 AP
 > 系统：Debian GNU/Linux 13（trixie），ARM64

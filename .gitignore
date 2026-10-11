@@ -5,3 +5,16 @@
 secrets/
 backups/
 *.url
+site.local.json
+rendered/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.pem
+*.key
+*.tar
+*.tar.gz
+*.tar.zst

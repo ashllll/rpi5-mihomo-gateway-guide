@@ -14,6 +14,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Validate all publication files and renderer
+        run: |
+          python3 tools/validate_public.py
+          python3 tools/check_render.py
+
       - name: Validate archive structure and sanitization
         run: |
           python3 - <<'PY'
@@ -57,9 +62,9 @@ jobs:
 
           forbidden = {
               "macOS absolute user path": r"/Users/[A-Za-z0-9._-]+/",
-              "GLaDOS subscription token": r"glados-config\\.com/.{12,}",
-              "InfraAPI subscription token": r"infraapi\\.cloud/link/.+",
-              "BWB subscription token": r"bwbwbw\\.cc/subscribe/.+",
+              "GLaDOS subscription token": r"glados-config\.com/.{12,}",
+              "InfraAPI subscription token": r"infraapi\.cloud/link/.+",
+              "BWB subscription token": r"bwbwbw\.cc/(?:subscribe/|[0-9]+/).+",
           }
           for label, pattern in forbidden.items():
               if re.search(pattern, content, re.IGNORECASE):

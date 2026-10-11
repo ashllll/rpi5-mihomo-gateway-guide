@@ -2,6 +2,31 @@
 
 一套经过实际部署和故障验证的 Raspberry Pi 5 + Mihomo 双网口透明代理网关记录。
 
+## 当前公开版本（2026-10-11）
+
+当前架构以 [新版方案](docs/current-architecture.zh-CN.md) 为准。下方旧拓扑、图片和
+原始长文是历史档案，不代表当前网段、链路速率或策略。新版配置示例使用虚构网段；
+历史档案保留旧的私有 IPv4 拓扑示例，不包含当前设备地址或访问凭据。
+
+- [部署与回滚](docs/deployment-current.zh-CN.md)：生成配置、检查和人工分阶段部署。
+- [智能选节点设计](docs/adaptive-selection.zh-CN.md)：业务评分、隔离、恢复与会话稳定。
+- [端口与故障验收](docs/operations-current.zh-CN.md)：动态重定向、PC 透明转发和双路径测试。
+- [参数模板](examples/site.example.json)：接口、子网、DHCP 和内网管理范围可配置。
+- [配置生成器](tools/render.py)：只生成文件，不连接设备、不安装、不重启服务。
+
+```sh
+cp examples/site.example.json site.local.json
+# 先修改 site.local.json，确认接口名称、地址和现有网络不冲突。
+python3 tools/render.py --site site.local.json --output rendered
+python3 tools/validate_public.py
+```
+
+发布版提供基础网关配置和自适应机制设计；不包含生产订阅合并器、生产节点数据库、
+完整自适应执行器、Docker 私有数据或一键部署承诺。供应商凭据需要在部署端自行配置。
+生成后的配置仍需要按照部署文档检查和验证，不能直接覆盖正在工作的网关。
+
+## 历史档案
+
 本仓库侧重：
 
 - Raspberry Pi 5 双网口网络规划
