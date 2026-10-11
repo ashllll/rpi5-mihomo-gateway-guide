@@ -1,0 +1,206 @@
+#!/bin/sh
+
+set -eu
+
+requested_mode="${1:-}"
+active=/etc/dnsmasq-upstreams.conf
+lock=/run/lock/mihomo-dns-mode.lock
+
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+
+# dnsmasq answers on the LAN address, so the post-switch verification below
+# queries that address rather than loopback.
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+
+dns_query() {
+  server=$1
+  port=$2
+  domain=$3
+  dig @"$server" -p "$port" "$domain" A +time=2 +tries=1 +short 2>/dev/null |
+    awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }'
+}
+
+is_fake_ip() {
+  case "$1" in
+    198.18.*|198.19.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+mosdns_is_healthy() {
+  cn_answer=$(dns_query 127.0.0.1 5335 baidu.com | tail -n 1 || true)
+  proxy_answer=$(dns_query 127.0.0.1 5335 openai.com | tail -n 1 || true)
+  [ -n "$cn_answer" ] &&
+    ! is_fake_ip "$cn_answer" &&
+    [ -n "$proxy_answer" ] &&
+    is_fake_ip "$proxy_answer"
+}
+
+mihomo_is_healthy() {
+  answer=$(dns_query 127.0.0.1 1053 openai.com | tail -n 1 || true)
+  [ -n "$answer" ] && is_fake_ip "$answer"
+}
+
+direct_is_healthy() {
+  answer=$(dns_query 223.5.5.5 53 baidu.com | tail -n 1 || true)
+  [ -n "$answer" ] && ! is_fake_ip "$answer"
+}
+
+verify_mode() {
+  mode=$1
+  case "$mode" in
+    mosdns) mosdns_is_healthy ;;
+    mihomo) mihomo_is_healthy ;;
+    # Direct is the final recovery mode. It must remain selectable while
+    # the WAN is down so DNS recovers automatically with the WAN.
+    direct) return 0 ;;
+  esac
+}
+
+reload_dnsmasq() {
+  pid_file=/run/dnsmasq/dnsmasq.pid
+  [ -r "$pid_file" ] || return 0
+  dnsmasq_pid=$(cat "$pid_file")
+  kill -0 "$dnsmasq_pid" 2>/dev/null || return 0
+  kill -HUP "$dnsmasq_pid"
+}
+
+write_active() {
+  source=$1
+  if [ -e "$active" ]; then
+    cat "$source" >"$active"
+    chown root:root "$active"
+    chmod 644 "$active"
+  else
+    install -o root -g root -m 644 "$source" "$active"
+  fi
+}
+
+case "$requested_mode" in
+  auto|mosdns|mihomo|direct)
+    ;;
+  *)
+    echo "usage: mihomo-dns-mode {auto|mosdns|mihomo|direct}" >&2
+    exit 2
+    ;;
+esac
+
+exec 9>"$lock"
+flock 9
+
+mode=$requested_mode
+if [ "$mode" = auto ]; then
+  if mosdns_is_healthy; then
+    mode=mosdns
+  elif mihomo_is_healthy; then
+    mode=mihomo
+  else
+    mode=direct
+  fi
+elif [ "$mode" = mosdns ]; then
+  healthy=false
+  attempt=1
+  while [ "$attempt" -le 40 ]; do
+    if mosdns_is_healthy; then
+      healthy=true
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.25
+  done
+  if [ "$healthy" != true ]; then
+    echo "DNS mode mosdns is not healthy" >&2
+    exit 1
+  fi
+elif ! verify_mode "$mode"; then
+  echo "DNS mode $mode is not healthy" >&2
+  exit 1
+fi
+
+source_file="/etc/mihomo/dnsmasq-upstreams.${mode}"
+[ -r "$source_file" ] || {
+  echo "missing DNS mode file: $source_file" >&2
+  exit 1
+}
+
+if [ -f "$active" ] && cmp -s "$source_file" "$active" && verify_mode "$mode"; then
+  exit 0
+fi
+
+candidate=$(mktemp /run/dnsmasq-upstreams.XXXXXX)
+previous=$(mktemp /run/dnsmasq-upstreams.previous.XXXXXX)
+had_previous=false
+cleanup() {
+  rm -f "$candidate" "$previous"
+}
+trap cleanup EXIT HUP INT TERM
+
+if [ -f "$active" ]; then
+  cp -p "$active" "$previous"
+  had_previous=true
+fi
+
+install -o root -g root -m 644 "$source_file" "$candidate"
+write_active "$candidate"
+
+if ! /usr/sbin/dnsmasq --test >/dev/null 2>&1; then
+  if [ "$had_previous" = true ]; then
+    write_active "$previous"
+  fi
+  logger -t mihomo-dns-mode "Rejected invalid ${mode} DNS configuration"
+  exit 1
+fi
+
+if ! reload_dnsmasq; then
+  if [ "$had_previous" = true ]; then
+    write_active "$previous"
+    reload_dnsmasq || true
+  fi
+  logger -t mihomo-dns-mode "Failed to reload dnsmasq in ${mode} mode"
+  exit 1
+fi
+
+verified=false
+attempt=1
+while [ "$attempt" -le 12 ]; do
+  case "$mode" in
+    mosdns)
+      cn_answer=$(dns_query "$GATEWAY_LAN_IP" 53 baidu.com | tail -n 1 || true)
+      proxy_answer=$(dns_query "$GATEWAY_LAN_IP" 53 openai.com | tail -n 1 || true)
+      if [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer" &&
+         [ -n "$proxy_answer" ] && is_fake_ip "$proxy_answer"; then
+        verified=true
+      fi
+      ;;
+    mihomo)
+      answer=$(dns_query "$GATEWAY_LAN_IP" 53 openai.com | tail -n 1 || true)
+      [ -n "$answer" ] && is_fake_ip "$answer" && verified=true
+      ;;
+    direct)
+      answer=$(dns_query "$GATEWAY_LAN_IP" 53 baidu.com | tail -n 1 || true)
+      [ -n "$answer" ] && ! is_fake_ip "$answer" && verified=true
+      ;;
+  esac
+  [ "$verified" = true ] && break
+  attempt=$((attempt + 1))
+  sleep 0.25
+done
+
+if [ "$verified" != true ] && [ "$mode" != direct ]; then
+  if [ "$had_previous" = true ]; then
+    write_active "$previous"
+    reload_dnsmasq || true
+  fi
+  logger -t mihomo-dns-mode "DNS mode ${mode} failed post-switch verification"
+  exit 1
+fi
+
+if [ "$verified" != true ]; then
+  logger -t mihomo-dns-mode "Direct DNS selected while WAN DNS is not yet reachable"
+fi
+
+logger -t mihomo-dns-mode "DNS mode switched to ${mode}"

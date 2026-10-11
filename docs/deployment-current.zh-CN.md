@@ -2,8 +2,9 @@
 
 ## 发布内容与生产实现的区别
 
-本仓库提供基础配置生成器、DNS 分层说明和运维设计，没有复制生产环境的订阅、
-完整规则库、动态评分状态、管理密钥、容器卷或自适应执行器。模板是可验证的基础，
+本仓库提供配置生成器、DNS 分层说明与运维设计，并发布网关上实际运行的自动化层源码
+（[`automation/`](../automation/README.zh-CN.md)）。仓库没有复制生产环境的订阅链接、节点名、
+完整规则库、动态评分状态和管理密钥；节点标签、订阅链接与真实地址由部署端提供。模板是可验证的基础，
 不是一键还原镜像。旧长文中的性能结果是历史测试，不是每台设备的保证。
 
 ## 准备
@@ -55,8 +56,19 @@ nftables 需要支持 destroy table 的版本；旧版本应先升级兼容版�
 人工对照后按文件安装：nftables.conf → /etc/nftables.conf，dnsmasq-lan.conf →
 /etc/dnsmasq.d/lan.conf，gateway-sysctl.conf → /etc/sysctl.d/90-gateway.conf，
 mihomo 目录 → /etc/mihomo。先检查已有 dnsmasq include、server 和 listen 选项冲突。
-准备 Mihomo 的 systemd 单元（ExecStart 使用实际安装二进制和 -d /etc/mihomo），
-开启自启动，再分阶段应用 sysctl、DHCP/DNS、NAT 和代理。仓库不执行安装步骤。
+Mihomo 的 systemd 单元可由 `automation/install.sh` 安装，也可按发行版自行准备
+（ExecStart 使用实际安装二进制和 -d /etc/mihomo），再分阶段应用 sysctl、DHCP/DNS、NAT 和代理。
+
+自动化层（脚本、单元与 MosDNS 骨架）的安装：
+
+```sh
+sudo automation/install.sh --dry-run   # 先看计划：只打印，不碰文件系统
+sudo automation/install.sh             # 覆盖脚本与单元，保留已存在的部署数据
+```
+
+安装后写 /etc/mihomo-automation.env（0600）、放入 secrets、填写 capabilities.yaml 的
+overlay 段与 reconcile-targets.conf，最后按需 `--enable-timers`。详见
+[自动化层说明](../automation/README.zh-CN.md)。
 
 controller 有随机 secret；SSH 保留发行版当前认证策略。若需要密码登录，用 sshd -T
 确认 PasswordAuthentication yes，修改后先 sshd -t 再 reload，并从第二连接验证。
@@ -65,7 +77,9 @@ controller 有随机 secret；SSH 保留发行版当前认证策略。若需要�
 ## MosDNS 第二阶段
 
 生产方案的 MosDNS 使用国内 / 代理 / 自定义域名集合和 CN IP 集合，在 127.0.0.1
-监听，海外交给 Mihomo。详见当前架构；仓库没有自动抓取这些规则或部署 MosDNS。
+监听，海外交给 Mihomo。配置骨架、自定义域名规则以及 mosdns-update-rules /
+mosdns-update-binary / mosdns-rollout-rollback 等脚本已随 automation/ 发布，规则数据的
+来源与摘要仍需你确认。详见当前架构。
 确认候选 DNS 实例、规则来源和摘要后，才把 dnsmasq server 改为 MosDNS 的本机端口。
 不要同时保留两个不受控的全局 DNS 上游，否则会随机绕过分流。切换后清理相关缓存，
 确认国内解析和 fake-IP 映射均正常。
@@ -75,4 +89,6 @@ controller 有随机 secret；SSH 保留发行版当前认证策略。若需要�
 完成 [真实 LAN 验收](operations-current.zh-CN.md)，再配置自动更新。
 更新任务需要互斥、候选验证、回滚和业务检查，至少 24 小时更新订阅。
 启用 Persistent 的 timer 前评估补执行行为。高频探测也有流量成本，不能无预算测速。
-评分观察和动作执行分离；基础联网未稳定前不部署自动隔离动作。
+评分观察和动作执行分离；基础联网未稳定前不部署自动隔离动作。八个 timer 的周期与
+启用方式见[自动化层说明](../automation/README.zh-CN.md)，先用 `--enable-timers` 之外的
+默认安装让单元就位，确认参数与 secrets 后再逐个启用。

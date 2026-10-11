@@ -1,0 +1,162 @@
+#!/bin/sh
+
+set -eu
+umask 027
+
+exec 8>/run/lock/mosdns-binary-update.lock
+flock -n 8 || exit 0
+
+backup_root=/etc/mosdns/backups
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+: "${MIHOMO_MIXED_PORT:=7890}"
+proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+work_dir=$(mktemp -d /var/tmp/mosdns-binary.XXXXXX)
+test_pid=
+
+cleanup() {
+  if [ -n "$test_pid" ] && kill -0 "$test_pid" 2>/dev/null; then
+    kill -TERM "$test_pid" 2>/dev/null || true
+    wait "$test_pid" 2>/dev/null || true
+  fi
+  case "$work_dir" in
+    /var/tmp/mosdns-binary.*) rm -rf -- "$work_dir" ;;
+  esac
+}
+trap cleanup EXIT HUP INT TERM
+
+fetch() {
+  output=$1
+  url=$2
+  curl --fail --location --silent --show-error \
+    --proxy "$proxy" \
+    --connect-timeout 10 --max-time 180 \
+    --retry 2 --retry-delay 2 \
+    --proto '=https' --tlsv1.2 \
+    --output "$output" "$url"
+}
+
+fetch "$work_dir/release.json" \
+  https://api.github.com/repos/IrineSistiana/mosdns/releases/latest
+
+tag=$(jq -er 'select(.draft == false and .prerelease == false) | .tag_name' \
+  "$work_dir/release.json")
+case "$tag" in
+  v[0-9]*.[0-9]*.[0-9]*) ;;
+  *) exit 1 ;;
+esac
+
+current=$(/usr/local/bin/mosdns version | awk '{print $1}')
+case "$current" in
+  "$tag"|"$tag"-*)
+    [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ] || exit 0
+    ;;
+esac
+
+asset_url=$(jq -er \
+  '.assets[] | select(.name == "mosdns-linux-arm64.zip") | .browser_download_url' \
+  "$work_dir/release.json")
+asset_digest=$(jq -er \
+  '.assets[] | select(.name == "mosdns-linux-arm64.zip") | .digest' \
+  "$work_dir/release.json")
+case "$asset_url" in
+  https://github.com/IrineSistiana/mosdns/releases/download/*/mosdns-linux-arm64.zip)
+    ;;
+  *) exit 1 ;;
+esac
+case "$asset_digest" in
+  sha256:*) ;;
+  *) exit 1 ;;
+esac
+
+fetch "$work_dir/mosdns.zip" "$asset_url"
+expected_sha256=${asset_digest#sha256:}
+actual_sha256=$(sha256sum "$work_dir/mosdns.zip" | cut -d' ' -f1)
+[ "$actual_sha256" = "$expected_sha256" ]
+
+unzip -p "$work_dir/mosdns.zip" mosdns >"$work_dir/mosdns"
+chmod 0755 "$work_dir/mosdns"
+candidate_version=$("$work_dir/mosdns" version | awk '{print $1}')
+case "$candidate_version" in
+  "$tag"|"$tag"-*) ;;
+  *) exit 1 ;;
+esac
+
+test_dns_port=$((30000 + $$ % 9000))
+test_api_port=$((50000 + $$ % 9000))
+sed \
+  -e "s#127.0.0.1:5335#127.0.0.1:$test_dns_port#g" \
+  -e "s#127.0.0.1:9091#127.0.0.1:$test_api_port#g" \
+  /etc/mosdns/config.yaml >"$work_dir/config.yaml"
+
+"$work_dir/mosdns" start -c "$work_dir/config.yaml" -d /etc/mosdns \
+  >"$work_dir/validation.log" 2>&1 &
+test_pid=$!
+
+validated=false
+attempt=1
+while [ "$attempt" -le 40 ]; do
+  if ! kill -0 "$test_pid" 2>/dev/null; then
+    break
+  fi
+  cn_answer=$(dig @127.0.0.1 -p "$test_dns_port" baidu.com A \
+    +time=2 +tries=1 +short 2>/dev/null |
+    awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')
+  proxy_answer=$(dig @127.0.0.1 -p "$test_dns_port" openai.com A \
+    +time=2 +tries=1 +short 2>/dev/null |
+    awk '/^198\.1[89]\.[0-9]+\.[0-9]+$/ { print; exit }')
+  if [ -n "$cn_answer" ] && [ -n "$proxy_answer" ] &&
+     curl --fail --silent --max-time 1 \
+       "http://127.0.0.1:$test_api_port/metrics" >/dev/null 2>&1; then
+    validated=true
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.25
+done
+
+if [ "$validated" != true ]; then
+  logger -t mosdns-update-binary "candidate $tag failed validation"
+  sed -n '1,100p' "$work_dir/validation.log" >&2
+  exit 1
+fi
+
+kill -TERM "$test_pid"
+wait "$test_pid" || true
+test_pid=
+
+if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
+  logger -t mosdns-update-binary "mosdns $tag passed candidate validation"
+  exit 0
+fi
+
+timestamp=$(date +%Y%m%d-%H%M%S)
+backup_dir=$backup_root/binary-$timestamp
+install -d -o root -g root -m 755 "$backup_dir"
+cp -p /usr/local/bin/mosdns "$backup_dir/mosdns"
+
+install -o root -g root -m 755 "$work_dir/mosdns" /usr/local/bin/mosdns.new
+mv -f /usr/local/bin/mosdns.new /usr/local/bin/mosdns
+
+if systemctl restart mosdns.service &&
+   /usr/local/sbin/mosdns-healthcheck; then
+  logger -t mosdns-update-binary "mosdns updated from $current to $candidate_version"
+  find "$backup_root" -mindepth 1 -maxdepth 1 -type d -name 'binary-*' \
+    -printf '%T@ %p\n' | sort -nr | awk 'NR > 3 { print $2 }' |
+    while IFS= read -r old_backup; do
+      case "$old_backup" in
+        "$backup_root"/binary-*) rm -rf -- "$old_backup" ;;
+      esac
+    done
+  exit 0
+fi
+
+logger -t mosdns-update-binary "mosdns $tag failed after install; rolling back"
+install -o root -g root -m 755 "$backup_dir/mosdns" /usr/local/bin/mosdns
+systemctl restart mosdns.service || true
+/usr/local/sbin/mihomo-dns-mode auto || true
+exit 1

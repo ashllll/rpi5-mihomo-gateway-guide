@@ -1,0 +1,683 @@
+#!/usr/bin/python3
+
+"""Apply the local, service-specific policy overlay to a multi-source config."""
+
+from __future__ import annotations
+
+import copy
+import os
+import re
+import sys
+from pathlib import Path
+
+import yaml
+
+# Local capability manifest: service definitions plus the curated-pool node
+# labels.  It is deployment data and never part of this repository.
+CAPABILITIES_PATH = os.environ.get(
+    "MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml"
+)
+
+
+def ordered_existing(candidates: list[str], existing: set[str]) -> list[str]:
+    return [name for name in candidates if name in existing]
+
+
+def replace_group(groups: list[dict], name: str, spec: dict) -> None:
+    for index, group in enumerate(groups):
+        if group.get("name") == name:
+            groups[index] = {"name": name, **spec}
+            return
+    raise SystemExit(f"required proxy group is missing: {name}")
+
+
+def upsert_group(groups: list[dict], name: str, spec: dict) -> None:
+    for index, group in enumerate(groups):
+        if group.get("name") == name:
+            groups[index] = {"name": name, **spec}
+            return
+    groups.append({"name": name, **spec})
+
+
+def unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def load_capabilities() -> dict:
+    path = Path(CAPABILITIES_PATH)
+    if not path.is_file():
+        return {}
+    with path.open(encoding="utf-8") as stream:
+        value = yaml.safe_load(stream)
+    return value if isinstance(value, dict) else {}
+
+
+def matches_any(name: str, patterns: list[str]) -> bool:
+    return any(re.search(pattern, name) for pattern in patterns)
+
+
+def overlay_labels(capabilities: dict, key: str) -> list[str]:
+    """Read an ordered node-label list from the deployment manifest.
+
+    Node labels are subscription data: they live in the local manifest
+    (/etc/mihomo/adaptive/capabilities.yaml, section ``overlay``) and are never
+    part of this repository.  Missing or empty lists are valid and simply leave
+    the corresponding curated pool empty.
+    """
+    overlay = capabilities.get("overlay", {})
+    if not isinstance(overlay, dict):
+        return []
+    value = overlay.get(key, [])
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def bulk_capable_nodes(nodes: set[str], capabilities: dict) -> tuple[list[str], list[str], list[str]]:
+    bulk = capabilities.get("roles", {}).get("bulk_download", {})
+    if not isinstance(bulk, dict):
+        bulk = {}
+    stt_prefix = str(bulk.get("stt_prefix", "STT | "))
+    bywave_prefix = str(bulk.get("bywave_prefix", "ByWave | "))
+    stt_nodes = sorted(name for name in nodes if name.startswith(stt_prefix))
+    bywave_nodes = sorted(name for name in nodes if name.startswith(bywave_prefix))
+
+    glados = [
+        name
+        for name in nodes
+        if not name.startswith((stt_prefix, bywave_prefix, "BWB | ", "InfraAPI | "))
+        and name not in {"DIRECT", "REJECT"}
+    ]
+    glados_patterns = bulk.get("glados_patterns", [])
+    glados_excludes = bulk.get("glados_exclude_patterns", [])
+    if not isinstance(glados_patterns, list):
+        glados_patterns = []
+    if not isinstance(glados_excludes, list):
+        glados_excludes = []
+    glados_nodes = sorted(
+        name
+        for name in glados
+        if matches_any(name, [str(pattern) for pattern in glados_patterns])
+        and not matches_any(name, [str(pattern) for pattern in glados_excludes])
+    )
+    explicit = bulk.get("glados_explicit_allow", [])
+    if isinstance(explicit, list):
+        glados_nodes = unique([*glados_nodes, *[name for name in explicit if name in nodes]])
+    return stt_nodes, bywave_nodes, glados_nodes
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: mihomo-policy-overlay INPUT OUTPUT")
+
+    source, destination = sys.argv[1:]
+    with open(source, encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if not isinstance(config, dict):
+        raise SystemExit("configuration root must be a mapping")
+
+    proxies = config.get("proxies")
+    groups = copy.deepcopy(config.get("proxy-groups"))
+    rules = config.get("rules")
+    if not isinstance(proxies, list) or not isinstance(groups, list):
+        raise SystemExit("configuration is missing proxies or proxy-groups")
+    if not isinstance(rules, list):
+        raise SystemExit("configuration is missing rules")
+
+    nodes = {
+        proxy.get("name")
+        for proxy in proxies
+        if isinstance(proxy, dict) and proxy.get("name")
+    }
+    capabilities = load_capabilities()
+    secondary_nodes = sorted(name for name in nodes if name.startswith("BWB | "))
+    infra_nodes = sorted(name for name in nodes if name.startswith("InfraAPI | "))
+    non_glados_nodes = unique([*infra_nodes, *secondary_nodes])
+    stt_download_nodes, bywave_download_nodes, glados_download_nodes = bulk_capable_nodes(
+        nodes, capabilities
+    )
+    # STT and ByWave are confirmed bulk-capable by the user.  GLaDOS enters
+    # bulk pools only through the data-driven capability manifest, which is
+    # deliberately narrower than the complete GLaDOS node set.
+    stt_bulk_nodes = stt_download_nodes
+    bywave_model_nodes = bywave_download_nodes
+    bywave_github_nodes = bywave_download_nodes
+    stt_model_nodes = stt_bulk_nodes
+    stt_github_nodes = stt_bulk_nodes
+    glados_model_nodes = glados_download_nodes
+    glados_github_nodes = glados_download_nodes
+    model_download_nodes = unique([*bywave_model_nodes, *stt_model_nodes, *glados_model_nodes])
+    github_download_nodes = unique([*bywave_github_nodes, *stt_github_nodes, *glados_github_nodes])
+    github_control_nodes = unique([*bywave_github_nodes, *stt_github_nodes])
+
+    # Media, AI and default pools keep a deployment-defined preference order
+    # (`overlay.media_nodes`, `overlay.ai_nodes`, `overlay.auto_nodes`,
+    # `overlay.developer_nodes`, `overlay.tw_fixed_nodes`).  Labels that the
+    # subscription no longer publishes are dropped; empty lists are valid.
+    media_nodes = ordered_existing(overlay_labels(capabilities, "media_nodes"), nodes)
+    streaming_nodes = media_nodes
+    social_nodes = media_nodes
+    telegram_nodes = media_nodes
+
+    ai_group = next(
+        (group for group in groups if group.get("name") == "Research + AI"),
+        None,
+    )
+    ai_source_nodes = [
+        name
+        for name in (ai_group or {}).get("proxies", [])
+        if name in nodes
+        and not str(name).startswith(("STT | ", "ByWave | ", "BWB | ", "InfraAPI | "))
+    ]
+    # Preference order for the AI pool: the deployment lists the nodes that
+    # passed its latest real OpenAI probe first and keeps the remaining
+    # subscription nodes as automatic fallbacks.  The ordering is adaptive
+    # preference, never a permanent deletion of subscription nodes.
+    ai_nodes = ordered_existing(overlay_labels(capabilities, "ai_nodes"), nodes)
+    ai_nodes = unique([*ai_nodes, *ai_source_nodes])
+
+    auto_nodes = ordered_existing(
+        [
+            *overlay_labels(capabilities, "auto_nodes"),
+            *secondary_nodes,
+            *infra_nodes,
+        ],
+        nodes,
+    )
+    developer_nodes = ordered_existing(
+        [
+            *overlay_labels(capabilities, "developer_nodes"),
+            *secondary_nodes,
+            *infra_nodes,
+        ],
+        nodes,
+    )
+    tw_fixed_nodes = ordered_existing(
+        overlay_labels(capabilities, "tw_fixed_nodes"),
+        nodes,
+    )
+    download_provider_groups = ["STT Download", "ByWave Download"]
+    model_provider_groups = ["STT Download", "ByWave Download"]
+    github_provider_groups = ["STT GitHub Download", "ByWave GitHub Download"]
+    if glados_download_nodes:
+        download_provider_groups.append("GLaDOS Download")
+        model_provider_groups.append("GLaDOS Download")
+        github_provider_groups.append("GLaDOS GitHub Download")
+    for name, candidates in (
+        ("Auto", auto_nodes),
+        ("Developer", developer_nodes),
+        ("Streaming", streaming_nodes),
+        ("Social", social_nodes),
+        ("Telegram", telegram_nodes),
+        ("Research + AI", ai_nodes),
+        ("Download", download_provider_groups),
+        ("STT Download", stt_model_nodes),
+        ("ByWave Download", bywave_model_nodes),
+        ("STT GitHub Download", stt_github_nodes),
+        ("ByWave GitHub Download", bywave_github_nodes),
+        ("GitHub Control", github_control_nodes),
+        ("GitHub Download", github_provider_groups),
+        ("Model Download", model_provider_groups),
+        ("TW Fixed IP", tw_fixed_nodes),
+    ):
+        if not candidates:
+            raise SystemExit(f"no usable subscription nodes for {name}")
+
+    replace_group(
+        groups,
+        "Auto",
+        {
+            "type": "url-test",
+            "proxies": auto_nodes,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": 180,
+            "tolerance": 100,
+            "lazy": True,
+            "timeout": 5000,
+            "max-failed-times": 2,
+            "expected-status": 204,
+        },
+    )
+    replace_group(
+        groups,
+        "Developer",
+        {
+            "type": "url-test",
+            "proxies": developer_nodes,
+            "url": "https://github.com/favicon.ico",
+            "interval": 180,
+            "tolerance": 80,
+            "lazy": True,
+            "timeout": 6000,
+            "max-failed-times": 2,
+            "expected-status": 200,
+        },
+    )
+    replace_group(
+        groups,
+        "Research + AI",
+        {
+            "type": "fallback",
+            "proxies": ai_nodes,
+            "url": "https://api.openai.com/v1/models",
+            "interval": 180,
+            "lazy": False,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": 401,
+        },
+    )
+    replace_group(
+        groups,
+        "Streaming",
+        {
+            "type": "url-test",
+            "proxies": streaming_nodes,
+            "url": "https://www.youtube.com/generate_204",
+            "interval": 300,
+            "tolerance": 120,
+            "lazy": False,
+            "timeout": 6000,
+            "max-failed-times": 2,
+            "expected-status": 204,
+        },
+    )
+    upsert_group(
+        groups,
+        "Social",
+        {
+            "type": "fallback",
+            "proxies": social_nodes,
+            "url": "https://x.com/robots.txt",
+            "interval": 120,
+            "lazy": False,
+            "timeout": 7000,
+            "max-failed-times": 2,
+            "expected-status": 200,
+        },
+    )
+    upsert_group(
+        groups,
+        "Telegram",
+        {
+            "type": "fallback",
+            "proxies": telegram_nodes,
+            "url": "https://core.telegram.org/",
+            "interval": 120,
+            "lazy": False,
+            "timeout": 7000,
+            "max-failed-times": 2,
+            "expected-status": 200,
+        },
+    )
+    replace_group(
+        groups,
+        "TW Fixed IP",
+        {
+            "type": "fallback",
+            "proxies": tw_fixed_nodes,
+            "url": "https://api.openai.com/v1/models",
+            "interval": 180,
+            "lazy": False,
+            "timeout": 6000,
+            "max-failed-times": 2,
+            "expected-status": 401,
+        },
+    )
+
+    # Use small, service-specific probes instead of a generic CDN probe. The
+    # probe bodies are intentionally small. GLaDOS nodes enter bulk groups
+    # only when the capability manifest explicitly marks them as eligible.
+    github_download_probe = (
+        "https://codeload.github.com/github/gitignore/zip/refs/heads/main"
+    )
+    model_download_probe = "https://huggingface.co/gpt2/resolve/main/config.json"
+
+    # Each provider keeps its own URLTest pool. The top-level groups rotate
+    # between provider pools, so STT and ByWave are both used while one large
+    # connection remains on one selected provider/node.
+    upsert_group(
+        groups,
+        "STT Download",
+        {
+            "type": "url-test",
+            "proxies": stt_model_nodes,
+            "url": model_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "tolerance": 120,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    upsert_group(
+        groups,
+        "ByWave Download",
+        {
+            "type": "url-test",
+            "proxies": bywave_model_nodes,
+            "url": model_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "tolerance": 120,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    if glados_download_nodes:
+        upsert_group(
+            groups,
+            "GLaDOS Download",
+            {
+                "type": "url-test",
+                "proxies": glados_download_nodes,
+                "url": model_download_probe,
+                "interval": 600,
+                "lazy": False,
+                "tolerance": 150,
+                "timeout": 8000,
+                "max-failed-times": 2,
+                "expected-status": "200/302",
+            },
+        )
+    upsert_group(
+        groups,
+        "STT GitHub Download",
+        {
+            "type": "url-test",
+            "proxies": stt_github_nodes,
+            "url": github_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "tolerance": 120,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    upsert_group(
+        groups,
+        "ByWave GitHub Download",
+        {
+            "type": "url-test",
+            "proxies": bywave_github_nodes,
+            "url": github_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "tolerance": 120,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    if glados_github_nodes:
+        upsert_group(
+            groups,
+            "GLaDOS GitHub Download",
+            {
+                "type": "url-test",
+                "proxies": glados_github_nodes,
+                "url": github_download_probe,
+                "interval": 600,
+                "lazy": False,
+                "tolerance": 150,
+                "timeout": 8000,
+                "max-failed-times": 2,
+                "expected-status": "200/302",
+            },
+        )
+    upsert_group(
+        groups,
+        "GitHub Control",
+        {
+            "type": "fallback",
+            "proxies": github_control_nodes,
+            "url": "https://github.com/robots.txt",
+            "interval": 300,
+            "lazy": False,
+            "timeout": 6000,
+            "max-failed-times": 1,
+            "expected-status": 200,
+        },
+    )
+    upsert_group(
+        groups,
+        "GitHub Download",
+        {
+            "type": "load-balance",
+            "proxies": github_provider_groups,
+            "strategy": "round-robin",
+            "url": github_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    upsert_group(
+        groups,
+        "Model Download",
+        {
+            "type": "load-balance",
+            "proxies": model_provider_groups,
+            "strategy": "round-robin",
+            "url": model_download_probe,
+            "interval": 600,
+            "lazy": False,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": "200/302",
+        },
+    )
+    upsert_group(
+        groups,
+        "Download",
+        {
+            "type": "load-balance",
+            "proxies": download_provider_groups,
+            "strategy": "round-robin",
+            "url": "https://registry-1.docker.io/v2/",
+            "interval": 600,
+            "lazy": False,
+            "timeout": 8000,
+            "max-failed-times": 2,
+            "expected-status": 401,
+        },
+    )
+
+    if secondary_nodes:
+        upsert_group(
+            groups,
+            "BWB Backup",
+            {
+                "type": "fallback",
+                "proxies": secondary_nodes,
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 180,
+                "lazy": False,
+                "timeout": 6000,
+                "max-failed-times": 2,
+                "expected-status": 204,
+            },
+        )
+        for group in groups:
+            if group.get("name") != "Default Proxy":
+                continue
+            members = group.get("proxies")
+            if not isinstance(members, list):
+                raise SystemExit("Default Proxy does not contain a proxy list")
+            members = [member for member in members if member != "BWB Backup"]
+            insert_at = members.index("Auto") + 1 if "Auto" in members else 0
+            members.insert(insert_at, "BWB Backup")
+            group["proxies"] = members
+            break
+
+    if infra_nodes:
+        upsert_group(
+            groups,
+            "InfraAPI Backup",
+            {
+                "type": "fallback",
+                "proxies": infra_nodes,
+                "url": "https://www.gstatic.com/generate_204",
+                "interval": 300,
+                "lazy": True,
+                "timeout": 6000,
+                "max-failed-times": 2,
+                "expected-status": 204,
+            },
+        )
+        for group in groups:
+            if group.get("name") != "Default Proxy":
+                continue
+            members = group.get("proxies")
+            if not isinstance(members, list):
+                raise SystemExit("Default Proxy does not contain a proxy list")
+            members = [member for member in members if member != "InfraAPI Backup"]
+            insert_at = members.index("Auto") + 1 if "Auto" in members else 0
+            members.insert(insert_at, "InfraAPI Backup")
+            group["proxies"] = members
+            break
+
+    direct_prefix = [
+        "RULE-SET,private-ip,DIRECT,no-resolve",
+        "RULE-SET,game-domain,DIRECT",
+        "RULE-SET,game-cn-domain,DIRECT",
+        "RULE-SET,steam-domain,DIRECT",
+        "RULE-SET,cn-domain,DIRECT",
+        "RULE-SET,cn-ip,DIRECT,no-resolve",
+    ]
+    download_overrides = [
+        # GitHub release assets and container images, while normal browsing
+        # continues to use the latency-optimized Developer group.
+        "DOMAIN,release-assets.githubusercontent.com,GitHub Download",
+        "DOMAIN,objects.githubusercontent.com,GitHub Download",
+        "DOMAIN,codeload.github.com,GitHub Download",
+        "DOMAIN,github-releases.githubusercontent.com,GitHub Download",
+        "DOMAIN,pkg-containers.githubusercontent.com,GitHub Download",
+        "DOMAIN,ghcr.io,Download",
+        "DOMAIN,registry-1.docker.io,Download",
+        "DOMAIN-SUFFIX,production.cloudflare.docker.com,Download",
+        # Model, dataset, and AI asset downloads.
+        "DOMAIN-SUFFIX,huggingface.co,Model Download",
+        "DOMAIN-SUFFIX,hf.co,Model Download",
+        "DOMAIN-SUFFIX,cdn-lfs.huggingface.co,Model Download",
+        "DOMAIN-SUFFIX,cdn-lfs-us-1.huggingface.co,Model Download",
+        "DOMAIN-SUFFIX,cdn-lfs-eu-1.huggingface.co,Model Download",
+        "DOMAIN-SUFFIX,civitai.com,Model Download",
+        "DOMAIN-SUFFIX,replicate.delivery,Model Download",
+        "DOMAIN-SUFFIX,kaggle.com,Model Download",
+        "DOMAIN-SUFFIX,download.pytorch.org,Model Download",
+        "DOMAIN-SUFFIX,download.tensorflow.org,Model Download",
+        "DOMAIN-SUFFIX,ngc.nvidia.com,Model Download",
+        "DOMAIN-SUFFIX,ollama.com,Model Download",
+        "DOMAIN-SUFFIX,registry.ollama.ai,Model Download",
+        "DOMAIN-SUFFIX,storage.googleapis.com,Model Download",
+        "DOMAIN-SUFFIX,s3.amazonaws.com,Model Download",
+        "DOMAIN,cdn.openai.com,Model Download",
+        "DOMAIN,files.oaiusercontent.com,Model Download",
+        # Operating-system and development-tool installers/updates.
+        "DOMAIN-SUFFIX,download.microsoft.com,Download",
+        "DOMAIN-SUFFIX,dl.delivery.mp.microsoft.com,Download",
+        "DOMAIN-SUFFIX,vscode.download.prss.microsoft.com,Download",
+        "DOMAIN-SUFFIX,swdownload.apple.com,Download",
+        "DOMAIN-SUFFIX,updates.cdn-apple.com,Download",
+        "DOMAIN-SUFFIX,download.jetbrains.com,Download",
+        "DOMAIN-SUFFIX,download.mozilla.org,Download",
+        "DOMAIN-SUFFIX,adobedownloads.edgesuite.net,Download",
+        "DOMAIN-SUFFIX,ardownload.adobe.com,Download",
+    ]
+    service_overrides = [
+        # AI services keep a sticky, fixed-IP path.
+        "DOMAIN-SUFFIX,openai.com,Research + AI",
+        "DOMAIN-SUFFIX,chatgpt.com,Research + AI",
+        "DOMAIN-SUFFIX,oaistatic.com,Research + AI",
+        "DOMAIN-SUFFIX,oaiusercontent.com,Research + AI",
+        "DOMAIN-SUFFIX,anthropic.com,Research + AI",
+        "DOMAIN-SUFFIX,claude.ai,Research + AI",
+        "DOMAIN-SUFFIX,gemini.google.com,Research + AI",
+        "DOMAIN-SUFFIX,generativelanguage.googleapis.com,Research + AI",
+        "DOMAIN-SUFFIX,aistudio.google.com,Research + AI",
+        "DOMAIN-SUFFIX,ai.google.dev,Research + AI",
+        "DOMAIN-SUFFIX,notebooklm.google.com,Research + AI",
+        "DOMAIN-SUFFIX,scholar.google.com,Research + AI",
+        "DOMAIN-SUFFIX,perplexity.ai,Research + AI",
+        "DOMAIN-SUFFIX,x.ai,Research + AI",
+        "DOMAIN-SUFFIX,grok.com,Research + AI",
+        "DOMAIN-SUFFIX,cursor.com,Research + AI",
+        "DOMAIN-SUFFIX,cursor.sh,Research + AI",
+        "DOMAIN-SUFFIX,cursorapi.com,Research + AI",
+        # Streaming gets its own availability-first group.
+        "DOMAIN-SUFFIX,youtube.com,Streaming",
+        "DOMAIN-SUFFIX,ytimg.com,Streaming",
+        "DOMAIN-SUFFIX,googlevideo.com,Streaming",
+        "DOMAIN-SUFFIX,youtu.be,Streaming",
+        "DOMAIN-SUFFIX,youtube-nocookie.com,Streaming",
+        # Social traffic uses real-service probes instead of the generic
+        # latency probe, which can select a node that is fast only for CDN
+        # health checks but slow for Telegram/X.
+        "DOMAIN-SUFFIX,twitter.com,Social",
+        "DOMAIN-SUFFIX,x.com,Social",
+        "DOMAIN-SUFFIX,twimg.com,Social",
+        "DOMAIN-SUFFIX,t.co,Social",
+        "DOMAIN-SUFFIX,twittercdn.com,Social",
+        "DOMAIN-SUFFIX,telegram.org,Telegram",
+        "DOMAIN-SUFFIX,t.me,Telegram",
+        "DOMAIN-SUFFIX,telegram.me,Telegram",
+        "DOMAIN-SUFFIX,telegra.ph,Telegram",
+        "DOMAIN-SUFFIX,telesco.pe,Telegram",
+        "DOMAIN-KEYWORD,telegram,Telegram",
+        # Developer traffic is tested against GitHub itself.
+        "DOMAIN,github.com,GitHub Control",
+        "DOMAIN,api.github.com,GitHub Control",
+        "DOMAIN,alive.github.com,GitHub Control",
+        "DOMAIN-SUFFIX,github.com,GitHub Download",
+        "DOMAIN-SUFFIX,github.io,Developer",
+        "DOMAIN-SUFFIX,githubusercontent.com,GitHub Download",
+        "DOMAIN-SUFFIX,githubassets.com,GitHub Download",
+        "DOMAIN-SUFFIX,ghcr.io,Developer",
+        "DOMAIN-SUFFIX,github.dev,Developer",
+        # Generic Google assets should use the fast default path, not AI fixed IP.
+        "DOMAIN-SUFFIX,gmail.com,Default Proxy",
+        "DOMAIN-SUFFIX,googlemail.com,Default Proxy",
+        "DOMAIN-KEYWORD,google,Default Proxy",
+    ]
+
+    prefix_set = set(direct_prefix)
+    normalized_rules = [
+        *direct_prefix,
+        *download_overrides,
+        *service_overrides,
+        *[
+            rule
+            for rule in rules
+            if isinstance(rule, str)
+            and rule not in prefix_set
+            and not rule.startswith("PROCESS-")
+        ],
+    ]
+
+    config["proxy-groups"] = groups
+    config["rules"] = unique(normalized_rules)
+    with open(destination, "w", encoding="utf-8") as stream:
+        yaml.safe_dump(
+            config,
+            stream,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+            width=4096,
+        )
+
+
+if __name__ == "__main__":
+    main()

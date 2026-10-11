@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -eu
+
+systemctl enable --now mosdns.service
+systemctl enable --now \
+  mosdns-healthcheck.timer \
+  mosdns-rules-update.timer \
+  mosdns-binary-update.timer
+/usr/local/sbin/mihomo-dns-mode auto
+
+echo "Automatic mosdns mode and maintenance are active."

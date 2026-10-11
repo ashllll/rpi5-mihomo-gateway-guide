@@ -1,0 +1,43 @@
+flowchart TB
+  accTitle: 已发布的自动化与自愈层
+  accDescr: 本仓库发布 automation/ 下的生产自动化源码。systemd 定时器按固定周期做连通性探测、影子评分、规则与订阅更新；受门禁的执行器按 采集分类指标 → EWMA 评分 → 能力过滤 → 连续失败门槛 → 影子决策 → 保底候选池检查 → 备份候选配置 → 语法验证 → 有限应用 → 分类业务验证 → 保留或回滚 的顺序推进，上游故障时暂停节点惩罚，冷却后才恢复。DNS 模式由 mihomo.service、mosdns.service 与 mosdns-healthcheck 驱动，在 auto / mosdns / mihomo / direct 之间切换，写回 dnsmasq 上游并在失败时回退上一个模式；更新器先验证候选并保留回滚点，订阅更新失败时保留现有节点。节点名、订阅链接、凭据与完整规则数据不发布。
+  subgraph timers["定时器 · systemd"]
+    hc["mihomo-healthcheck<br/>每 2 分钟 · 连通性探测与恢复"]
+    score["mihomo-adaptive-score<br/>每 5 分钟 · 采集分类指标并评分"]
+    apply["mihomo-adaptive-apply<br/>每 5 分钟 · 受门禁的有限应用"]
+    sub["mihomo-subscription-update<br/>每日 04:30 · 随机延迟 15 分钟"]
+    rules["mihomo-rules-update / mosdns-rules-update<br/>每日 04:15 / 04:20<br/>随机延迟 1 小时 / 30 分钟"]
+    binary["mosdns-binary-update<br/>每周日 05:10 · 稳定版"]
+    probe["mihomo.service / mosdns.service<br/>mosdns-healthcheck · 每 1 分钟<br/>OnBootSec=30s"]
+    dnsmode["mihomo-dns-mode<br/>auto 依次尝试 mosdns → mihomo → direct"]
+  end
+  subgraph actuator["受门禁的隔离执行器"]
+    collect["采集分类指标"]
+    ewma["EWMA 评分<br/>上游故障时暂停惩罚"]
+    filter["能力过滤"]
+    streak["连续失败门槛"]
+    shadow["影子决策"]
+    pool["保底候选池检查"]
+    backup["备份候选配置"]
+    syntax["语法验证"]
+    limited["有限应用"]
+    verify["分类业务验证<br/>保留或回滚"]
+  end
+  subgraph updated["更新与 DNS 自愈"]
+    updater["订阅 / 规则 / 二进制更新器<br/>先验证候选 · 保留回滚点"]
+    keep["订阅更新失败<br/>保留现有节点"]
+    write["写入 /etc/dnsmasq-upstreams.conf<br/>reload dnsmasq · 失败回退上一个模式"]
+  end
+  collect --> ewma --> filter --> streak --> shadow --> pool --> backup --> syntax --> limited --> verify
+  hc --> collect
+  score --> collect
+  apply --> limited
+  sub --> updater
+  rules --> updater
+  binary --> updater
+  updater --> keep
+  hc --> dnsmode
+  probe --> dnsmode
+  dnsmode --> write
+  write -. "切换失败" .-> dnsmode
+  updater -. "共用维护协调 · 不覆盖正在应用的配置" .-> verify

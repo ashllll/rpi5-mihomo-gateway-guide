@@ -1,0 +1,68 @@
+version: 1
+
+# This file is policy data, not a subscription.  Subscription updates keep
+# the original source rules; the local overlay reads this manifest to decide
+# which nodes are eligible for sustained downloads.
+roles:
+  bulk_download:
+    stt_prefix: "STT | "
+    bywave_prefix: "ByWave | "
+    # Only explicit GLaDOS download/no-limit labels are admitted.  Ordinary
+    # AI, fixed-IP, NF and X-series nodes remain outside bulk pools.
+    glados_patterns:
+      - '(?i)(^|[- _|])D1([-. _|]|$)'
+      - '(?i)(^|[- _|])D2([-. _|]|$)'
+      - '(?i)(^|[- _|])download([-. _|]|$)'
+      - '(?i)(^|[- _|])no[- _]?limit([-. _|]|$)'
+    glados_exclude_patterns:
+      - '(?i)(^|[- _|])X[0-9]'
+      - '(?i)NF'
+      - '(?i)Netflix'
+    # Add exact names here only after confirming their capability in the
+    # provider console.  This keeps renamed dedicated nodes data-driven.
+    glados_explicit_allow: []
+
+services:
+  ai:
+    groups: ["Research + AI"]
+    url: "https://api.openai.com/v1/models"
+    sample_limit: 8
+  streaming:
+    groups: ["Streaming"]
+    url: "https://www.youtube.com/generate_204"
+    sample_limit: 8
+  social:
+    groups: ["Social"]
+    url: "https://x.com/robots.txt"
+    sample_limit: 8
+  telegram:
+    groups: ["Telegram"]
+    url: "https://core.telegram.org/"
+    sample_limit: 8
+  github_control:
+    groups: ["GitHub Control"]
+    url: "https://github.com/github/gitignore.git/info/refs?service=git-upload-pack"
+    sample_limit: 8
+  github_download:
+    groups: ["GitHub Download"]
+    url: "https://codeload.github.com/github/gitignore/zip/refs/heads/main"
+    sample_limit: 8
+  model_download:
+    groups: ["Model Download"]
+    url: "https://huggingface.co/gpt2/resolve/main/config.json"
+    sample_limit: 8
+
+# ---------------------------------------------------------------------------
+# Curated-pool preferences used by mihomo-policy-overlay.  Node labels are
+# subscription data: they belong to the local deployment manifest and are never
+# committed to this repository.  Fill in the labels your own subscription
+# publishes; empty lists are valid here and leave the curated pool empty, which
+# makes the overlay refuse to write a config instead of publishing a group with
+# no usable members.
+# ---------------------------------------------------------------------------
+overlay:
+  media_nodes: []
+  ai_nodes: []
+  auto_nodes: []
+  developer_nodes: []
+  tw_fixed_nodes: []

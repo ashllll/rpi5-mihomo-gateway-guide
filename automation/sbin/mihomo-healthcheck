@@ -1,0 +1,210 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+exec 8>/run/lock/mihomo-maintenance.lock
+if ! flock -n 8; then
+  exit 0
+fi
+
+state_dir=/run/mihomo-healthcheck
+status_file=$state_dir/status
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+: "${MIHOMO_MIXED_PORT:=7890}"
+: "${MIHOMO_CONTROLLER_PORT:=9090}"
+proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+controller=http://${GATEWAY_LAN_IP}:${MIHOMO_CONTROLLER_PORT}
+secret_file=/etc/mihomo/secrets/dashboard.secret
+
+install -d -m 700 "$state_dir"
+
+http_code() {
+  curl --silent --show-error --output /dev/null \
+    --connect-timeout 5 --max-time 15 --write-out '%{http_code}' "$@" \
+    2>/dev/null || true
+}
+
+direct_is_healthy() {
+  code=$(http_code --noproxy '*' https://www.baidu.com/)
+  case "$code" in
+    2??|3??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+probe_exact() {
+  expected=$1
+  url=$2
+  [ "$(http_code --proxy "$proxy" "$url")" = "$expected" ]
+}
+
+probe_success() {
+  code=$(http_code --proxy "$proxy" "$1")
+  case "$code" in
+    2??|3??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+probe_ai() {
+  successes=0
+  openai_ok=false
+  for target in \
+    https://api.openai.com/v1/models \
+    https://claude.ai/ \
+    https://gemini.google.com/
+  do
+    code=$(http_code --proxy "$proxy" "$target")
+    case "$code" in
+      2??|3??|401|403)
+        successes=$((successes + 1))
+        [ "$target" = https://api.openai.com/v1/models ] && openai_ok=true
+        ;;
+    esac
+  done
+  [ "$openai_ok" = true ] && [ "$successes" -ge 2 ]
+}
+
+read_failures() {
+  name=$1
+  file=$state_dir/$name.failures
+  if [ -s "$file" ]; then
+    value=$(cat "$file")
+    case "$value" in
+      *[!0-9]*|'') printf '0\n' ;;
+      *) printf '%s\n' "$value" ;;
+    esac
+  else
+    printf '0\n'
+  fi
+}
+
+set_failures() {
+  printf '%s\n' "$2" >"$state_dir/$1.failures"
+}
+
+trigger_group_check() {
+  group=$1
+  url=$2
+  [ -s "$secret_file" ] || return 0
+  secret=$(cat "$secret_file")
+  encoded_group=$(printf %s "$group" | jq -sRr @uri)
+  encoded_url=$(printf %s "$url" | jq -sRr @uri)
+  curl --fail --silent --output /dev/null \
+    --connect-timeout 3 --max-time 12 \
+    -H "Authorization: Bearer $secret" \
+    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=6000" \
+    2>/dev/null || true
+}
+
+if ! systemctl is-active --quiet mihomo; then
+  logger -t mihomo-healthcheck "Mihomo is inactive; requesting restart"
+  systemctl restart mihomo
+  sleep 8
+fi
+
+/usr/local/sbin/mihomo-reconcile-policy >/dev/null 2>&1 || true
+
+if direct_is_healthy; then
+  direct=true
+else
+  direct=false
+fi
+
+default_ok=false
+developer_ok=false
+streaming_ok=false
+ai_ok=false
+download_ok=false
+probe_exact 204 https://www.gstatic.com/generate_204 && default_ok=true
+probe_success 'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack' && developer_ok=true
+probe_exact 204 https://www.youtube.com/generate_204 && streaming_ok=true
+probe_ai && ai_ok=true
+if probe_exact 401 https://registry-1.docker.io/v2/ && \
+  probe_success https://codeload.github.com/github/gitignore/zip/refs/heads/main && \
+  probe_success https://huggingface.co/gpt2/resolve/main/config.json; then
+  download_ok=true
+fi
+
+failed_categories=0
+max_failures=0
+actions=none
+
+process_category() {
+  name=$1
+  healthy=$2
+  group=$3
+  url=$4
+  failures=$(read_failures "$name")
+
+  if [ "$healthy" = true ]; then
+    if [ "$failures" -gt 0 ]; then
+      logger -t mihomo-healthcheck \
+        "$name path recovered after $failures consecutive failures"
+    fi
+    set_failures "$name" 0
+    return
+  fi
+
+  failed_categories=$((failed_categories + 1))
+  if [ "$direct" != true ]; then
+    set_failures "$name" 0
+    return
+  fi
+
+  failures=$((failures + 1))
+  set_failures "$name" "$failures"
+  [ "$failures" -le "$max_failures" ] || max_failures=$failures
+
+  if [ "$failures" -ge 2 ]; then
+    trigger_group_check "$group" "$url"
+    actions="group-check"
+  fi
+}
+
+process_category default "$default_ok" Auto https://www.gstatic.com/generate_204
+process_category developer "$developer_ok" "GitHub Control" \
+  'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack'
+process_category streaming "$streaming_ok" Streaming https://www.youtube.com/generate_204
+process_category ai "$ai_ok" "Research + AI" https://api.openai.com/v1/models
+process_category download "$download_ok" Download \
+  https://codeload.github.com/github/gitignore/zip/refs/heads/main
+
+if [ "$direct" = true ] && [ "$failed_categories" -gt 0 ]; then
+  if [ "$max_failures" -eq 3 ]; then
+    actions="reload"
+    logger -t mihomo-healthcheck \
+      "A service path remains unhealthy after group retest; reloading Mihomo"
+    systemctl reload mihomo
+  elif [ "$max_failures" -ge 5 ] && [ "$failed_categories" -ge 2 ]; then
+    actions="restart"
+    logger -t mihomo-healthcheck \
+      "Multiple service paths remain unhealthy; restarting Mihomo"
+    systemctl restart mihomo
+  fi
+fi
+
+if [ "$direct" != true ]; then
+  mode=upstream-down
+  actions="wait"
+elif [ "$failed_categories" -eq 0 ]; then
+  mode=healthy
+else
+  mode=degraded
+fi
+
+printf '%s mode=%s direct=%s default=%s developer=%s streaming=%s ai=%s download=%s failed_categories=%s max_failures=%s action=%s\n' \
+  "$(date -Is)" "$mode" "$direct" "$default_ok" "$developer_ok" \
+  "$streaming_ok" "$ai_ok" "$download_ok" "$failed_categories" "$max_failures" "$actions" \
+  >"$status_file"
+
+if [ "$failed_categories" -gt 0 ]; then
+  logger -t mihomo-healthcheck \
+    "Service health: default=$default_ok developer=$developer_ok streaming=$streaming_ok ai=$ai_ok download=$download_ok action=$actions"
+fi

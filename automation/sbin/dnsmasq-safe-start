@@ -1,0 +1,19 @@
+#!/bin/sh
+
+set -eu
+umask 022
+
+source_file=/etc/mihomo/dnsmasq-upstreams.direct
+active=/etc/dnsmasq-upstreams.conf
+candidate=$(mktemp /etc/.dnsmasq-upstreams.boot.XXXXXX)
+
+cleanup() {
+  rm -f "$candidate"
+}
+trap cleanup EXIT HUP INT TERM
+
+install -o root -g root -m 644 "$source_file" "$candidate"
+mv -f "$candidate" "$active"
+/usr/sbin/dnsmasq --test >/dev/null
+
+logger -t dnsmasq-safe-start "Boot-safe direct DNS configured"

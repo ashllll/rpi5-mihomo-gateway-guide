@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily mosdns routing-data update
+
+[Timer]
+OnCalendar=*-*-* 04:20:00
+RandomizedDelaySec=30min
+Persistent=true
+Unit=mosdns-rules-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -eu
+umask 027
+
+exec 8>/run/lock/mosdns-healthcheck.lock
+flock -n 8 || exit 0
+
+state_dir=/run/mosdns-healthcheck
+status_file=$state_dir/status
+install -d -m 755 "$state_dir"
+
+is_fake_ip() {
+  case "$1" in
+    198.18.*|198.19.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dns_a_answer() {
+  server=$1
+  port=$2
+  domain=$3
+  dig @"$server" -p "$port" "$domain" A +time=2 +tries=1 +short 2>/dev/null |
+    awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }'
+}
+
+check_mosdns() {
+  cn_answer=$(dns_a_answer 127.0.0.1 5335 baidu.com || true)
+  proxy_answer=$(dns_a_answer 127.0.0.1 5335 openai.com || true)
+  metrics_ok=false
+  curl --fail --silent --max-time 2 http://127.0.0.1:9091/metrics >/dev/null 2>&1 &&
+    metrics_ok=true
+  [ -n "$cn_answer" ] &&
+    ! is_fake_ip "$cn_answer" &&
+    [ -n "$proxy_answer" ] &&
+    is_fake_ip "$proxy_answer" &&
+    [ "$metrics_ok" = true ]
+}
+
+action=none
+if check_mosdns; then
+  mode=healthy
+else
+  action=restart
+  logger -t mosdns-healthcheck "mosdns probe failed; restarting service"
+  systemctl restart mosdns.service || true
+  sleep 2
+  if check_mosdns; then
+    mode=recovered
+  else
+    mode=failed
+    action=fallback
+    logger -t mosdns-healthcheck "mosdns remains unhealthy; selecting fallback DNS mode"
+  fi
+fi
+
+/usr/local/sbin/mihomo-dns-mode auto || true
+
+printf '%s mode=%s action=%s\n' "$(date -Is)" "$mode" "$action" >"$status_file"
+[ "$mode" != failed ]

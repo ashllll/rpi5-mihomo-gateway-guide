@@ -1,0 +1,96 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+: "${MIHOMO_CONTROLLER_PORT:=9090}"
+: "${MIHOMO_RECONCILE_TARGETS:=/etc/mihomo/reconcile-targets.conf}"
+
+controller="http://${GATEWAY_LAN_IP}:${MIHOMO_CONTROLLER_PORT}"
+secret_file=/etc/mihomo/secrets/dashboard.secret
+targets_file=$MIHOMO_RECONCILE_TARGETS
+
+test -s "$secret_file"
+test -s "$targets_file"
+secret=$(cat "$secret_file")
+
+api() {
+  curl --fail --silent --show-error \
+    --connect-timeout 3 --max-time 10 \
+    -H "Authorization: Bearer $secret" "$@"
+}
+
+ready=false
+attempt=1
+while [ "$attempt" -le 10 ]; do
+  if api "$controller/version" >/dev/null 2>&1; then
+    ready=true
+    break
+  fi
+  sleep 1
+  attempt=$((attempt + 1))
+done
+
+if [ "$ready" != true ]; then
+  logger -t mihomo-reconcile-policy "Mihomo controller is not ready"
+  exit 1
+fi
+
+select_group() {
+  group=$1
+  target=$2
+  encoded=$(printf %s "$group" | jq -sRr @uri)
+  endpoint="$controller/proxies/$encoded"
+  state=$(api "$endpoint")
+
+  if [ "$(printf %s "$state" | jq -r '.type')" != Selector ]; then
+    logger -t mihomo-reconcile-policy "$group is not a selector; skipped"
+    return 0
+  fi
+
+  if ! printf %s "$state" | jq -e --arg target "$target" \
+    '.all | index($target) != null' >/dev/null; then
+    logger -t mihomo-reconcile-policy "$group does not contain $target"
+    return 1
+  fi
+
+  current=$(printf %s "$state" | jq -r '.now')
+  if [ "$current" = "$target" ]; then
+    return 0
+  fi
+
+  payload=$(jq -cn --arg name "$target" '{name:$name}')
+  api -X PUT -H 'Content-Type: application/json' \
+    --data "$payload" "$endpoint" >/dev/null
+  logger -t mihomo-reconcile-policy "$group changed from $current to $target"
+}
+
+# Apply one `<group>=<target>` line per entry from $MIHOMO_RECONCILE_TARGETS.
+# Groups that are missing, are not selectors or do not contain the target are
+# reported and skipped, so the file can cover several deployment shapes.
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in
+    ''|\#*) continue ;;
+  esac
+  case "$line" in
+    *=*) ;;
+    *)
+      logger -t mihomo-reconcile-policy "ignoring malformed target line"
+      continue
+      ;;
+  esac
+  group=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
+  target=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  if [ -z "$group" ] || [ -z "$target" ]; then
+    logger -t mihomo-reconcile-policy "ignoring empty target line"
+    continue
+  fi
+  select_group "$group" "$target" || true
+done <"$targets_file"

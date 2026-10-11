@@ -1,0 +1,17 @@
+[Unit]
+Description=Safely update managed Mihomo rule sets
+Wants=network-online.target
+After=network-online.target mihomo.service
+
+[Service]
+# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
+EnvironmentFile=-/etc/mihomo-automation.env
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-update-rules
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+LockPersonality=true

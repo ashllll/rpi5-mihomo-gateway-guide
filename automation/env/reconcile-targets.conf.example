@@ -1,0 +1,9 @@
+# <proxy group>=<desired member> for mihomo-reconcile-policy.
+#
+# One line per selection.  Only `Selector` groups are touched; groups that are
+# missing, are not selectors or do not contain the target are logged and
+# skipped, so a single file can cover several deployment shapes.  Install as
+# /etc/mihomo/reconcile-targets.conf (mode 0600) and adjust to your own groups.
+Browsing=Auto
+AI=Research + AI
+Steam=DIRECT

@@ -61,3 +61,5 @@ curl 不关闭系统 VPN/TUN；需人工确认。之后实际播放视频、测�
 
 DNS 健康与规则更新是两件事。规则更新遇到 GitHub 403 / 配额耗尽时保留旧规则，
 在配额恢复后重试；不得改用来源不明的镜像或关闭下载校验来强行成功。
+DNS 模式的切换与自愈已发布为 mihomo-dns-mode 和 mihomo-healthcheck：失败时先重试、
+再按回退顺序切换，恢复后回到自动模式，细节见[自动化层说明](../automation/README.zh-CN.md)。

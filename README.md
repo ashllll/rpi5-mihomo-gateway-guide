@@ -1,11 +1,12 @@
-# Raspberry Pi 5 + Mihomo 双网口透明代理网关（公开模板）
+# Raspberry Pi 5 + Mihomo 双网口透明代理网关（脱敏公开版）
 
 在可信的本地内网里，把一台双网口 Raspberry Pi 5 放在上游路由器与下游交换机 / AP 之间：Mihomo 用 rule 模式和
 TUN / auto-redirect 做透明转发，dnsmasq 负责内网 DHCP 与 DNS，nftables 负责转发与 NAT，客户端不需要逐台配置代理。
-本仓库是脱敏后的公开版本，提供参数模板、只生成文件的配置生成器、当前架构与运维文档和自适应选节点的设计说明；
-不包含生产订阅、完整规则库、节点凭据、管理密钥或自适应执行器源码，也不是一键还原镜像。
+本仓库是脱敏后的公开版本：除参数模板、只生成文件的配置生成器、当前架构与运维文档之外，还发布了在网关上实际运行的
+自动化层源码（[`automation/`](automation/README.zh-CN.md)：16 个运维脚本、24 个 systemd 单元、MosDNS 配置骨架和
+安装器）。仓库**不包含**订阅链接、节点名与节点凭据、完整规则库、管理密钥或动态评分状态，也不是一键还原镜像。
 
-文档更新：2026-10-11。当前方案与历史部署记录分开维护。
+文档更新：2026-10-11（发布自动化层源码）。当前方案与历史部署记录分开维护。
 
 > 当前架构以 [当前架构文档](docs/current-architecture.zh-CN.md) 为准；
 > [旧长文](docs/deployment-debugging-summary.zh-CN.md)、`network-topology.*` 旧拓扑图片和
@@ -33,20 +34,21 @@ Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经�
 `10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，实际值由部署者在模板里提供；生成器要求两侧都是 RFC1918 私有网段、
 互不重叠，并要求下游有可用主机地址。
 
-### DNS 数据流：生产分层与模板基线
+### DNS 数据流：生产分层与生成器基线
 
-[![DNS 数据流：生产通过 MosDNS 分层，公开模板直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
+[![DNS 数据流：生产通过 MosDNS 分层，生成器直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
 
-实线为生产 DNS 路径；虚线为公开生成器的简化路径。MosDNS 并非替代 DHCP 服务，dnsmasq 始终承担下游 DHCP。
+实线为生产 DNS 路径；虚线为配置生成器的简化路径。MosDNS 的分流配置与自定义域名规则已随 `automation/` 发布，
+规则数据（国内 / 代理域名集合与 CN IP 集合）仍属部署端。MosDNS 不是替代 DHCP 的服务，dnsmasq 始终承担下游 DHCP。
 
 ## 组件
 
 | 组件 | 作用 | 公开状态 |
 |---|---|---|
-| dnsmasq / MosDNS | 下游 DHCP 与 DNS :53；MosDNS 在生产做国内 / 代理 / 自定义域名分层与 CN IP 校验 | dnsmasq 由生成器提供；MosDNS 规则与配置需自行准备 |
-| Mihomo | 规则分流、TUN / auto-redirect 透明转发、fake-IP DNS、mixed-port 显式代理 | 生成器提供配置与 provider 骨架 |
+| dnsmasq / MosDNS | 下游 DHCP 与 DNS :53；MosDNS 在生产做国内 / 代理 / 自定义域名分层与 CN IP 校验 | dnsmasq 由生成器提供；MosDNS 骨架与自定义规则已发布，规则数据需自行补全 |
+| Mihomo | 规则分流、TUN / auto-redirect 透明转发、fake-IP DNS、mixed-port 显式代理 | 生成器提供配置与 provider 骨架；订阅更新器在 `automation/` |
 | nftables | 转发与 NAT，只管理自己声明的表 | 生成器提供 |
-| systemd | 服务自启动与定时更新任务；生成器不写单元、不安装 | 单元由部署者按发行版准备 |
+| systemd | 服务自启动与定时更新任务 | `automation/systemd/` 提供 24 个单元与 drop-in，`install.sh` 安装 |
 
 ## 公开范围与生产实现的区别
 
@@ -54,11 +56,12 @@ Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经�
 |---|---|---|
 | 参数模板与配置生成 | [参数模板](examples/site.example.json) + [生成器](tools/render.py)，只生成 8 个私有文件 | 独立维护的生产配置与私有站点参数，不由公开模板完整还原 |
 | 防火墙基线 | 生成 nftables 表 `rp_filter` / `rp_nat`，只替换自己的两张表 | 相同基线，另加业务相关的表 |
-| DNS 分层 | 生成 dnsmasq → Mihomo DNS 基线；MosDNS 分层只有设计说明 | MosDNS 国内 / 代理 / 自定义域名集合 + CN IP 集合 |
-| 订阅获取与合并 | 不包含；provider 文件由部署者自行转换 | 私有订阅合并器、更新任务、节点数据库与管理密钥（需独立备份） |
+| DNS 分层 | 生成 dnsmasq → Mihomo DNS 基线，并发布 [MosDNS 配置骨架](automation/etc/mosdns/config.yaml) 与自定义域名规则 | 生产维护自己的 MosDNS 规则数据、CN IP 校验与 ECS 取舍 |
+| 订阅获取与合并 | 已发布脱敏后的更新器：多来源合并、候选校验、备份与回滚，链接从 `/etc/mihomo/secrets` 读取 | 私有订阅链接、节点清单与供应商能力数据（需独立备份） |
 | 规则库 | 仅少量示例域名规则 | 国内、游戏、流媒体、AI 与下载分类规则，仍需持续维护覆盖范围 |
-| 评分与隔离执行 | 仅设计说明；生成配置只含 Mihomo 自带的 provider 健康检查 | 分类指标采集 + EWMA 评分、影子观察与受门禁保护的应用 |
-| 一键安装 | 不提供，也不写入 systemd 单元 | 人工分阶段部署与验收 |
+| 评分与隔离执行 | 已发布[评分采集与受门禁的应用脚本](automation/README.zh-CN.md)：影子评分只写状态文件，执行阶段只隔离持续失败的节点 | 相同机制，节点池、阈值与能力清单按本部署维护 |
+| 健康检查与 DNS 自愈 | 已发布 `mihomo-healthcheck` / `mosdns-healthcheck` 与 `mihomo-dns-mode` 上游切换 | 相同基线，探测目标与回退顺序按本部署调整 |
+| 一键安装 | `automation/install.sh` 安装脚本与单元，部署数据已存在则保留，不触碰 sshd、路由、sysctl 或 nftables | 人工分阶段部署与验收 |
 
 ## 快速开始
 
@@ -75,11 +78,22 @@ python3 tools/render.py --site site.local.json --output rendered
 # 仓库自带检查（在检出目录运行）：
 python3 tools/validate_public.py
 python3 tools/check_render.py
+python3 tools/check_overlay.py
+python3 tools/check_automation.py
 
 # 在目标系统上检查候选配置（只检查，不安装、不重启服务）：
 sudo nft -c -f rendered/nftables.conf
 sudo dnsmasq --test --conf-file=rendered/dnsmasq-lan.conf
 mihomo -t -d rendered/mihomo
+```
+
+网关上的自动化层（systemd 单元与运维脚本）用安装器部署，先演练再落地；参数、定时任务与安全边界见
+[自动化层说明](automation/README.zh-CN.md)：
+
+```sh
+sudo automation/install.sh --dry-run        # 只打印计划
+sudo automation/install.sh                  # 安装脚本与单元，保留已存在的部署数据
+sudo automation/install.sh --enable-timers  # 按需启用八个 timer
 ```
 
 `tools/render.py` 只有 `--site` 和 `--output` 两个参数；输出目录必须尚不存在，脚本拒绝覆盖已有目录。生成目录权限
@@ -96,7 +110,7 @@ mihomo -t -d rendered/mihomo
 | `dhcp_start` / `dhcp_end` | `10.77.0.100` / `10.77.0.199` | DHCP 地址池，必须排除网关地址 |
 | `dhcp_lease` | `12h` | DHCP 租约时长 |
 | `mixed_port` / `controller_port` | `7890` / `9090` | 混合端口与 Mihomo 控制端口（secret 每次随机） |
-| `mihomo_dns_port` / `mosdns_port` | `1053` / `5335` | Mihomo DNS 端口；MosDNS 预留端口，当前不生成其配置 |
+| `mihomo_dns_port` / `mosdns_port` | `1053` / `5335` | Mihomo DNS 端口；MosDNS 监听端口（生成器不配置 MosDNS，骨架见 `automation/etc/mosdns/`） |
 | `dns_upstreams` | `223.5.5.5`、`1.12.12.12` | Mihomo DNS 的引导 / 默认上游 |
 
 生成器会校验接口名合法且 WAN ≠ LAN、两侧都是 RFC1918 且不重叠、LAN 前缀不超过 `/30`、网关与 DHCP 端点可用、
@@ -158,7 +172,8 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 [![业务选路：国内与游戏直连，浏览、AI、下载分池并遵守供应商能力](assets/current-routing-policy.svg)](assets/current-routing-policy.svg)
 
 图示为当前方案的业务职责；公开模板只提供三个代理组和少量示例规则，国内 / 游戏直连规则需自行补齐。
-评分、隔离与回滚仍属于下文的生产设计说明，不代表公开仓库包含执行器。
+`automation/sbin/mihomo-policy-overlay` 与 `mihomo-adaptive-*` 是已发布的可执行实现：机制在仓库里，
+节点能力、节点标签与阈值属于部署数据，公开的能力清单只保留服务定义。
 
 - 三个业务池独立：`Browsing`（url-test）、`AI`（fallback）、`Download`（load-balance）。
 - AI 池使用专用供应商（本部署为 GLaDOS），优先稳定地区和出口。
@@ -171,10 +186,13 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 - 下载吞吐是另一回事：`load-balance` 只在连接之间分配，不会把单个 `git clone` 或单文件流聚合成多供应商
   带宽；多连接下载需要支持分块的客户端，并遵守供应商限制。
 
-## 自适应机制（设计文档，不是已安装功能）
+## 自适应机制（已发布源码，节点数据留在部署端）
 
-仓库提供脱敏设计说明，[智能选节点设计](docs/adaptive-selection.zh-CN.md) 描述生产机制，但没有可运行的执行器
-源码：
+[![自动化与自愈：定时任务、受门禁的评分与应用流水线](assets/current-automation.svg)](assets/current-automation.svg)
+
+机制说明见[智能选节点设计](docs/adaptive-selection.zh-CN.md)，可执行实现在
+[`automation/`](automation/README.zh-CN.md)：`mihomo-adaptive-score` 只做影子评分采集，
+`mihomo-adaptive-apply` 只把已进入冷却的持续失败节点移出候选池，两次改动之间先语法验证再有限应用。
 
 ```text
 采集 → 更新业务指标 → 能力过滤 → 连续失败门槛
@@ -197,8 +215,11 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 - **更新节奏**：订阅更新间隔至少 24 小时，低峰执行并加随机延迟；`Persistent=true` 的 timer 可能在首次启动或
   补执行时立即触发一次，不能只看 `OnCalendar`。更新需要互斥、候选验证、回滚和业务检查；规则更新遇到
   GitHub 403 / 配额耗尽时保留旧规则，配额恢复后重试。
-- **下游 IPv4 only**：生产 DNS 过渡配置对 AAAA、SVCB、HTTPS 返回 NODATA；公开模板仅设 Mihomo `ipv6: false`，
-  不生成上述 MosDNS 过滤规则。LAN 侧应关闭 IPv6 RA / DHCPv6，并确认上游 IPv6 不会被误分发到下游。
+- **自动化层**：`automation/install.sh` 只覆盖脚本与单元，已存在的部署数据文件一律保留；八个 timer 中评分采集与
+  执行是分开的，基础联网未稳定前不要启用 `mihomo-adaptive-apply.timer`；高频探测有流量成本，不能无预算测速。
+- **下游 IPv4 only**：Mihomo 生成配置设 `ipv6: false`；已发布的 [MosDNS 骨架](automation/etc/mosdns/config.yaml)
+  在 `main` 序列里对 qtype 28 / 64 / 65 返回 NOERROR 空答案（这是过渡取舍，不是通用推荐）。
+  LAN 侧仍应关闭 IPv6 RA / DHCPv6，并确认上游 IPv6 不会被误分发到下游。
 - **实测上下文（不是吞吐保证）**：低负载采样时两口协商 2.5Gbps 全双工、4 核 Cortex-A76、约 8GiB 内存、NVMe，
   约 99% CPU idle、约 34°C、可用内存约 6.7GiB，只说明当时有余量，不构成加密转发吞吐承诺；单队列网卡共享
   中断且 RPS 关闭，未实施 BBR、超频、performance governor 或未经验证的 backlog 调参。
@@ -219,19 +240,27 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 | 路径 | 内容 |
 |---|---|
+| [`automation/`](automation/README.zh-CN.md) | 网关自动化层源码：16 个脚本、24 个 systemd 单元、三份 dnsmasq 上游基线、MosDNS 骨架、能力清单模板与安装器 |
 | [`docs/current-architecture.zh-CN.md`](docs/current-architecture.zh-CN.md) | 当前架构、DNS 数据流、代理职责、自动化层边界与实测上下文 |
 | [`docs/deployment-current.zh-CN.md`](docs/deployment-current.zh-CN.md) | 准备、生成、候选校验、手动安装映射、MosDNS 第二阶段与上线门禁 |
 | [`docs/adaptive-selection.zh-CN.md`](docs/adaptive-selection.zh-CN.md) | 能力优先、指标与评分、隔离与恢复、会话与下载的设计说明 |
 | [`docs/operations-current.zh-CN.md`](docs/operations-current.zh-CN.md) | 动态端口事件、端口表、三层验收与恢复判断 |
 | [`examples/site.example.json`](examples/site.example.json) | 站点参数模板（虚构 10.66 / 10.77 网段） |
-| [`tools/render.py`](tools/render.py)、[`check_render.py`](tools/check_render.py)、[`validate_public.py`](tools/validate_public.py) | 生成配置；自检隔离、权限与参数；检查发布文件与隐私模式 |
-| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：push / PR 时运行上述脚本与归档结构检查 |
+| [`tools/render.py`](tools/render.py) | 生成 8 个私有配置文件；输出目录必须不存在，权限 0700 / 0600 |
+| [`tools/validate_public.py`](tools/validate_public.py) | 发布结构与隐私模式检查（全仓库禁值扫描，含订阅节点标签分隔符） |
+| [`tools/check_render.py`](tools/check_render.py) | 生成器隔离、权限与参数传播自检 |
+| [`tools/check_overlay.py`](tools/check_overlay.py) | 用合成配置验证 policy-overlay 的池选择、幂等性与空清单时 fail-closed |
+| [`tools/check_automation.py`](tools/check_automation.py) | 自动化层语法、禁值、env 一致性检查与沙箱安装验证 |
+| [`assets/`](assets/current-topology.mmd) | 四张当前架构图的 Mermaid 源码与导出 SVG，以及历史拓扑图 |
+| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：push / PR 时运行上述四个门禁与归档结构检查 |
 | [`SECURITY.md`](SECURITY.md) | 隐私与安全边界、禁止提交清单、凭据泄露处理 |
 
 ## 隐私与安全边界
 
 - 仓库有意排除运营凭据：不含订阅 URL / 令牌、节点凭据、Wi-Fi 或面板密码、私钥与证书、完整 `/etc/mihomo`
   归档、未脱敏的路由器备份；文档里的私有 IPv4 示例描述网络结构，不是凭据。
+- 已发布的自动化源码遵守同一边界：订阅链接、节点标签、面板 token 与真实地址分别来自
+  `/etc/mihomo-automation.env`、`/etc/mihomo/secrets` 与 `capabilities.yaml` 的 `overlay` 段，仓库里只有示例值与空清单。
 - 生成的候选配置包含随机 controller secret，必须保持私有；不要提交 `rendered/` 或 `site.local.json`。
 - [工具](tools/validate_public.py) 与 CI 是附加防线，不是“任意归档都无密钥”的证明；发布前还应按
   [SECURITY.md](SECURITY.md) 用 Gitleaks 扫描工作区和 Git 历史（输出需脱敏）。发现误发布的凭据时不要开包含该
@@ -241,7 +270,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 | 层次 | 做什么 | 不能证明什么 |
 |---|---|---|
-| 仓库 CI | push / PR 运行 `tools/validate_public.py`、`tools/check_render.py` 与归档结构检查 | 不能证明配置在真实设备上可用 |
+| 仓库 CI | push / PR 运行 `tools/validate_public.py`、`tools/check_render.py`、`tools/check_overlay.py`、`tools/check_automation.py` 与归档结构检查 | 不能证明配置在真实设备上可用 |
 | 目标系统语法检查 | `nft -c -f`、`dnsmasq --test`、`mihomo -t` | `nft -c -f` 只检查语法，不证明端到端业务 |
 | 物理与浏览器验收 | 真实 LAN 客户端、实际视频播放、AI 流式会话、重启后的动态端口与 DNS 回退 | 需要人工确认客户端流量确实经过 Pi |
 
@@ -255,7 +284,8 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 当前图使用 Mermaid 绘制并导出为 SVG，README 无需依赖 Mermaid 客户端即可显示。点击图片可查看原图。
 可编辑源文件：[物理拓扑](assets/current-topology.mmd)、[DNS 数据流](assets/current-dns-flow.mmd)、
-[业务选路](assets/current-routing-policy.mmd)；共享样式见 [diagram-theme.json](assets/diagram-theme.json)。
+[业务选路](assets/current-routing-policy.mmd)、[自动化与自愈](assets/current-automation.mmd)；
+共享样式见 [diagram-theme.json](assets/diagram-theme.json)。
 
 修改源文件后，使用 Node.js 和 Mermaid CLI 重新导出（首次运行需要下载工具）：
 
@@ -263,6 +293,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-topology.mmd -o assets/current-topology.svg -c assets/diagram-theme.json -b white
 npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-dns-flow.mmd -o assets/current-dns-flow.svg -c assets/diagram-theme.json -b white
 npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-routing-policy.mmd -o assets/current-routing-policy.svg -c assets/diagram-theme.json -b white
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-automation.mmd -o assets/current-automation.svg -c assets/diagram-theme.json -b white
 ```
 
 若提示缺少浏览器，先运行 `npx --yes puppeteer browsers install chrome-headless-shell`，或通过

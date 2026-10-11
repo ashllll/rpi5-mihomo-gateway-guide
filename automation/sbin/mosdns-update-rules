@@ -1,0 +1,236 @@
+#!/bin/sh
+
+set -eu
+umask 027
+
+exec 8>/run/lock/mosdns-rules-update.lock
+flock -n 8 || exit 0
+
+rules_root=/etc/mosdns/rules
+current_link=$rules_root/current
+releases_dir=$rules_root/releases
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+: "${MIHOMO_MIXED_PORT:=7890}"
+proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+work_dir=$(mktemp -d /var/tmp/mosdns-rules.XXXXXX)
+test_pid=
+
+cleanup() {
+  if [ -n "$test_pid" ] && kill -0 "$test_pid" 2>/dev/null; then
+    kill -TERM "$test_pid" 2>/dev/null || true
+    wait "$test_pid" 2>/dev/null || true
+  fi
+  case "$work_dir" in
+    /var/tmp/mosdns-rules.*) rm -rf -- "$work_dir" ;;
+  esac
+}
+trap cleanup EXIT HUP INT TERM
+
+fetch() {
+  output=$1
+  url=$2
+  curl --fail --location --silent --show-error \
+    --proxy "$proxy" \
+    --connect-timeout 10 --max-time 120 \
+    --retry 2 --retry-delay 2 \
+    --proto '=https' --tlsv1.2 \
+    --output "$output" "$url"
+}
+
+fetch "$work_dir/rules-release.json" \
+  https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases/latest
+
+for file in direct-list.txt proxy-list.txt apple-cn.txt google-cn.txt; do
+  asset_url=$(jq -er --arg name "$file" \
+    '.assets[] | select(.name == $name) | .browser_download_url' \
+    "$work_dir/rules-release.json")
+  asset_digest=$(jq -er --arg name "$file" \
+    '.assets[] | select(.name == $name) | .digest' \
+    "$work_dir/rules-release.json")
+  case "$asset_url" in
+    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/*/"$file")
+      ;;
+    *) exit 1 ;;
+  esac
+  case "$asset_digest" in
+    sha256:*) ;;
+    *) exit 1 ;;
+  esac
+  fetch "$work_dir/$file" "$asset_url"
+  expected_sha256=${asset_digest#sha256:}
+  actual_sha256=$(sha256sum "$work_dir/$file" | cut -d' ' -f1)
+  [ "$actual_sha256" = "$expected_sha256" ]
+done
+
+fetch "$work_dir/geoip-commit.json" \
+  https://api.github.com/repos/Loyalsoldier/geoip/commits/release
+geoip_commit=$(jq -er '.sha' "$work_dir/geoip-commit.json")
+case "$geoip_commit" in
+  *[!0-9a-f]*|'') exit 1 ;;
+esac
+[ "${#geoip_commit}" -eq 40 ]
+
+fetch "$work_dir/geoip-content.json" \
+  "https://api.github.com/repos/Loyalsoldier/geoip/contents/text/cn.txt?ref=$geoip_commit"
+geoip_blob=$(jq -er '.sha' "$work_dir/geoip-content.json")
+fetch "$work_dir/geoip-cn.txt" \
+  "https://raw.githubusercontent.com/Loyalsoldier/geoip/$geoip_commit/text/cn.txt"
+geoip_size=$(wc -c <"$work_dir/geoip-cn.txt")
+actual_blob=$(
+  {
+    printf 'blob %s\0' "$geoip_size"
+    cat "$work_dir/geoip-cn.txt"
+  } | sha1sum | cut -d' ' -f1
+)
+[ "$actual_blob" = "$geoip_blob" ]
+
+sed -i 's/\r$//' "$work_dir"/*.txt
+
+[ "$(wc -l <"$work_dir/direct-list.txt")" -ge 50000 ]
+[ "$(wc -l <"$work_dir/proxy-list.txt")" -ge 10000 ]
+[ "$(wc -l <"$work_dir/apple-cn.txt")" -ge 100 ]
+[ "$(wc -l <"$work_dir/google-cn.txt")" -ge 50 ]
+[ "$(wc -l <"$work_dir/geoip-cn.txt")" -ge 3000 ]
+
+for file in direct-list.txt proxy-list.txt apple-cn.txt google-cn.txt geoip-cn.txt; do
+  [ -s "$work_dir/$file" ]
+  grep -q '[^[:space:]]' "$work_dir/$file"
+done
+
+if [ -f "$current_link/direct-list.txt" ] &&
+   [ -f "$current_link/proxy-list.txt" ] &&
+   [ -f "$current_link/apple-cn.txt" ] &&
+   [ -f "$current_link/google-cn.txt" ] &&
+   [ -f "$current_link/geoip-cn.txt" ]; then
+  old_hash=$(sha256sum \
+    "$current_link/direct-list.txt" \
+    "$current_link/proxy-list.txt" \
+    "$current_link/apple-cn.txt" \
+    "$current_link/google-cn.txt" \
+    "$current_link/geoip-cn.txt" | sha256sum | cut -d' ' -f1)
+  new_hash=$(sha256sum \
+    "$work_dir/direct-list.txt" \
+    "$work_dir/proxy-list.txt" \
+    "$work_dir/apple-cn.txt" \
+    "$work_dir/google-cn.txt" \
+    "$work_dir/geoip-cn.txt" | sha256sum | cut -d' ' -f1)
+  if [ "$old_hash" = "$new_hash" ] &&
+     [ "${MOSDNS_UPDATE_DRY_RUN:-0}" != 1 ]; then
+    exit 0
+  fi
+fi
+
+test_dns_port=$((20000 + $$ % 10000))
+test_api_port=$((40000 + $$ % 10000))
+test_config=$work_dir/config.yaml
+sed \
+  -e "s#/etc/mosdns/rules/current/direct-list.txt#$work_dir/direct-list.txt#" \
+  -e "s#/etc/mosdns/rules/current/proxy-list.txt#$work_dir/proxy-list.txt#" \
+  -e "s#/etc/mosdns/rules/current/apple-cn.txt#$work_dir/apple-cn.txt#" \
+  -e "s#/etc/mosdns/rules/current/google-cn.txt#$work_dir/google-cn.txt#" \
+  -e "s#/etc/mosdns/rules/current/geoip-cn.txt#$work_dir/geoip-cn.txt#" \
+  -e "s#127.0.0.1:5335#127.0.0.1:$test_dns_port#g" \
+  -e "s#127.0.0.1:9091#127.0.0.1:$test_api_port#g" \
+  /etc/mosdns/config.yaml >"$test_config"
+
+/usr/local/bin/mosdns start -c "$test_config" -d "$work_dir" \
+  >"$work_dir/validation.log" 2>&1 &
+test_pid=$!
+
+validated=false
+attempt=1
+while [ "$attempt" -le 30 ]; do
+  if ! kill -0 "$test_pid" 2>/dev/null; then
+    break
+  fi
+  if curl --fail --silent --max-time 1 \
+    "http://127.0.0.1:$test_api_port/metrics" >/dev/null 2>&1; then
+    test_answer=$(dig @127.0.0.1 -p "$test_dns_port" baidu.com A \
+      +time=2 +tries=1 +short 2>/dev/null |
+      awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')
+    if [ -n "$test_answer" ]; then
+      validated=true
+      break
+    fi
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.2
+done
+
+if [ "$validated" != true ]; then
+  logger -t mosdns-update-rules "candidate rules failed mosdns validation"
+  sed -n '1,80p' "$work_dir/validation.log" >&2
+  exit 1
+fi
+
+kill -TERM "$test_pid"
+wait "$test_pid" || true
+test_pid=
+
+if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
+  logger -t mosdns-update-rules "rules passed download and candidate validation"
+  exit 0
+fi
+
+rules_tag=$(jq -er '.tag_name' "$work_dir/rules-release.json")
+case "$rules_tag" in
+  *[!0-9A-Za-z._-]*|'') exit 1 ;;
+esac
+geoip_short=$(printf '%.8s' "$geoip_commit")
+version="${rules_tag}-${geoip_short}"
+release_dir=$releases_dir/$version
+install -d -o root -g root -m 755 "$releases_dir"
+install -d -o root -g root -m 755 "$release_dir"
+for file in direct-list.txt proxy-list.txt apple-cn.txt google-cn.txt geoip-cn.txt; do
+  install -o root -g root -m 644 "$work_dir/$file" "$release_dir/$file"
+done
+{
+  printf 'rules_release=%s\n' "$rules_tag"
+  printf 'geoip_commit=%s\n' "$geoip_commit"
+  sha256sum \
+    "$release_dir/direct-list.txt" \
+    "$release_dir/proxy-list.txt" \
+    "$release_dir/apple-cn.txt" \
+    "$release_dir/google-cn.txt" \
+    "$release_dir/geoip-cn.txt"
+} >"$release_dir/source.txt"
+chmod 644 "$release_dir/source.txt"
+
+old_target=$(readlink "$current_link" 2>/dev/null || true)
+new_link=$rules_root/.current.new.$$
+ln -s "releases/$version" "$new_link"
+mv -Tf "$new_link" "$current_link"
+
+if systemctl restart mosdns.service &&
+   /usr/local/sbin/mosdns-healthcheck; then
+  logger -t mosdns-update-rules "rules updated successfully"
+  current_target=$(readlink "$current_link")
+  find "$releases_dir" -mindepth 1 -maxdepth 1 -type d \
+    -printf '%T@ %p\n' | sort -nr | awk 'NR > 5 { print $2 }' |
+    while IFS= read -r old_release; do
+      case "$old_release" in
+        "$releases_dir"/*)
+          [ "releases/${old_release##*/}" = "$current_target" ] ||
+            rm -rf -- "$old_release"
+          ;;
+      esac
+    done
+  exit 0
+fi
+
+logger -t mosdns-update-rules "rules update failed health checks; rolling back"
+rollback_link=$rules_root/.current.rollback.$$
+if [ -n "$old_target" ]; then
+  ln -s "$old_target" "$rollback_link"
+  mv -Tf "$rollback_link" "$current_link"
+else
+  rm -f "$current_link"
+fi
+systemctl restart mosdns.service || true
+/usr/local/sbin/mihomo-dns-mode auto || true
+exit 1

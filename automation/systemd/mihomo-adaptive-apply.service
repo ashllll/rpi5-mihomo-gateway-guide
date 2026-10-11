@@ -1,0 +1,23 @@
+[Unit]
+Description=Apply guarded Mihomo adaptive quarantine decisions
+Wants=network-online.target
+After=network-online.target mihomo.service mihomo-adaptive-score.service
+
+[Service]
+# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
+EnvironmentFile=-/etc/mihomo-automation.env
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-adaptive-apply
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/etc/mihomo /var/lib/mihomo-adaptive

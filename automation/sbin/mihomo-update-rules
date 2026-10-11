@@ -1,0 +1,128 @@
+#!/bin/sh
+
+set -eu
+umask 077
+
+force=false
+if [ "${1:-}" = --force ]; then
+  force=true
+elif [ "$#" -ne 0 ]; then
+  echo "usage: mihomo-update-rules [--force]" >&2
+  exit 2
+fi
+
+exec 8>/run/lock/mihomo-maintenance.lock
+if ! flock -n 8; then
+  exit 0
+fi
+
+exec 9>/run/lock/mihomo-update-rules.lock
+if ! flock -n 9; then
+  exit 0
+fi
+
+rules_dir=/etc/mihomo/rules
+backup_root=/var/lib/mihomo-rule-backups
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+: "${GATEWAY_LAN_IP:=10.77.0.1}"
+: "${MIHOMO_MIXED_PORT:=7890}"
+proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+work_dir=$(mktemp -d /var/tmp/mihomo-rules.XXXXXX)
+backup_dir=
+
+cleanup() {
+  rm -rf "$work_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+download_rule() {
+  name=$1
+  behavior=$2
+  url=$3
+  destination="$work_dir/$name"
+
+  download_args="--fail --location --silent --show-error --retry 3 --retry-all-errors --connect-timeout 10 --max-time 180"
+
+  if systemctl is-active --quiet mihomo; then
+    # Prefer Mihomo for GitHub, but retain direct recovery when the proxy path
+    # itself is the component being repaired.
+    curl $download_args --proxy "$proxy" --output "$destination" "$url" || \
+      curl $download_args --output "$destination" "$url"
+  else
+    curl $download_args --output "$destination" "$url"
+  fi
+  test -s "$destination"
+  mihomo convert-ruleset "$behavior" mrs "$destination" "$destination.txt"
+  rm -f "$destination.txt"
+}
+
+download_rule geoip-private.mrs ipcidr https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/private.mrs
+download_rule geoip-cn.mrs ipcidr https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs
+download_rule geosite-cn.mrs domain https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs
+download_rule dustinwin-games.mrs domain https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/games.mrs
+download_rule dustinwin-games-cn.mrs domain https://github.com/DustinWin/ruleset_geodata/releases/download/mihomo-ruleset/games-cn.mrs
+download_rule geosite-steam.mrs domain https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/steam.mrs
+
+changed=$force
+for candidate in "$work_dir"/*.mrs; do
+  name=${candidate##*/}
+  if ! cmp -s "$candidate" "$rules_dir/$name"; then
+    changed=true
+  fi
+done
+
+if [ "$changed" != true ]; then
+  find "$backup_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+    | sort -nr | awk 'NR > 20 {sub(/^[^ ]+ /, ""); print}' \
+    | xargs -r rm -rf --
+  logger -t mihomo-update-rules "Managed rule sets are already current"
+  exit 0
+fi
+
+stamp=$(date +%Y%m%d-%H%M%S)
+backup_dir="$backup_root/$stamp"
+install -d -o root -g root -m 700 "$backup_dir"
+for candidate in "$work_dir"/*.mrs; do
+  name=${candidate##*/}
+  cp -a "$rules_dir/$name" "$backup_dir/$name"
+  install -o root -g root -m 644 "$candidate" "$rules_dir/$name"
+done
+
+rollback() {
+  for saved in "$backup_dir"/*.mrs; do
+    name=${saved##*/}
+    install -o root -g root -m 644 "$saved" "$rules_dir/$name"
+  done
+  systemctl reload mihomo 2>/dev/null || true
+}
+
+if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
+  rollback
+  logger -t mihomo-update-rules "Rule update failed configuration validation and was rolled back"
+  exit 1
+fi
+
+if ! systemctl reload mihomo; then
+  rollback
+  logger -t mihomo-update-rules "Rule update failed to reload Mihomo and was rolled back"
+  exit 1
+fi
+
+sleep 2
+if ! systemctl is-active --quiet mihomo; then
+  rollback
+  systemctl restart mihomo || true
+  logger -t mihomo-update-rules "Mihomo became inactive after rule update; rules were rolled back"
+  exit 1
+fi
+
+# Keep the newest 20 known-good rule snapshots.
+find "$backup_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+  | sort -nr | awk 'NR > 20 {sub(/^[^ ]+ /, ""); print}' \
+  | xargs -r rm -rf --
+
+logger -t mihomo-update-rules "Managed rule sets updated successfully"

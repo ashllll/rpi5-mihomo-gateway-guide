@@ -1,0 +1,70 @@
+#!/bin/sh
+
+set -eu
+
+interface="${1:-}"
+action="${2:-}"
+table=100
+priority=100
+
+# Deployment parameters.  See automation/env/automation.env.example; copy it to
+# /etc/mihomo-automation.env and adjust the values before the first run.
+if [ -r /etc/mihomo-automation.env ]; then
+  . /etc/mihomo-automation.env
+fi
+
+: "${MANAGEMENT_INTERFACE:=wlan0}"
+: "${MIHOMO_MANAGEMENT_CONNECTION_UUID:=}"
+
+if [ "$interface" != "$MANAGEMENT_INTERFACE" ]; then
+  exit 0
+fi
+
+# Optional guard: restrict the source route to one NetworkManager connection
+# profile.  Leave the UUID empty to accept every connection on the interface.
+if [ -n "$MIHOMO_MANAGEMENT_CONNECTION_UUID" ] &&
+  [ "${CONNECTION_UUID:-}" != "$MIHOMO_MANAGEMENT_CONNECTION_UUID" ]; then
+  exit 0
+fi
+
+clear_policy() {
+  while ip -4 rule del priority "$priority" 2>/dev/null; do
+    :
+  done
+  ip -4 route flush table "$table" 2>/dev/null || true
+}
+
+case "$action" in
+  down|pre-down)
+    clear_policy
+    exit 0
+    ;;
+  up|dhcp4-change|reapply)
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+address_with_prefix=$(printf '%s\n' "${IP4_ADDRESS_0:-}" | awk '{print $1}')
+address=${address_with_prefix%/*}
+gateway="${IP4_GATEWAY:-}"
+
+if [ -z "$address_with_prefix" ] || [ "$address" = "$address_with_prefix" ] || [ -z "$gateway" ]; then
+  logger -t wifi-management-routing "Missing DHCP address or gateway for wlan0"
+  exit 1
+fi
+
+subnet=$(ip -4 route show dev wlan0 proto kernel scope link | awk -v source="$address" '$0 ~ ("src " source) {print $1; exit}')
+if [ -z "$subnet" ]; then
+  logger -t wifi-management-routing "Cannot determine the connected subnet for wlan0"
+  exit 1
+fi
+
+clear_policy
+ip -4 route replace table "$table" "$subnet" dev wlan0 src "$address"
+ip -4 route replace table "$table" default via "$gateway" dev wlan0
+ip -4 rule add priority "$priority" from "$address/32" table "$table"
+ip -4 route flush cache
+
+logger -t wifi-management-routing "Installed source route for wlan0 management address"

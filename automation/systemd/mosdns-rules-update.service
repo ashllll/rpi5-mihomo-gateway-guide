@@ -1,0 +1,23 @@
+[Unit]
+Description=Atomically update and validate mosdns routing data
+Wants=network-online.target mihomo.service
+After=network-online.target mihomo.service mosdns.service
+
+[Service]
+# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
+EnvironmentFile=-/etc/mihomo-automation.env
+Type=oneshot
+ExecStart=/usr/local/sbin/mosdns-update-rules
+Nice=15
+IOSchedulingClass=idle
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/mosdns/rules /etc/dnsmasq-upstreams.conf
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
