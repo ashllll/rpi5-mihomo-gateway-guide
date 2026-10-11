@@ -284,23 +284,41 @@ def check_installer() -> None:
         fail("automation/install.sh is not executable")
     source = installer.read_text(encoding="utf-8")
     check(
-        "[ -d /run/systemd/system ]" in source,
-        "install.sh must skip systemctl when the host does not run systemd",
+        '&& [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]' in source,
+        "install.sh must manage systemd only for a real install; a sandbox run has to stay "
+        "file-only, otherwise an unprivileged CI runner fails at systemctl daemon-reload",
     )
 
     with tempfile.TemporaryDirectory() as raw:
         base = Path(raw)
         root = base / "root"
+        # A failing systemctl stub proves the sandbox run never touches systemd.
+        stub_dir = base / "bin"
+        stub_dir.mkdir()
+        marker = base / "systemctl-called"
+        stub = stub_dir / "systemctl"
+        stub.write_text(
+            f'#!/bin/sh\necho "systemctl must not run during a sandbox install" >&2\n'
+            f'echo called >> "{marker}"\nexit 1\n',
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        sandbox_env = dict(
+            os.environ,
+            GATEWAY_ROOT=str(root),
+            PATH=f"{stub_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        )
         result = subprocess.run(
             ["sh", str(installer)],
             capture_output=True,
             text=True,
-            env=dict(os.environ, GATEWAY_ROOT=str(root)),
+            env=sandbox_env,
             check=False,
         )
         check(result.returncode == 0, f"install.sh failed: {result.stderr.strip()[:400]}")
         if result.returncode != 0:
             return
+        check(not marker.exists(), "a sandbox install ran systemctl")
 
         expected = expected_install_map(root)
         installed = {path.relative_to(root) for path in root.rglob("*") if path.is_file()}
@@ -331,10 +349,11 @@ def check_installer() -> None:
             ["sh", str(installer)],
             capture_output=True,
             text=True,
-            env=dict(os.environ, GATEWAY_ROOT=str(root)),
+            env=sandbox_env,
             check=False,
         )
         check(rerun.returncode == 0, f"second install run failed: {rerun.stderr.strip()[:400]}")
+        check(not marker.exists(), "the second sandbox install ran systemctl")
         check(
             manifest.read_text(encoding="utf-8") == "# edited locally\n",
             "install.sh overwrote the operator's capabilities.yaml",
@@ -346,11 +365,12 @@ def check_installer() -> None:
             ["sh", str(installer), "--dry-run"],
             capture_output=True,
             text=True,
-            env=dict(os.environ, GATEWAY_ROOT=str(dry_root)),
+            env=dict(sandbox_env, GATEWAY_ROOT=str(dry_root)),
             check=False,
         )
         check(dry.returncode == 0, f"install.sh --dry-run failed: {dry.stderr.strip()[:400]}")
         check(not dry_root.exists(), "install.sh --dry-run created files")
+        check(not marker.exists(), "install.sh --dry-run ran systemctl")
         check("install -m 0755" in dry.stdout, "install.sh --dry-run did not report planned installs")
 
 
