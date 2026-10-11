@@ -17,7 +17,9 @@
 #
 # GATEWAY_ROOT prefixes every destination path and exists so the installer can
 # be exercised in a sandbox (`GATEWAY_ROOT=/tmp/root automation/install.sh`);
-# leave it unset on the gateway.
+# leave it unset on the gateway.  A prefixed install only writes files: systemd
+# is never managed unless GATEWAY_ROOT is exactly "/", which keeps the sandbox
+# run unprivileged and independent of the host init system.
 
 set -eu
 
@@ -131,7 +133,7 @@ if [ ! -e "${GATEWAY_ROOT%/}/etc/dnsmasq-upstreams.conf" ]; then
   fi
 fi
 
-if [ "$dry_run" = false ] && [ -d /run/systemd/system ]; then
+if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   if [ "$enable_timers" = true ]; then
     for timer in \
