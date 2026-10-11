@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically verify and recover Mihomo connectivity
+
+[Timer]
+OnCalendar=*:0/2
+RandomizedDelaySec=20s
+AccuracySec=15s
+Persistent=true
+Unit=mihomo-healthcheck.service
+
+[Install]
+WantedBy=timers.target

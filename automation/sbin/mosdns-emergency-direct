@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -eu
+
+systemctl disable --now \
+  mosdns-healthcheck.timer \
+  mosdns-rules-update.timer \
+  mosdns-binary-update.timer \
+  mosdns.service || true
+/usr/local/sbin/mihomo-dns-mode direct
+
+echo "Emergency direct DNS mode is active."

@@ -14,10 +14,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate all publication files and renderer
+      - name: Ensure PyYAML is available for the automation checks
+        # The published policy scripts import yaml, so the checks need it too.
+        run: python3 -c "import yaml" || python3 -m pip install --quiet --break-system-packages pyyaml
+
+      - name: Validate publication files, renderer, overlay and automation layer
         run: |
           python3 tools/validate_public.py
           python3 tools/check_render.py
+          python3 tools/check_overlay.py
+          python3 tools/check_automation.py
 
       - name: Validate archive structure and sanitization
         run: |

@@ -1,0 +1,5 @@
+# One domain suffix per line. Entries here take precedence over the public
+# direct list, but proxy overrides are evaluated first.
+baidu.com
+qq.com
+bilibili.com

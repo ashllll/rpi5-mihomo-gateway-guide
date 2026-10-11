@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Mihomo subscription update during the low-traffic window
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=15min
+Persistent=true
+Unit=mihomo-subscription-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily safe update for official Mihomo rule sets
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=1h
+Persistent=true
+Unit=mihomo-rules-update.service
+
+[Install]
+WantedBy=timers.target

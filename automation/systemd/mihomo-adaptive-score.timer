@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Mihomo adaptive node scoring periodically
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=45s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

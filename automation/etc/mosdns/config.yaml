@@ -1,0 +1,180 @@
+log:
+  level: info
+
+api:
+  http: 127.0.0.1:9091
+
+plugins:
+  - tag: force_proxy_domains
+    type: domain_set
+    args:
+      files:
+        - /etc/mosdns/rules/custom-proxy.txt
+
+  - tag: force_direct_domains
+    type: domain_set
+    args:
+      files:
+        - /etc/mosdns/rules/custom-direct.txt
+
+  - tag: proxy_domains
+    type: domain_set
+    args:
+      files:
+        - /etc/mosdns/rules/current/proxy-list.txt
+
+  - tag: direct_domains
+    type: domain_set
+    args:
+      files:
+        - /etc/mosdns/rules/current/direct-list.txt
+        - /etc/mosdns/rules/current/apple-cn.txt
+        - /etc/mosdns/rules/current/google-cn.txt
+
+  - tag: cn_ips
+    type: ip_set
+    args:
+      files:
+        - /etc/mosdns/rules/current/geoip-cn.txt
+
+  # Only real domestic answers are cached here. Mihomo owns its DNS and
+  # fake-IP caches, which prevents stale fake-IP mappings in mosdns.
+  - tag: cache_cn
+    type: cache
+    args:
+      size: 16384
+      lazy_cache_ttl: 0
+
+  # Do not forward client-supplied ECS or synthesize a client subnet.
+  - tag: no_ecs
+    type: ecs_handler
+    args:
+      forward: false
+      send: false
+
+  - tag: forward_cn
+    type: forward
+    args:
+      concurrent: 2
+      upstreams:
+        - tag: alidns
+          addr: https://dns.alidns.com/dns-query
+          dial_addr: 223.5.5.5
+          idle_timeout: 30
+        - tag: dnspod
+          addr: https://doh.pub/dns-query
+          dial_addr: 1.12.12.12
+          idle_timeout: 30
+
+  # Mihomo applies the proxy policy and owns fake-IP mappings.
+  - tag: forward_mihomo
+    type: forward
+    args:
+      upstreams:
+        - tag: mihomo_dns
+          addr: 127.0.0.1:1053
+
+  - tag: cn_any_response
+    type: sequence
+    args:
+      - exec: $cache_cn
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $forward_cn
+      - exec: accept
+
+  - tag: cn_ip_validated
+    type: sequence
+    args:
+      - matches:
+          - "!qtype 1 28"
+        exec: accept
+      - exec: $cache_cn
+      - matches:
+          - has_resp
+        exec: accept
+      - exec: $forward_cn
+      - matches:
+          - resp_ip $cn_ips
+        exec: accept
+      - exec: drop_resp
+
+  - tag: remote_response
+    type: sequence
+    args:
+      - exec: $forward_mihomo
+      - exec: accept
+
+  # Known direct domains prefer domestic DNS but can fail over without
+  # sending a parallel request during healthy operation.
+  - tag: direct_fallback
+    type: fallback
+    args:
+      primary: cn_any_response
+      secondary: remote_response
+      threshold: 350
+      always_standby: false
+
+  # Unknown domains race both paths. A domestic answer is accepted only
+  # when at least one response IP belongs to the CN IP set.
+  - tag: unknown_fallback
+    type: fallback
+    args:
+      primary: cn_ip_validated
+      secondary: remote_response
+      threshold: 200
+      always_standby: false
+
+  - tag: route_proxy
+    type: sequence
+    args:
+      - exec: $forward_mihomo
+      - exec: accept
+
+  - tag: route_direct
+    type: sequence
+    args:
+      - exec: $direct_fallback
+      - exec: accept
+
+  - tag: route_unknown
+    type: sequence
+    args:
+      - exec: $unknown_fallback
+      - exec: accept
+
+  - tag: main
+    type: sequence
+    args:
+      - exec: metrics_collector main
+      # IPv4-only transition mode. RCODE 0 means NOERROR/NODATA.
+      - matches:
+          - qtype 28 64 65
+        exec: reject 0
+      - exec: $no_ecs
+      - matches:
+          - qname $force_proxy_domains
+        exec: goto route_proxy
+      - matches:
+          - qname $force_direct_domains
+        exec: goto route_direct
+      - matches:
+          - qname $direct_domains
+        exec: goto route_direct
+      - matches:
+          - qname $proxy_domains
+        exec: goto route_proxy
+      - exec: goto route_unknown
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: main
+      listen: 127.0.0.1:5335
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: main
+      listen: 127.0.0.1:5335

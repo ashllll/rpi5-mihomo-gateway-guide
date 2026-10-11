@@ -1,6 +1,9 @@
 # 智能节点选择：设计与边界
 
-这是生产机制的脱敏设计说明，不是本仓库自带的节点调度服务。
+本文描述已发布的实现与它的边界。可执行部分在
+[`automation/`](../automation/README.zh-CN.md)：`mihomo-adaptive-score` 只做影子评分采集，
+`mihomo-adaptive-apply` 只在门禁满足时执行隔离，`mihomo-policy-overlay` 依据能力清单生成分组。
+节点标签、阈值与供应商能力数据是部署数据，不随仓库发布。
 
 ## 先筛能力，再比较质量
 

@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -eu
+
+backup=${1:-}
+case "$backup" in
+  /var/backups/mosdns-rollout-*.tar.gz) ;;
+  *)
+    echo "usage: mosdns-rollout-rollback /var/backups/mosdns-rollout-*.tar.gz" >&2
+    exit 2
+    ;;
+esac
+
+[ -f "$backup" ]
+gzip -t "$backup"
+
+/usr/local/sbin/mihomo-dns-mode direct || true
+systemctl disable --now \
+  mosdns-healthcheck.timer \
+  mosdns-rules-update.timer \
+  mosdns-binary-update.timer \
+  mosdns.service || true
+
+tar -xzf "$backup" -C /
+
+rm -f \
+  /etc/systemd/system/mosdns-healthcheck.service \
+  /etc/systemd/system/mosdns-healthcheck.timer \
+  /etc/systemd/system/mosdns-rules-update.service \
+  /etc/systemd/system/mosdns-rules-update.timer \
+  /etc/systemd/system/mosdns-binary-update.service \
+  /etc/systemd/system/mosdns-binary-update.timer \
+  /etc/systemd/system/dnsmasq.service.d/boot-safe.conf \
+  /etc/mihomo/dnsmasq-upstreams.mosdns \
+  /usr/local/sbin/mosdns-healthcheck \
+  /usr/local/sbin/mosdns-update-rules \
+  /usr/local/sbin/mosdns-update-binary \
+  /usr/local/sbin/dnsmasq-safe-start \
+  /usr/local/sbin/mosdns-emergency-direct \
+  /usr/local/sbin/mosdns-resume-auto
+
+rm -rf -- /etc/mosdns/rules
+
+systemctl daemon-reload
+systemctl enable --now mosdns.service
+/usr/local/sbin/mihomo-dns-mode mihomo
+
+echo "Original mosdns and Mihomo DNS configuration restored from $backup"

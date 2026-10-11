@@ -1,0 +1,9 @@
+# One domain suffix per line. Keep critical proxy-only names here so they
+# never reach domestic resolvers even if a public rule feed changes.
+openai.com
+chatgpt.com
+anthropic.com
+claude.ai
+google.com
+youtube.com
+github.com
