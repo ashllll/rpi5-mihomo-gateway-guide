@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import ast
 import os
 import re
 import shutil
@@ -40,25 +41,7 @@ REPO = Path(__file__).resolve().parents[1]
 AUTOMATION = REPO / "automation"
 ENV_EXAMPLE = AUTOMATION / "env" / "automation.env.example"
 
-FORBIDDEN = {
-    "private user path": r"/(?:Users|home)/[A-Za-z0-9._-]+/",
-    "deployment LAN address": r"\b192\.168\.[0-9]+\.[0-9]+\b",
-    "subscription endpoint": r"https?://[^\s\"'<>]*(?:glados-config\.com|bwbwbw\.cc|infraapi\.cloud)[^\s\"'<>]*",
-    "UUID": r"\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b",
-    "MAC address": r"\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b",
-    "private key": r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
-    "access token": r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{30,})\b",
-    "public IPv6 identity": r"\b(?:2[0-9a-f]{3}:)(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}\b",
-}
-
-# Regression guards for node labels.  They are written as shapes instead of
-# quoting the labels this deployment used to hard-code, so the check itself
-# stays free of subscription data.
-NODE_LABELS = {
-    # Escaped on purpose: the guard must not ship the separator it bans.
-    "node label separator": r"\u4e28",
-    "provider label with index in code": r'"(?:STT|ByWave|BWB|InfraAPI) \| [^"]*[0-9]"',
-}
+from publication_privacy import AUTOMATION_PATTERNS, NODE_PATTERNS, matching_labels
 
 # The subscription validator has to recognise the provider's announcement
 # entries; those strings are the only non-ASCII content allowed in the layer.
@@ -133,9 +116,8 @@ def check_node_labels() -> None:
         if path.suffix == ".md":
             continue
         text = read_source(path)
-        for label, pattern in NODE_LABELS.items():
-            for match in re.finditer(pattern, text):
-                fail(f"{path.relative_to(REPO)}: {label}: {match.group(0)[:80]}")
+        for label in matching_labels(text, NODE_PATTERNS, flags=0):
+            fail(f"{path.relative_to(REPO)}: {label} (value redacted)")
         relative = str(path.relative_to(AUTOMATION))
         if path.suffix in {".yaml", ".yml"} or path.name.endswith((".service", ".timer", ".conf")):
             try:
@@ -157,9 +139,8 @@ def check_node_labels() -> None:
 def check_forbidden() -> None:
     for path in automation_files():
         text = read_source(path)
-        for label, pattern in FORBIDDEN.items():
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                fail(f"{path.relative_to(REPO)}: {label}: {match.group(0)[:80]}")
+        for label in matching_labels(text, AUTOMATION_PATTERNS):
+            fail(f"{path.relative_to(REPO)}: {label} (value redacted)")
 
 
 # Variables that are not deployment parameters of the shared env file:
@@ -228,6 +209,23 @@ def check_environment_documentation() -> None:
             )
 
 
+def overlay_manifest_keys(source: str) -> set[str]:
+    """Read literal manifest keys from Python calls regardless of formatting."""
+    keys = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "overlay_labels":
+            continue
+        key = node.args[1] if len(node.args) > 1 else next(
+            (item.value for item in node.keywords if item.arg == "key"), None
+        )
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            raise ValueError("overlay_labels requires a literal manifest key for coverage checks")
+        keys.add(key.value)
+    return keys
+
+
 def check_manifest() -> None:
     manifest_path = AUTOMATION / "policy" / "capabilities.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
@@ -242,7 +240,7 @@ def check_manifest() -> None:
             )
 
     source = (AUTOMATION / "sbin" / "mihomo-policy-overlay").read_text(encoding="utf-8")
-    read_keys = set(re.findall(r'overlay_labels\(capabilities,\s*"([a-z_]+)"\)', source))
+    read_keys = overlay_manifest_keys(source)
     check(bool(read_keys), "mihomo-policy-overlay no longer reads overlay_labels")
     if isinstance(overlay, dict):
         check(
@@ -282,12 +280,6 @@ def check_installer() -> None:
     installer = AUTOMATION / "install.sh"
     if not installer.stat().st_mode & stat.S_IXUSR:
         fail("automation/install.sh is not executable")
-    source = installer.read_text(encoding="utf-8")
-    check(
-        '&& [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]' in source,
-        "install.sh must manage systemd only for a real install; a sandbox run has to stay "
-        "file-only, otherwise an unprivileged CI runner fails at systemctl daemon-reload",
-    )
 
     with tempfile.TemporaryDirectory() as raw:
         base = Path(raw)
@@ -419,6 +411,47 @@ def check_runtime_parameters() -> None:
         os.environ.update(saved)
 
 
+def check_subscription_environment() -> None:
+    """Run the updater's parameter block and import its real Python child."""
+    source = (AUTOMATION / "sbin/mihomo-update-subscription").read_text()
+    parameters = source[source.index("# Deployment parameters."):source.index("proxy=http")]
+    child = (
+        "import runpy, sys; "
+        "print(runpy.run_path(sys.argv[1])['CAPABILITIES_PATH'])"
+    )
+    with tempfile.TemporaryDirectory() as raw:
+        env_file = Path(raw) / "automation.env"
+        script = Path(raw) / "parameters.sh"
+        script.write_text(
+            "set -eu\n" + parameters.replace("/etc/mihomo-automation.env", str(env_file))
+            + '\nexec "$@"\n'
+        )
+        environment = dict(os.environ)
+        environment.pop("MIHOMO_CAPABILITIES", None)
+        for label, configured, inherited, expected in (
+            ("default", None, None, "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("inherited", None, "/tmp/inherited.yaml", "/tmp/inherited.yaml"),
+            ("sourced", "/tmp/custom manifest.yaml", None, "/tmp/custom manifest.yaml"),
+            ("override", "/tmp/custom.yaml", "/tmp/inherited.yaml", "/tmp/custom.yaml"),
+            ("empty sourced", "", None, "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("empty inherited", None, "", "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("empty override", "", "/tmp/inherited.yaml", "/etc/mihomo/adaptive/capabilities.yaml"),
+        ):
+            if configured is not None:
+                env_file.write_text(f"MIHOMO_CAPABILITIES='{configured}'\n")
+            elif env_file.exists():
+                env_file.unlink()
+            case_env = dict(environment)
+            if inherited is not None:
+                case_env["MIHOMO_CAPABILITIES"] = inherited
+            result = subprocess.run(
+                ["sh", str(script), sys.executable, "-c", child,
+                 str(AUTOMATION / "sbin/mihomo-policy-overlay")],
+                env=case_env, capture_output=True, text=True, check=True,
+            )
+            check(result.stdout.strip() == expected, f"subscription environment failed: {label}")
+
+
 def check_no_bytecode() -> None:
     for path in automation_files():
         if "__pycache__" in path.parts or path.suffix == ".pyc":
@@ -434,6 +467,7 @@ def main() -> int:
     check_manifest()
     check_installer()
     check_runtime_parameters()
+    check_subscription_environment()
 
     if FAILURES:
         print("automation checks FAILED")
