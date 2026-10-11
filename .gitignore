@@ -18,3 +18,10 @@ __pycache__/
 *.tar
 *.tar.gz
 *.tar.zst
+
+# Local tool state: CodeGraph index and cognitive-graph index notes.
+# Never published, and must stay ignored so the publication gates keep
+# scanning tracked files only (tools/validate_public.py also lists untracked
+# files, and the CI archive check allows exactly one binary file).
+.codegraph/
+.lingshu/
