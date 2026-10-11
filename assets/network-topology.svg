@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120" role="img" aria-labelledby="title desc">
-  <title id="title">Raspberry Pi 5 Mihomo 实际网络拓扑</title>
+  <title id="title">Raspberry Pi 5 Mihomo 历史网络拓扑（2026-07）</title>
   <desc id="desc">主路由位于 192.168.100.0/24 上游网络，Raspberry Pi 5 通过 wan0 接入主路由，通过 lan0 为 192.168.1.0/24 下游网络提供 DHCP、DNS、NAT 和 Mihomo 透明代理。wlan0 是应急管理通道。独立 AP rp5 和下游设备位于树莓派 LAN 一侧。连接主路由 Wi-Fi 的设备绕过树莓派。</desc>
 
   <defs>
