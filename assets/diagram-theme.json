@@ -1,0 +1,14 @@
+{
+  "theme": "neutral",
+  "look": "classic",
+  "htmlLabels": false,
+  "fontFamily": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "linear",
+    "nodeSpacing": 36,
+    "rankSpacing": 42,
+    "padding": 18,
+    "wrappingWidth": 280
+  }
+}

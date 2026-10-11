@@ -1,0 +1,14 @@
+flowchart TB
+  accTitle: 当前双网口透明网关物理架构
+  accDescr: 上游路由器连接互联网和树莓派 wan0。树莓派 lan0 连接桥接 AP 与客户端。管理终端经上游 Wi-Fi 访问 wan0 的 SSH，不依赖树莓派 wlan0。
+  internet["Internet"]
+  router["上游路由器<br/>DHCP / NAT<br/>示例 10.66.0.0/24"]
+  admin["管理终端<br/>上游 Wi-Fi"]
+  pi["Raspberry Pi 5<br/>wan0 · 上游 DHCP<br/>lan0 · 10.77.0.1/24<br/>Mihomo / dnsmasq<br/>nftables · 转发 / NAT"]
+  ap["桥接 AP / 交换机<br/>关闭自身 DHCP"]
+  clients["LAN 客户端<br/>IPv4 only"]
+  internet <--> router
+  router <-->|wan0| pi
+  router --- admin
+  admin -. "SSH → wan0" .-> pi
+  pi <-->|lan0| ap <--> clients

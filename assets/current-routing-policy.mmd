@@ -1,0 +1,17 @@
+flowchart TB
+  accTitle: 能力优先的业务选路架构
+  accDescr: LAN 流量经 Mihomo 按规则分类。国内与游戏直连；浏览、AI 和下载使用独立节点池。AI 使用 GLaDOS 专用池，下载使用允许大流量的 STT、ByWave 及明确授权的 GLaDOS 下载节点。公开模板没有完整国内和游戏规则库，也没有生产自适应执行器。
+  incoming["LAN TCP / UDP 流量"]
+  engine["Mihomo · TUN / auto-redirect<br/>规则匹配 → 能力约束 → 业务池"]
+  direct["国内 / 游戏 · DIRECT<br/>需维护域名与 IP 规则"]
+  browsing["浏览 / 流媒体 / Telegram<br/>Browsing · url-test"]
+  ai["AI · fallback<br/>稳定地区 / 出口优先"]
+  download["下载 · load-balance<br/>按连接分配 · 不聚合单流"]
+  general["STT / ByWave 通用池<br/>必须允许大流量下载"]
+  aipool["GLaDOS AI 专用池<br/>不混入普通下载"]
+  downloadpool["STT / ByWave<br/>及明确授权的 GLaDOS 下载节点"]
+  incoming --> engine
+  engine --> direct
+  engine --> browsing --> general
+  engine --> ai --> aipool
+  engine --> download --> downloadpool

@@ -8,7 +8,7 @@ TUN / auto-redirect 做透明转发，dnsmasq 负责内网 DHCP 与 DNS，nftabl
 文档更新：2026-10-11。当前方案与历史部署记录分开维护。
 
 > 当前架构以 [当前架构文档](docs/current-architecture.zh-CN.md) 为准；
-> [旧长文](docs/deployment-debugging-summary.zh-CN.md)、拓扑图片和
+> [旧长文](docs/deployment-debugging-summary.zh-CN.md)、`network-topology.*` 旧拓扑图片和
 > [拓扑浏览页面](web/index.html) 是历史档案，不代表当前网段、链路速率或策略。
 
 ## 适用场景
@@ -26,19 +26,18 @@ Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经�
 
 ## 当前拓扑（示例地址均为虚构值）
 
-```text
-Internet → 上游路由器 · DHCP / NAT · 示例管理网段 10.66.0.0/24
-  ├── 主 Wi-Fi → 管理终端 → SSH 访问 Pi 的 wan0 地址
-  └── wan0 → Raspberry Pi 5 · Debian 13 ARM64
-        ├── dnsmasq · DHCP + DNS :53 → MosDNS 127.0.0.1:5335（生产 DNS 分层）
-        ├── Mihomo · DNS 127.0.0.1:1053、混合端口 7890、TUN + auto-redirect
-        └── nftables · 转发 / NAT（表 rp_filter / rp_nat）
-  ↓
-lan0 · 示例 10.77.0.1/24 · 不配置默认网关 → 桥接 AP / 交换机（关闭 DHCP）→ LAN 客户端
-```
+[![当前双网口透明网关架构：上游路由器、管理终端、树莓派与下游 AP](assets/current-topology.svg)](assets/current-topology.svg)
+
+实线表示物理连接，虚线表示 SSH 管理路径。管理终端接上游 Wi-Fi，不要求树莓派启用 wlan0。
 
 `10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，实际值由部署者在模板里提供；生成器要求两侧都是 RFC1918 私有网段、
 互不重叠，并要求下游有可用主机地址。
+
+### DNS 数据流：生产分层与模板基线
+
+[![DNS 数据流：生产通过 MosDNS 分层，公开模板直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
+
+实线为生产 DNS 路径；虚线为公开生成器的简化路径。MosDNS 并非替代 DHCP 服务，dnsmasq 始终承担下游 DHCP。
 
 ## 组件
 
@@ -156,6 +155,11 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 ## 多供应商与选路策略（能力优先）
 
+[![业务选路：国内与游戏直连，浏览、AI、下载分池并遵守供应商能力](assets/current-routing-policy.svg)](assets/current-routing-policy.svg)
+
+图示为当前方案的业务职责；公开模板只提供三个代理组和少量示例规则，国内 / 游戏直连规则需自行补齐。
+评分、隔离与回滚仍属于下文的生产设计说明，不代表公开仓库包含执行器。
+
 - 三个业务池独立：`Browsing`（url-test）、`AI`（fallback）、`Download`（load-balance）。
 - AI 池使用专用供应商（本部署为 GLaDOS），优先稳定地区和出口。
 - 下载池由 STT、ByWave 和明确授权下载的 GLaDOS 节点组成；普通 GLaDOS 节点不会默认加入下载池，专用下载节点
@@ -246,6 +250,25 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 以下内容记录 2026-07 的部署，其中的拓扑、网段、供应商和选路均已变化，只作为历史记录保留，不代表当前配置，也不应直接复制：
 [部署、调试与优化长文](docs/deployment-debugging-summary.zh-CN.md)（文首已标注历史档案，性能数据是当时设备的测试记录）、
 [拓扑浏览页面](web/index.html)、[`assets/network-topology.svg`](assets/network-topology.svg) 和 [`assets/network-topology.png`](assets/network-topology.png)（页面顶部已注明历史档案）。
+
+## 架构图维护
+
+当前图使用 Mermaid 绘制并导出为 SVG，README 无需依赖 Mermaid 客户端即可显示。点击图片可查看原图。
+可编辑源文件：[物理拓扑](assets/current-topology.mmd)、[DNS 数据流](assets/current-dns-flow.mmd)、
+[业务选路](assets/current-routing-policy.mmd)；共享样式见 [diagram-theme.json](assets/diagram-theme.json)。
+
+修改源文件后，使用 Node.js 和 Mermaid CLI 重新导出（首次运行需要下载工具）：
+
+```sh
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-topology.mmd -o assets/current-topology.svg -c assets/diagram-theme.json -b white
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-dns-flow.mmd -o assets/current-dns-flow.svg -c assets/diagram-theme.json -b white
+npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-routing-policy.mmd -o assets/current-routing-policy.svg -c assets/diagram-theme.json -b white
+```
+
+若提示缺少浏览器，先运行 `npx --yes puppeteer browsers install chrome-headless-shell`，或通过
+`PUPPETEER_EXECUTABLE_PATH` 指定本机已安装的兼容 Chromium / Chrome；该路径不应写入公开配置。
+
+发布前检查文字、箭头与实际配置是否一致，并运行隐私检查；不要把真实网段、MAC 或订阅填入图中。
 
 ## License
 
