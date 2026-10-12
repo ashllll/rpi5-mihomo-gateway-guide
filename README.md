@@ -1,19 +1,69 @@
-# Raspberry Pi 5 + Mihomo 双网口透明代理网关（脱敏公开版）
+# Mihomo 双网口透明代理网关：一键配置与运维
 
-在可信的本地内网里，把一台双网口 Raspberry Pi 5 放在上游路由器与下游交换机 / AP 之间：Mihomo 用 rule 模式和
-TUN / auto-redirect 做透明转发，dnsmasq 负责内网 DHCP 与 DNS，nftables 负责转发与 NAT，客户端不需要逐台配置代理。
-本仓库是脱敏后的公开版本：除参数模板、只生成文件的配置生成器、当前架构与运维文档之外，还发布了在网关上实际运行的
-自动化层源码（[`automation/`](automation/README.zh-CN.md)：16 个运维脚本、24 个 systemd 单元、MosDNS 配置骨架和
-安装器）。仓库**不包含**订阅链接、节点名与节点凭据、完整规则库、管理密钥或动态评分状态。
-新增[无节点恢复镜像与一键写盘工具](docs/recovery-image.zh-CN.md)：镜像在 GitHub Release 下载，恢复后重新配置账号、网络与订阅。
+把一台 Linux 主机放在上游路由器与下游交换机 / 桥接 AP 之间，让下游设备通过 Mihomo 自动分流。
+新安装从根目录的 **`setup.sh`** 开始：常规双网口环境只需输入机场的 HTTPS 订阅链接，系统依赖、网口、网段、DHCP/DNS、
+分流策略和 systemd 服务由脚本检测并生成。支持 Raspberry Pi 5，也支持符合下述条件的其他 Linux 主机。
 
-文档更新：2026-10-12（增加脱敏恢复镜像）。当前方案与历史部署记录分开维护。
+本仓库同时保留手动配置生成器、已有生产部署的运维层和无节点恢复镜像。它们的配置目录和部署流程各自独立。
+仓库不含真实订阅、节点凭据、个人网络配置或管理密钥。
 
-> 当前架构以 [当前架构文档](docs/current-architecture.zh-CN.md) 为准；
-> [旧长文](docs/deployment-debugging-summary.zh-CN.md)、`network-topology.*` 旧拓扑图片和
-> [拓扑浏览页面](web/index.html) 是历史档案，不代表当前网段、链路速率或策略。
+文档更新：2026-10-12。一键安装已通过本地模拟与真实核心解析测试；真实 Linux 网关及下游客户端仍需验收。
 
-## 适用场景
+## 快速开始：只输入订阅链接
+
+在已联网的目标 Linux 主机上下载并解压本项目，或用已有的 Git 获取：
+
+```sh
+git clone https://github.com/ashllll/rpi5-mihomo-gateway-guide.git
+cd rpi5-mihomo-gateway-guide
+sudo sh setup.sh
+```
+
+首次运行通过不回显的输入框读取 HTTPS 订阅链接，无需填写节点名称、策略池或网口配置。
+通过上联网口连接 SSH，或使用本地控制台；下联接交换机 / 桥接 AP，并关闭该链路上其他设备的 DHCP 服务。
+目标机需能访问发行版软件源、GitHub Release 和规则源，安装器会自动安装缺失依赖。
+
+```sh
+sudo sh setup.sh --dry-run  # 检测环境并打印计划，不安装、不下载、不切换网络
+# 预览需要现有 Python 和 iproute2；缺少时会提示，正式安装会安装依赖。
+```
+
+安装前校验下载摘要、订阅节点和生成配置，切换前备份并设置恢复计时器，异常或健康检查失败时回滚。
+重复运行复用已有订阅、网段、端口和管理密钥；无需每次重新填写。完整参数、无人值守输入和恢复命令见
+[一键配置与模拟验证](docs/one-click-setup.zh-CN.md)。
+
+### 自动配置与适用范围
+
+| 项目 | 自动行为 / 要求 |
+|---|---|
+| 系统 | Linux + 运行中的 systemd；Python 3.9+，缺失时由入口安装 |
+| 架构与依赖 | ARM64、ARMv7、x86-64；支持 apt-get、dnf、pacman、zypper；固定 Mihomo 版本并校验 SHA256 |
+| 网口 | 根据 IPv4 默认路由选择物理上联，可用已连接的 Wi-Fi；选择唯一剩余的独立以太网口作为下联 |
+| 网段与端口 | 避开现有地址、路由网段和已占用端口；生成稳定的私有 /24 网段、网关与 DHCP 地址池 |
+| 网络管理 | NetworkManager 或 systemd-networkd；仅配置下联，保留上联配置 |
+| DNS 与转发 | dnsmasq → Mihomo DNS，TUN / auto-redirect + nftables NAT；下游 IPv4 only |
+| 分流 | 私网与国内直连，其余默认代理；AI、流媒体、Telegram、下载分类组自动引用 provider |
+| 节点更新 | 原生 provider 定期更新；支持核心可解析的 Clash/Mihomo 节点 YAML、URI 列表和 base64 URI 列表 |
+| 服务管理 | 独立的 `mihomo-gateway*` 服务、配置目录与 nftables 表；提供备份、重复安装和回滚 |
+
+“通用”限定在以上可识别环境。单网口旁路由、OpenWrt、容器、bridge/bond/VLAN、现有 VPN/TUN 或复杂防火墙需要手动整合。
+多个网口无法唯一判断时，脚本停止并提示，可用 `--wan` / `--lan` 明确指定；已有生产代理服务也需要先迁移。
+策略默认值集中在 [`gateway/defaults.json`](gateway/defaults.json)，可以用 `--defaults` 指定自定义文件。
+自动延迟选路无法仅凭订阅判断平台解锁或供应商的下载授权，相关限制仍应遵守供应商说明。
+
+### 选择对应入口
+
+| 需求 | 入口 | 配置与边界 |
+|---|---|---|
+| 新主机一键配置 | [`setup.sh`](setup.sh) | `/etc/mihomo-gateway/`；自动网口、策略、依赖与恢复，不需要站点 JSON |
+| 手动规划与分阶段安装 | [`tools/render.py`](tools/render.py) | `site.local.json` → 9 个私有文件；只生成文件，随后手动部署到 `/etc/mihomo` 等目录 |
+| 维护已有生产方案 | [`automation/`](automation/README.zh-CN.md) | 16 个运维脚本、24 个 systemd 单元和 MosDNS 骨架；依赖已有站点配置与节点能力数据 |
+| 从空白介质恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) | 独立的预发布镜像；写盘会清空目标盘，恢复后配置账号、网络与订阅 |
+
+一键入口不调用生产运维层的 overlay、评分或隔离流程。下文的生产拓扑和运维机制用于理解已有部署，
+不会全部自动安装到新网关；[当前生产架构](docs/current-architecture.zh-CN.md)与[历史档案](docs/deployment-debugging-summary.zh-CN.md)分开维护。
+
+## 已有生产部署参考
 
 | 项目 | 说明 |
 |---|---|
@@ -26,44 +76,21 @@ TUN / auto-redirect 做透明转发，dnsmasq 负责内网 DHCP 与 DNS，nftabl
 Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经上游内网访问 wan0 的地址即可。WAN / LAN 接口在部署端
 按永久 MAC 固定命名，仓库不发布真实 MAC、SSID 或 NetworkManager 连接文件。
 
-## 当前拓扑（示例地址均为虚构值）
+## 生产拓扑参考（示例地址均为虚构值）
 
 [![当前双网口透明网关架构：上游路由器、管理终端、树莓派与下游 AP](assets/current-topology.svg)](assets/current-topology.svg)
 
 实线表示物理连接，虚线表示 SSH 管理路径。管理终端接上游 Wi-Fi，不要求树莓派启用 wlan0。
 
-`10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，实际值由部署者在模板里提供；生成器要求两侧都是 RFC1918 私有网段、
+`10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，一键入口自动选择实际网段，手动生成器由部署者提供参数；生成器要求两侧都是 RFC1918 私有网段、
 互不重叠，并要求下游有可用主机地址。
 
 ### DNS 数据流：生产分层与生成器基线
 
 [![DNS 数据流：生产通过 MosDNS 分层，生成器直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
 
-实线为生产 DNS 路径；虚线为配置生成器的简化路径。MosDNS 的分流配置与自定义域名规则已随 `automation/` 发布，
+实线为已有生产 DNS 路径；虚线是手动生成器和一键安装使用的 dnsmasq → Mihomo 简化路径。MosDNS 的分流配置与自定义域名规则已随 `automation/` 发布，
 规则数据（国内 / 代理域名集合与 CN IP 集合）仍属部署端。MosDNS 不是替代 DHCP 的服务，dnsmasq 始终承担下游 DHCP。
-
-## 组件
-
-| 组件 | 作用 | 公开状态 |
-|---|---|---|
-| dnsmasq / MosDNS | 下游 DHCP 与 DNS :53；MosDNS 在生产做国内 / 代理 / 自定义域名分层与 CN IP 校验 | dnsmasq 由生成器提供；MosDNS 骨架与自定义规则已发布，规则数据需自行补全 |
-| Mihomo | 规则分流、TUN / auto-redirect 透明转发、fake-IP DNS、mixed-port 显式代理 | 生成器提供配置与 provider 骨架；订阅更新器在 `automation/` |
-| nftables | 转发与 NAT，只管理自己声明的表 | 生成器提供 |
-| systemd | 服务自启动与定时更新任务 | `automation/systemd/` 提供 24 个单元与 drop-in，`install.sh` 安装 |
-
-## 公开范围与生产实现的区别
-
-| 能力 | 本仓库公开内容 | 生产环境实际使用 |
-|---|---|---|
-| 参数模板与配置生成 | [参数模板](examples/site.example.json) + [生成器](tools/render.py)，生成 9 个私有文件，含配套自动化 env | 独立维护的生产配置与私有站点参数，不由公开模板完整还原 |
-| 防火墙基线 | 生成 nftables 表 `rp_filter` / `rp_nat`，只替换自己的两张表 | 相同基线，另加业务相关的表 |
-| DNS 分层 | 生成 dnsmasq → Mihomo DNS 基线，并发布 [MosDNS 配置骨架](automation/etc/mosdns/config.yaml) 与自定义域名规则 | 生产维护自己的 MosDNS 规则数据、CN IP 校验与 ECS 取舍 |
-| 订阅获取与合并 | 已发布脱敏后的更新器：多来源合并、候选校验、备份与回滚，链接从 `/etc/mihomo/secrets` 读取 | 私有订阅链接、节点清单与供应商能力数据（需独立备份） |
-| 规则库 | 仅少量示例域名规则 | 国内、游戏、流媒体、AI 与下载分类规则，仍需持续维护覆盖范围 |
-| 评分与隔离执行 | 已发布[评分采集与受门禁的应用脚本](automation/README.zh-CN.md)：影子评分只写状态文件，执行阶段只隔离持续失败的节点 | 相同机制，节点池、阈值与能力清单按本部署维护 |
-| 健康检查与 DNS 自愈 | 已发布 `mihomo-healthcheck` / `mosdns-healthcheck` 与 `mihomo-dns-mode` 上游切换 | 相同基线，探测目标与回退顺序按本部署调整 |
-| 一键安装 | `automation/install.sh` 安装脚本与单元，部署数据已存在则保留，不触碰 sshd、路由、sysctl 或 nftables | 人工分阶段部署与验收 |
-| 恢复镜像 | 官方 ARM64 系统底包 + 已验证版本的网关程序 + 本仓库源码；无节点、无个人账号与网络配置，首次启动按新环境配置 | 生产私有数据须另行备份；不能用公开镜像恢复原有订阅和账号 |
 
 ## 无节点恢复镜像
 
@@ -81,9 +108,10 @@ sudo python3 gateway_image.py restore \
 工具会要求输入完整的目标盘确认语句，**目标盘原有数据会全部清空**。macOS 使用 `/dev/diskN`，Linux 使用实际整盘路径；
 加 `--dry-run` 可只校验。镜像默认通过有线上游 DHCP 联网，代理、DHCP 服务、NAT 与自动化定时任务暂不启用，
 避免恢复后沿用旧网段或抢发 DHCP。个人站点参数与订阅随后按[恢复说明](docs/recovery-image.zh-CN.md)配置。
+已发布镜像包含的是其构建时的源码快照，不包含此次新增的一键入口；使用新入口前需获取最新仓库。
 当前镜像标为预发布：已提供模拟与文件系统检查，未在承载现网的树莓派上重刷启动验收。
 
-## 快速开始
+## 进阶：手动配置生成器
 
 生成器只需要 Python 3 标准库；生成阶段不需要 root，也不会接触正在运行的网关。实际部署还需目标系统上的
 nftables、dnsmasq、Mihomo 等组件，版本与准备事项见 [分阶段部署](docs/deployment-current.zh-CN.md)。
@@ -156,7 +184,7 @@ provider（顶层 `proxies` 列表）之前**这些配置没有真实出口**；
 下载域名，加上 LAN 与管理网段的直连规则，其余未知目的地由 `MATCH,Browsing` 兜底，正式使用前按自己的业务补齐；
 也不要把 `DOMAIN-KEYWORD,google` 放在 googlevideo 之前，否则视频可能被误分到 AI 池。
 
-### 手动安装（仓库不执行安装）
+### 手动安装生成文件
 
 | 生成文件 | 目标位置 |
 |---|---|
@@ -190,11 +218,11 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 成功。之后还要实际播放视频、测试 AI 流式会话；有回退通道时再验证 Mihomo 重启后的动态端口、基础 NAT、DNS 回退
 和真实客户端访问，不要在唯一管理连接上直接做停服务或重启设备测试。
 
-## 多供应商与选路策略（能力优先）
+## 生产运维层：多供应商与选路策略
 
 [![业务选路：国内与游戏直连，浏览、AI、下载分池并遵守供应商能力](assets/current-routing-policy.svg)](assets/current-routing-policy.svg)
 
-图示为当前方案的业务职责；公开模板只提供三个代理组和少量示例规则，国内 / 游戏直连规则需自行补齐。
+图示为已有生产方案的业务职责；手动生成器模板只提供三个代理组和少量示例规则，国内 / 游戏直连规则需自行补齐。
 `automation/sbin/mihomo-policy-overlay` 与 `mihomo-adaptive-*` 是已发布的可执行实现：机制在仓库里，
 节点能力、节点标签与阈值属于部署数据，公开的能力清单只保留服务定义。
 
@@ -209,7 +237,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 - 下载吞吐是另一回事：`load-balance` 只在连接之间分配，不会把单个 `git clone` 或单文件流聚合成多供应商
   带宽；多连接下载需要支持分块的客户端，并遵守供应商限制。
 
-## 自适应机制（已发布源码，节点数据留在部署端）
+## 生产运维层：自适应机制
 
 [![自动化与自愈：定时任务、受门禁的评分与应用流水线](assets/current-automation.svg)](assets/current-automation.svg)
 
@@ -227,7 +255,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 与连续成功观察。`generate_204` 只能证明轻量连通性，不能证明 AI 会话、YouTube 播放或模型下载速度；HTTP 401
 只能证明请求到达服务，不能证明账号已登录。
 
-## 运维要点
+## 生产运维经验与网络验收注意事项
 
 - **动态重定向端口**：2026-10-11 曾把 LAN INPUT 改成固定业务端口白名单，漏掉 Mihomo auto-redirect 的动态 TCP
   监听端口，PC 因此无法上网，而网关本机 curl 和显式代理仍正常。本方案以可信内网为边界，LAN INPUT 整体放行，
@@ -247,10 +275,27 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
   约 99% CPU idle、约 34°C、可用内存约 6.7GiB，只说明当时有余量，不构成加密转发吞吐承诺；单队列网卡共享
   中断且 RPS 关闭，未实施 BBR、超频、performance governor 或未经验证的 backlog 调参。
 
+## 一键安装的检查与恢复
+
+```sh
+sudo systemctl status mihomo-gateway mihomo-gateway-dhcp mihomo-gateway-firewall
+sudo journalctl -u mihomo-gateway -n 80 --no-pager
+sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
+```
+
+日志与备份可能含节点信息，应留在本机。配置在 `/etc/mihomo-gateway/`，程序在 `/opt/mihomo-gateway/`，
+私有备份在 `/var/lib/mihomo-gateway/backups/`。回滚恢复网络配置与原服务状态，已安装的依赖包保留。
+恢复程序若遇到错误，会保留恢复标记并输出独立恢复命令；完整机制见[一键配置文档](docs/one-click-setup.zh-CN.md)。
+
 ## 故障排查
 
 | 现象 | 先检查 |
 |---|---|
+| 一键入口提示网口有歧义 | 确认实际上联与独立下联，用 `--wan` / `--lan` 指定；接口名不必叫 wan0 / lan0 |
+| SSH 经过将要重配的 LAN | 从上联重新连接，或使用本地控制台，再运行安装 |
+| 下载失败或 SHA256 不符 | 检查软件源、GitHub 与规则源连通性；不要跳过摘要校验 |
+| 订阅拒绝或没有节点 | 确认是有效 HTTPS 节点订阅，非登录页、空订阅或只有远程 provider 引用的配置 |
+| 检测到旧代理、DNS/DHCP、VPN 或防火墙冲突 | 按现有方案先做迁移；安装器不会覆盖未知部署 |
 | PC 无法上网，但网关本机 curl / 显式代理正常 | LAN INPUT 是否漏掉 Mihomo auto-redirect 的动态端口；不要写死事件端口 |
 | 一次 curl 成功却仍上不了网 | 客户端是否还有本地 VPN / TUN / 系统代理；路由是否绕过 Pi |
 | 规则更新失败 | GitHub 403 / 配额；保留旧规则，配额恢复后重试 |
@@ -263,6 +308,11 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 | 路径 | 内容 |
 |---|---|
+| [`setup.sh`](setup.sh) / [`gateway/setup.py`](gateway/setup.py) | 一键入口、环境探测、下载验证、配置生成、安装事务与恢复 |
+| [`gateway/defaults.json`](gateway/defaults.json) | 固定核心版本及摘要、默认端口、DNS、策略分类与更新周期 |
+| [`docs/one-click-setup.zh-CN.md`](docs/one-click-setup.zh-CN.md) | 支持范围、订阅格式、高级参数、回滚与验证记录 |
+| [`tools/check_setup.py`](tools/check_setup.py) | 有状态模拟、故障注入与可选真实核心解析验证 |
+| [`tools/check_setup_linux.py`](tools/check_setup_linux.py) | 隔离 Linux 网络命名空间中的 nftables / dnsmasq 验证 |
 | [`automation/`](automation/README.zh-CN.md) | 网关自动化脚本与 systemd 单元、三份 dnsmasq 上游基线、MosDNS 骨架、能力清单模板与安装器 |
 | [`docs/current-architecture.zh-CN.md`](docs/current-architecture.zh-CN.md) | 当前架构、DNS 数据流、代理职责、自动化层边界与实测上下文 |
 | [`docs/deployment-current.zh-CN.md`](docs/deployment-current.zh-CN.md) | 准备、生成、候选校验、手动安装映射、MosDNS 第二阶段与上线门禁 |
@@ -277,7 +327,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 | [`tools/check_subscription_candidate.py`](tools/check_subscription_candidate.py) | 通过真实候选入口检查合并、引用重命名、缓存与未变化判定 |
 | [`tools/check_subscription_update.py`](tools/check_subscription_update.py) | 离线执行完整订阅更新流程，验证写入、中断、重载与健康检查失败后的回滚 |
 | [`assets/`](assets/current-topology.mmd) | 四张当前架构图的 Mermaid 源码与导出 SVG，以及历史拓扑图 |
-| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：push / PR 时运行发布、生成器、策略、候选组合、自动化、事务与隐私回归检查 |
+| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：发布隐私、原有回归、一键安装模拟与隔离 Linux 命名空间检查 |
 | [`SECURITY.md`](SECURITY.md) | 隐私与安全边界、禁止提交清单、凭据泄露处理 |
 
 ## 隐私与安全边界
@@ -286,18 +336,35 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
   归档、未脱敏的路由器备份；文档里的私有 IPv4 示例描述网络结构，不是凭据。
 - 已发布的自动化源码遵守同一边界：订阅链接、节点标签、面板 token 与真实地址分别来自
   `/etc/mihomo-automation.env`、`/etc/mihomo/secrets` 与 `capabilities.yaml` 的 `overlay` 段，仓库里只有示例值与空清单。
+- 一键入口的 `/etc/mihomo-gateway/` 与 `/var/lib/mihomo-gateway/` 包含订阅、节点缓存、管理密钥或备份，均应保持 root 私有，不得上传。
 - 生成的候选配置包含随机 controller secret，必须保持私有；不要提交 `rendered/` 或 `site.local.json`。
 - [工具](tools/validate_public.py) 与 CI 是附加防线，不是“任意归档都无密钥”的证明；发布前还应按
   [SECURITY.md](SECURITY.md) 用 Gitleaks 扫描工作区和 Git 历史（输出需脱敏）。发现误发布的凭据时不要开包含该
   值的公开 issue：先吊销，再通过私有渠道联系仓库所有者。
 
-## 校验的三个层次
+## 验证记录与持续检查
 
-| 层次 | 做什么 | 不能证明什么 |
-|---|---|---|
-| 仓库 CI | push / PR 运行发布扫描、生成器、策略覆盖、候选组合、自动化、事务与隐私回归检查 | 不能证明配置在真实设备上可用 |
-| 目标系统语法检查 | `nft -c -f`、`dnsmasq --test`、`mihomo -t` | `nft -c -f` 只检查语法，不证明端到端业务 |
-| 物理与浏览器验收 | 真实 LAN 客户端、实际视频播放、AI 流式会话、重启后的动态端口与 DNS 回退 | 需要人工确认客户端流量确实经过 Pi |
+2026-10-12 的本地验证结果如下，全部使用脱敏合成数据；[完整说明与复现命令](docs/one-click-setup.zh-CN.md)。
+
+| 验证层 | 结果与边界 |
+|---|---|
+| 安装逻辑与故障注入 | 33 项通过，含 9 个激活阶段失败、NetworkManager / networkd、重复安装与回滚 |
+| 真实 Mihomo v1.19.32 | Darwin ARM64 核心摘要已核对；4 种有效订阅通过、4 种无效订阅拒绝，生成配置通过核心校验 |
+| 原有项目回归 | 生成器、运维层、策略、订阅候选与更新、规则更新、恢复镜像检查通过 |
+| 发布检查 | ShellCheck、Python 编译、文档链接、隐私扫描与 Gitleaks 通过 |
+| Linux 命名空间 | 已接入 GitHub Actions，检查真实 nftables/dnsmasq 解析、防火墙重复加载与外部表保留；本地 macOS 未执行 |
+| 实机与下游 | 真实网卡、网络管理器切换、DHCP、透明 TCP/UDP 和重启恢复尚待目标机验收 |
+
+```sh
+python3 tools/check_setup.py
+python3 tools/validate_public.py
+python3 tools/check_publication_privacy.py
+# 仅限 Linux 测试机；脚本会创建独立网络命名空间：
+sudo python3 tools/check_setup_linux.py
+```
+
+[GitHub Actions](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/workflows/validate.yml) 在 push / PR 时运行完整回归。
+模拟测试、解析检查和本机显式代理成功，各自只证明对应层次；上线前仍按上面的三层验收确认真实下游路径。
 
 ## 历史档案
 
