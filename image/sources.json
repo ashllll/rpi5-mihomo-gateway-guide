@@ -1,0 +1,18 @@
+{
+  "base": {
+    "url": "https://downloads.raspberrypi.com/raspios_lite_arm64/images/raspios_lite_arm64-2026-06-19/2026-06-18-raspios-trixie-arm64-lite.img.xz",
+    "sha256": "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
+  },
+  "mihomo": {
+    "version": "v1.19.28",
+    "binary_sha256": "6c08572c7115549ea51cb0f94b0d9ff08073a901bf2347d908c7209c4621e96a",
+    "source_url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/cbd11db1e13a75d8e680e0fe7742c95be4cba2be",
+    "license_url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.28/LICENSE"
+  },
+  "mosdns": {
+    "version": "v5.3.4",
+    "binary_sha256": "5e651992dbec784df43e0e483428319b0f2892f5fadfd4e39a1462a5d62cb495",
+    "source_url": "https://codeload.github.com/IrineSistiana/mosdns/tar.gz/b7323188bab1ea742538aeccb31b692bc4967d1b",
+    "license_url": "https://raw.githubusercontent.com/IrineSistiana/mosdns/v5.3.4/LICENSE"
+  }
+}

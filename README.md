@@ -4,9 +4,10 @@
 TUN / auto-redirect 做透明转发，dnsmasq 负责内网 DHCP 与 DNS，nftables 负责转发与 NAT，客户端不需要逐台配置代理。
 本仓库是脱敏后的公开版本：除参数模板、只生成文件的配置生成器、当前架构与运维文档之外，还发布了在网关上实际运行的
 自动化层源码（[`automation/`](automation/README.zh-CN.md)：16 个运维脚本、24 个 systemd 单元、MosDNS 配置骨架和
-安装器）。仓库**不包含**订阅链接、节点名与节点凭据、完整规则库、管理密钥或动态评分状态，也不是一键还原镜像。
+安装器）。仓库**不包含**订阅链接、节点名与节点凭据、完整规则库、管理密钥或动态评分状态。
+新增[无节点恢复镜像与一键写盘工具](docs/recovery-image.zh-CN.md)：镜像在 GitHub Release 下载，恢复后重新配置账号、网络与订阅。
 
-文档更新：2026-10-11（发布自动化层源码）。当前方案与历史部署记录分开维护。
+文档更新：2026-10-12（增加脱敏恢复镜像）。当前方案与历史部署记录分开维护。
 
 > 当前架构以 [当前架构文档](docs/current-architecture.zh-CN.md) 为准；
 > [旧长文](docs/deployment-debugging-summary.zh-CN.md)、`network-topology.*` 旧拓扑图片和
@@ -62,6 +63,25 @@ Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经�
 | 评分与隔离执行 | 已发布[评分采集与受门禁的应用脚本](automation/README.zh-CN.md)：影子评分只写状态文件，执行阶段只隔离持续失败的节点 | 相同机制，节点池、阈值与能力清单按本部署维护 |
 | 健康检查与 DNS 自愈 | 已发布 `mihomo-healthcheck` / `mosdns-healthcheck` 与 `mihomo-dns-mode` 上游切换 | 相同基线，探测目标与回退顺序按本部署调整 |
 | 一键安装 | `automation/install.sh` 安装脚本与单元，部署数据已存在则保留，不触碰 sshd、路由、sysctl 或 nftables | 人工分阶段部署与验收 |
+| 恢复镜像 | 官方 ARM64 系统底包 + 已验证版本的网关程序 + 本仓库源码；无节点、无个人账号与网络配置，首次启动按新环境配置 | 生产私有数据须另行备份；不能用公开镜像恢复原有订阅和账号 |
+
+## 无节点恢复镜像
+
+从 [GitHub Release](https://github.com/ashllll/rpi5-mihomo-gateway-guide/releases/tag/recovery-2026.10.12)
+下载 `.img.xz`、`image-manifest.json`、`SHA256SUMS` 和 `gateway_image.py`。镜像可用 Raspberry Pi Imager 写入，
+也可在 macOS / Linux 上执行一条命令完成校验、写盘、回读和首次启动配置：
+
+```sh
+# 先查看磁盘列表，替换为你要清空的备用 SD 卡 / USB NVMe；不能选择正在运行的系统盘。
+sudo python3 gateway_image.py restore \
+  --image rpi5-gateway-node-free.img.xz --manifest image-manifest.json \
+  --device /dev/diskN --user myadmin --ssh-key "$HOME/.ssh/id_ed25519.pub"
+```
+
+工具会要求输入完整的目标盘确认语句，**目标盘原有数据会全部清空**。macOS 使用 `/dev/diskN`，Linux 使用实际整盘路径；
+加 `--dry-run` 可只校验。镜像默认通过有线上游 DHCP 联网，代理、DHCP 服务、NAT 与自动化定时任务暂不启用，
+避免恢复后沿用旧网段或抢发 DHCP。个人站点参数与订阅随后按[恢复说明](docs/recovery-image.zh-CN.md)配置。
+当前镜像标为预发布：已提供模拟与文件系统检查，未在承载现网的树莓派上重刷启动验收。
 
 ## 快速开始
 
