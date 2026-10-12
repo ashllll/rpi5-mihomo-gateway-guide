@@ -54,7 +54,7 @@ Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经�
 
 | 能力 | 本仓库公开内容 | 生产环境实际使用 |
 |---|---|---|
-| 参数模板与配置生成 | [参数模板](examples/site.example.json) + [生成器](tools/render.py)，只生成 8 个私有文件 | 独立维护的生产配置与私有站点参数，不由公开模板完整还原 |
+| 参数模板与配置生成 | [参数模板](examples/site.example.json) + [生成器](tools/render.py)，生成 9 个私有文件，含配套自动化 env | 独立维护的生产配置与私有站点参数，不由公开模板完整还原 |
 | 防火墙基线 | 生成 nftables 表 `rp_filter` / `rp_nat`，只替换自己的两张表 | 相同基线，另加业务相关的表 |
 | DNS 分层 | 生成 dnsmasq → Mihomo DNS 基线，并发布 [MosDNS 配置骨架](automation/etc/mosdns/config.yaml) 与自定义域名规则 | 生产维护自己的 MosDNS 规则数据、CN IP 校验与 ECS 取舍 |
 | 订阅获取与合并 | 已发布脱敏后的更新器：多来源合并、候选校验、备份与回滚，链接从 `/etc/mihomo/secrets` 读取 | 私有订阅链接、节点清单与供应商能力数据（需独立备份） |
@@ -97,7 +97,8 @@ sudo automation/install.sh --enable-timers  # 按需启用八个 timer
 ```
 
 `tools/render.py` 只有 `--site` 和 `--output` 两个参数；输出目录必须尚不存在，脚本拒绝覆盖已有目录。生成目录权限
-`0700`、8 个文件权限 `0600`，controller secret 每次随机生成。
+`0700`、9 个文件权限 `0600`，controller secret 每次随机生成。配套 env 的 LAN 地址、mixed/controller 端口与 WAN 接口
+直接来自同一份站点参数；无线管理接口等独有字段仍需审阅。已有 env 应合并共享字段并保留原有独有设置。
 
 ### 站点参数
 
@@ -117,13 +118,14 @@ sudo automation/install.sh --enable-timers  # 按需启用八个 timer
 DHCP 范围有序且不含网关、4 个端口是 `1024-65535` 内互不相同的整数、租约格式合法、至少一个 DNS 上游。它只写文件：
 不联网、不安装、不重启服务，也不修改 sshd、NetworkManager、路由或 IPv6 配置。
 
-### 生成的 8 个文件
+### 生成的 9 个文件
 
 | 文件 | 内容 |
 |---|---|
 | `nftables.conf` | 输入 / 转发 / NAT 规则与地址伪装 |
 | `dnsmasq-lan.conf` | 下游 DHCP 与 DNS 转发 |
 | `gateway-sysctl.conf` | IPv4 转发与 rp_filter / redirect 相关开关 |
+| `mihomo-automation.env` | 与网络配置一致的共享参数，以及待审阅的自动化独有参数默认值 |
 | `mihomo/config.yaml` | Mihomo 主配置：TUN、DNS、mixed-port、控制端口、provider 与示例规则 |
 | `mihomo/providers/general-a.yaml`、`general-b.yaml` | 通用池，**只允许放允许承载大流量下载的节点** |
 | `mihomo/providers/ai-only.yaml`、`download-only.yaml` | AI 专用池；明确授权的下载节点池 |
@@ -141,6 +143,7 @@ provider（顶层 `proxies` 列表）之前**这些配置没有真实出口**；
 | `rendered/nftables.conf` | `/etc/nftables.conf` |
 | `rendered/dnsmasq-lan.conf` | `/etc/dnsmasq.d/lan.conf` |
 | `rendered/gateway-sysctl.conf` | `/etc/sysctl.d/90-gateway.conf` |
+| `rendered/mihomo-automation.env` | `/etc/mihomo-automation.env`（0600；已有文件先合并共享字段） |
 | `rendered/mihomo/` | `/etc/mihomo` |
 
 保留上游 Wi-Fi 管理终端或本地控制台并备份目标文件，先检查已有 dnsmasq 的 `include` / `server` / `listen` 冲突；
@@ -240,19 +243,21 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 | 路径 | 内容 |
 |---|---|
-| [`automation/`](automation/README.zh-CN.md) | 网关自动化层源码：16 个脚本、24 个 systemd 单元、三份 dnsmasq 上游基线、MosDNS 骨架、能力清单模板与安装器 |
+| [`automation/`](automation/README.zh-CN.md) | 网关自动化脚本与 systemd 单元、三份 dnsmasq 上游基线、MosDNS 骨架、能力清单模板与安装器 |
 | [`docs/current-architecture.zh-CN.md`](docs/current-architecture.zh-CN.md) | 当前架构、DNS 数据流、代理职责、自动化层边界与实测上下文 |
 | [`docs/deployment-current.zh-CN.md`](docs/deployment-current.zh-CN.md) | 准备、生成、候选校验、手动安装映射、MosDNS 第二阶段与上线门禁 |
 | [`docs/adaptive-selection.zh-CN.md`](docs/adaptive-selection.zh-CN.md) | 能力优先、指标与评分、隔离与恢复、会话与下载的设计说明 |
 | [`docs/operations-current.zh-CN.md`](docs/operations-current.zh-CN.md) | 动态端口事件、端口表、三层验收与恢复判断 |
 | [`examples/site.example.json`](examples/site.example.json) | 站点参数模板（虚构 10.66 / 10.77 网段） |
-| [`tools/render.py`](tools/render.py) | 生成 8 个私有配置文件；输出目录必须不存在，权限 0700 / 0600 |
+| [`tools/render.py`](tools/render.py) | 生成 9 个私有配置文件，含配套 env；输出目录必须不存在，权限 0700 / 0600 |
 | [`tools/validate_public.py`](tools/validate_public.py) | 发布结构与隐私模式检查（全仓库禁值扫描，含订阅节点标签分隔符） |
 | [`tools/check_render.py`](tools/check_render.py) | 生成器隔离、权限与参数传播自检 |
 | [`tools/check_overlay.py`](tools/check_overlay.py) | 用合成配置验证 policy-overlay 的池选择、幂等性与空清单时 fail-closed |
 | [`tools/check_automation.py`](tools/check_automation.py) | 自动化层语法、禁值、env 一致性检查与沙箱安装验证 |
+| [`tools/check_subscription_candidate.py`](tools/check_subscription_candidate.py) | 通过真实候选入口检查合并、引用重命名、缓存与未变化判定 |
+| [`tools/check_subscription_update.py`](tools/check_subscription_update.py) | 离线执行完整订阅更新流程，验证写入、中断、重载与健康检查失败后的回滚 |
 | [`assets/`](assets/current-topology.mmd) | 四张当前架构图的 Mermaid 源码与导出 SVG，以及历史拓扑图 |
-| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：push / PR 时运行上述四个门禁与归档结构检查 |
+| [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：push / PR 时运行发布、生成器、策略、候选组合、自动化、事务与隐私回归检查 |
 | [`SECURITY.md`](SECURITY.md) | 隐私与安全边界、禁止提交清单、凭据泄露处理 |
 
 ## 隐私与安全边界
@@ -270,7 +275,7 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
 
 | 层次 | 做什么 | 不能证明什么 |
 |---|---|---|
-| 仓库 CI | push / PR 运行 `tools/validate_public.py`、`tools/check_render.py`、`tools/check_overlay.py`、`tools/check_automation.py` 与归档结构检查 | 不能证明配置在真实设备上可用 |
+| 仓库 CI | push / PR 运行发布扫描、生成器、策略覆盖、候选组合、自动化、事务与隐私回归检查 | 不能证明配置在真实设备上可用 |
 | 目标系统语法检查 | `nft -c -f`、`dnsmasq --test`、`mihomo -t` | `nft -c -f` 只检查语法，不证明端到端业务 |
 | 物理与浏览器验收 | 真实 LAN 客户端、实际视频播放、AI 流式会话、重启后的动态端口与 DNS 回退 | 需要人工确认客户端流量确实经过 Pi |
 

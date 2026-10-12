@@ -44,17 +44,36 @@ proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mihomo-subscription.XXXXXX)
 remote=$work_dir/subscription.yaml
 candidate=$work_dir/config.yaml
-optimized=$work_dir/config.optimized.yaml
 status=$work_dir/status
 primary_state=$work_dir/primary.state
 extra_work_dir=$work_dir/extras
 extra_manifest=$work_dir/extras.manifest
 backup_dir=
+update_started=false
+
+rollback() {
+  install -o root -g root -m 600 "$backup_dir/config.yaml" "$config" || return 1
+  if ! systemctl reload mihomo 2>/dev/null || ! systemctl is-active --quiet mihomo; then
+    systemctl restart mihomo
+  fi
+}
 
 cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  if [ "$update_started" = true ]; then
+    result=1
+    if rollback; then
+      logger -t mihomo-update-subscription "Subscription update failed; previous configuration restored" || true
+    else
+      logger -t mihomo-update-subscription "Subscription rollback failed; manual recovery required: $backup_dir" || true
+    fi
+  fi
   rm -rf "$work_dir"
+  exit "$result"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 
 test -s "$url_file"
 subscription_url=$(cat "$url_file")
@@ -116,26 +135,7 @@ test -s "$remote"
 test "$(wc -c < "$remote")" -le 10485760
 
 extra_is_valid() {
-  python3 - "$1" <<'PY'
-import sys
-import yaml
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    config = yaml.safe_load(stream)
-proxies = config.get("proxies") if isinstance(config, dict) else None
-if not isinstance(proxies, list) or not proxies or len(proxies) > 2000:
-    raise SystemExit(1)
-if any(not isinstance(proxy, dict) or not proxy.get("name") or not proxy.get("type") for proxy in proxies):
-    raise SystemExit(1)
-ignored = {"direct", "reject", "reject-drop", "pass", "compatible"}
-notice_prefixes = ("注：", "注意：", "剩余流量", "套餐到期", "更新订阅")
-if not any(
-    proxy.get("type") not in ignored
-    and not str(proxy.get("name", "")).strip().startswith(notice_prefixes)
-    for proxy in proxies
-):
-    raise SystemExit(1)
-PY
+  /usr/local/sbin/mihomo-subscription-candidate validate-extra "$1"
 }
 
 install -d -o root -g root -m 700 "$extra_cache_root"
@@ -187,187 +187,8 @@ if [ -d "$extra_urls_dir" ]; then
   done
 fi
 
-python3 - "$config" "$remote" "$extra_manifest" "$candidate" <<'PY'
-import copy
-import sys
-
-import yaml
-
-config_path, remote_path, manifest_path, candidate_path = sys.argv[1:]
-
-with open(config_path, encoding="utf-8") as stream:
-    current = yaml.safe_load(stream)
-with open(remote_path, encoding="utf-8") as stream:
-    subscription = yaml.safe_load(stream)
-
-if not isinstance(current, dict) or not isinstance(subscription, dict):
-    raise SystemExit("configuration root must be a mapping")
-
-proxies = subscription.get("proxies")
-groups = subscription.get("proxy-groups")
-if not isinstance(proxies, list) or not proxies:
-    raise SystemExit("subscription does not contain proxies")
-if not isinstance(groups, list) or not groups:
-    raise SystemExit("subscription does not contain proxy-groups")
-if len(proxies) > 2000 or len(groups) > 200:
-    raise SystemExit("subscription exceeds safety limits")
-
-with open(manifest_path, encoding="utf-8") as manifest:
-    extra_sources = [line.rstrip("\n").split("|", 2) for line in manifest if line.strip()]
-
-# A retained current config already contains the previous extra-source nodes.
-# Source identifiers are reserved prefixes, so remove those nodes before
-# appending the newly downloaded or last-known-good versions.
-extra_prefixes = tuple(f"{source_id} | " for source_id, _path, _fresh in extra_sources)
-proxies = [
-    copy.deepcopy(proxy)
-    for proxy in proxies
-    if not (
-        isinstance(proxy, dict)
-        and isinstance(proxy.get("name"), str)
-        and proxy["name"].startswith(extra_prefixes)
-    )
-]
-
-proxy_names = [item.get("name") for item in proxies if isinstance(item, dict)]
-group_names = [item.get("name") for item in groups if isinstance(item, dict)]
-if len(proxy_names) != len(proxies) or any(not name for name in proxy_names):
-    raise SystemExit("subscription contains an invalid proxy entry")
-if len(group_names) != len(groups) or any(not name for name in group_names):
-    raise SystemExit("subscription contains an invalid proxy-group entry")
-if len(set(proxy_names)) != len(proxy_names):
-    raise SystemExit("subscription contains duplicate proxy names")
-if len(set(group_names)) != len(group_names):
-    raise SystemExit("subscription contains duplicate proxy-group names")
-
-for source_id, source_path, _fresh in extra_sources:
-    with open(source_path, encoding="utf-8") as stream:
-        extra = yaml.safe_load(stream)
-    extra_proxies = extra.get("proxies") if isinstance(extra, dict) else None
-    if not isinstance(extra_proxies, list) or not extra_proxies:
-        raise SystemExit(f"{source_id} does not contain proxies")
-
-    notice_prefixes = ("注：", "注意：", "剩余流量", "套餐到期", "更新订阅")
-    real_proxies = [
-        copy.deepcopy(proxy)
-        for proxy in extra_proxies
-        if isinstance(proxy, dict)
-        and proxy.get("type") not in {"direct", "reject", "reject-drop", "pass", "compatible"}
-        and not str(proxy.get("name", "")).strip().startswith(notice_prefixes)
-    ]
-    if not real_proxies:
-        raise SystemExit(f"{source_id} does not contain usable proxy nodes")
-    old_names = [proxy.get("name") for proxy in real_proxies]
-    if any(not name for name in old_names) or len(set(old_names)) != len(old_names):
-        raise SystemExit(f"{source_id} contains invalid or duplicate proxy names")
-
-    rename = {name: f"{source_id} | {name}" for name in old_names}
-    for proxy in real_proxies:
-        proxy["name"] = rename[proxy["name"]]
-        for field in ("dialer-proxy", "detour"):
-            if proxy.get(field) in rename:
-                proxy[field] = rename[proxy[field]]
-    proxies.extend(real_proxies)
-static_glados = [copy.deepcopy(proxy) for proxy in current.get("proxies", []) or [] if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and not proxy["name"].startswith(("STT | ", "BWB | ", "InfraAPI | ")) and proxy["name"] not in {"DIRECT", "REJECT"}]
-existing_names = {proxy.get("name") for proxy in proxies if isinstance(proxy, dict)}
-for proxy in static_glados:
-    if proxy.get("name") not in existing_names:
-        proxies.append(proxy)
-        existing_names.add(proxy.get("name"))
-proxy_names = [proxy.get("name") for proxy in proxies]
-if len(proxies) > 4000 or len(set(proxy_names)) != len(proxy_names):
-    raise SystemExit("merged subscriptions exceed limits or contain duplicate names")
-
-groups = copy.deepcopy(groups)
-for group in groups:
-    url = group.get("url")
-    if url == "http://www.gstatic.com/generate_204":
-        group["url"] = "https://www.gstatic.com/generate_204"
-
-    if group.get("type") in {"url-test", "fallback"}:
-        group["timeout"] = 5000
-        group["max-failed-times"] = 2
-        if group.get("url") == "https://www.gstatic.com/generate_204":
-            group["expected-status"] = "204"
-        if group.get("name") == "Download":
-            allowed_prefixes = ("STT | ", "STT-", "STT ")
-            group["proxies"] = [
-                proxy for proxy in group.get("proxies", [])
-                if isinstance(proxy, str) and proxy.startswith(allowed_prefixes)
-            ]
-            stt_nodes = [
-                proxy.get("name") for proxy in proxies
-                if isinstance(proxy, dict)
-                and isinstance(proxy.get("name"), str)
-                and proxy["name"].startswith("STT | ")
-            ]
-            group["proxies"] = stt_nodes + [
-                proxy for proxy in group["proxies"] if proxy not in stt_nodes
-            ]
-
-# Convert the remaining fixed selectors into self-switching groups while
-# preserving their original member order and a DIRECT last-resort member.
-automatic_groups = {
-    "Download": {"type": "url-test", "interval": 180, "tolerance": 100},
-    "Apple": {"type": "fallback", "interval": 120},
-    "Microsoft": {"type": "fallback", "interval": 120},
-}
-for group in groups:
-    policy = automatic_groups.get(group.get("name"))
-    if policy is None:
-        continue
-    group.update(policy)
-    group["url"] = "https://www.gstatic.com/generate_204"
-    group["timeout"] = 5000
-    group["max-failed-times"] = 2
-    group["expected-status"] = "204"
-
-static_glados_names = {proxy.get("name") for proxy in static_glados if isinstance(proxy, dict) and isinstance(proxy.get("name"), str)}
-stt_nodes = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and (proxy["name"].startswith("STT | ") or proxy["name"] in static_glados_names)]
-groups = [group for group in groups if group.get("name") != "STT"]
-if stt_nodes:
-    groups.append({
-        "name": "STT",
-        "type": "url-test",
-        "proxies": stt_nodes,
-        "url": "https://www.gstatic.com/generate_204",
-        "interval": 180,
-        "tolerance": 80,
-        "lazy": False,
-        "timeout": 6000,
-        "max-failed-times": 2,
-        "expected-status": "204",
-    })
-
-merged = copy.deepcopy(current)
-merged["proxies"] = proxies
-merged["proxy-groups"] = groups
-
-with open(candidate_path, "w", encoding="utf-8") as stream:
-    yaml.safe_dump(
-        merged,
-        stream,
-        allow_unicode=True,
-        sort_keys=False,
-        default_flow_style=False,
-        width=4096,
-    )
-PY
-
-/usr/local/sbin/mihomo-policy-overlay "$candidate" "$optimized"
-mv "$optimized" "$candidate"
-
-python3 - "$config" "$candidate" "$status" <<'PY'
-import sys
-import yaml
-
-with open(sys.argv[1], encoding="utf-8") as stream:
-    current = yaml.safe_load(stream)
-with open(sys.argv[2], encoding="utf-8") as stream:
-    candidate = yaml.safe_load(stream)
-with open(sys.argv[3], "w", encoding="ascii") as stream:
-    stream.write("unchanged\n" if current == candidate else "changed\n")
-PY
+/usr/local/sbin/mihomo-subscription-candidate prepare \
+  "$config" "$remote" "$extra_manifest" "$candidate" "$status"
 
 if [ "$(cat "$status")" = unchanged ] && [ "$force" != true ]; then
   if [ "$(cat "$primary_state")" = fresh ]; then
@@ -388,29 +209,22 @@ stamp=$(date +%Y%m%d-%H%M%S)
 backup_dir=$backup_root/$stamp
 install -d -o root -g root -m 700 "$backup_dir"
 cp -a "$config" "$backup_dir/config.yaml"
+update_started=true
 install -o root -g root -m 600 "$candidate" "$config"
 
-rollback() {
-  install -o root -g root -m 600 "$backup_dir/config.yaml" "$config"
-  systemctl reload mihomo 2>/dev/null || systemctl restart mihomo || true
-}
-
 if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
-  rollback
-  logger -t mihomo-update-subscription "Installed configuration failed validation and was rolled back"
+  logger -t mihomo-update-subscription "Installed configuration failed validation"
   exit 1
 fi
 
 if ! systemctl reload mihomo; then
-  rollback
-  logger -t mihomo-update-subscription "Mihomo reload failed; subscription was rolled back"
+  logger -t mihomo-update-subscription "Mihomo reload failed after subscription update"
   exit 1
 fi
 
 sleep 2
 if ! systemctl is-active --quiet mihomo; then
-  rollback
-  logger -t mihomo-update-subscription "Mihomo became inactive; subscription was rolled back"
+  logger -t mihomo-update-subscription "Mihomo became inactive after subscription update"
   exit 1
 fi
 
@@ -492,11 +306,10 @@ while [ "$attempt" -le 5 ]; do
 done
 
 if [ "$healthy" != true ]; then
-  rollback
-  logger -t mihomo-update-subscription \
-    "A critical service path failed after update; subscription was rolled back"
+  logger -t mihomo-update-subscription "A critical service path failed after subscription update"
   exit 1
 fi
+update_started=false
 
 # Only promote freshly downloaded extra subscriptions after the merged
 # configuration has loaded and passed all critical path checks.

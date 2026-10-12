@@ -23,6 +23,8 @@ jobs:
           python3 tools/validate_public.py
           python3 tools/check_render.py
           python3 tools/check_overlay.py
+          python3 tools/check_subscription_candidate.py
+          python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
           python3 tools/check_update_rules.py
           python3 tools/check_publication_privacy.py

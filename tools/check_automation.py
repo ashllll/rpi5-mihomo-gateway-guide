@@ -45,7 +45,7 @@ from publication_privacy import AUTOMATION_PATTERNS, NODE_PATTERNS, matching_lab
 
 # The subscription validator has to recognise the provider's announcement
 # entries; those strings are the only non-ASCII content allowed in the layer.
-CJK_ALLOWED = {"sbin/mihomo-update-subscription"}
+CJK_ALLOWED = {"sbin/mihomo-subscription-candidate"}
 
 FAILURES: list[str] = []
 

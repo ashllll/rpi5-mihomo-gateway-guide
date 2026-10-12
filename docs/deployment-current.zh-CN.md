@@ -30,6 +30,9 @@ python3 tools/render.py --site site.local.json --output rendered
 每次生成随机值；不要提交 rendered 或 site.local.json。JSON 是 YAML 的子集，
 所以生成的 .yaml 可被 Mihomo 解析，无需额外 Python YAML 依赖。
 
+输出包含配套 `mihomo-automation.env`，其 LAN 地址、mixed/controller 端口与 WAN 接口直接来自同一份站点参数。
+无线管理接口、订阅镜像与能力清单路径等自动化独有参数仍需审阅；这些参数不会从下游 LAN 接口推导。
+
 将 mihomo/providers 下的无效占位节点换成自己的文件型 provider（顶层 proxies 列表）。
 general-a / general-b **只能放允许大流量下载的节点**；ai-only 放专用 AI 节点；
 download-only 放明确授权的下载节点。供应商原始订阅存放在私有位置，另行转换，
@@ -66,7 +69,8 @@ sudo automation/install.sh --dry-run   # 先看计划：只打印，不碰文件
 sudo automation/install.sh             # 覆盖脚本与单元，保留已存在的部署数据
 ```
 
-安装后写 /etc/mihomo-automation.env（0600）、放入 secrets、填写 capabilities.yaml 的
+安装后审阅生成的 env，再按 0600 安装到 /etc/mihomo-automation.env；已有部署只合并共享字段并保留独有设置。
+随后放入 secrets、填写 capabilities.yaml 的
 overlay 段与 reconcile-targets.conf，最后按需 `--enable-timers`。详见
 [自动化层说明](../automation/README.zh-CN.md)。
 

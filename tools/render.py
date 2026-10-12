@@ -9,6 +9,25 @@ import re
 import secrets
 
 
+def automation_environment(site):
+    """Render only the parameters shared by the site and automation consumers."""
+    shared = {
+        "GATEWAY_LAN_IP": str(ipaddress.IPv4Address(site["lan_address"])),
+        "MIHOMO_MIXED_PORT": site["mixed_port"],
+        "MIHOMO_CONTROLLER_PORT": site["controller_port"],
+        "WAN_INTERFACE": site["wan_interface"],
+    }
+    template = Path(__file__).resolve().parents[1] / "automation/env/automation.env.example"
+    lines = template.read_text(encoding="utf-8").splitlines()
+    found = {line.split("=", 1)[0] for line in lines if "=" in line}
+    if not shared.keys() <= found:
+        raise ValueError("Automation env template is missing shared site parameters")
+    return "\n".join(
+        f"{key}={shared[key]}" if (key := line.split("=", 1)[0]) in shared else line
+        for line in lines
+    ) + "\n"
+
+
 def render(site, output):
     required = {
         "wan_interface", "lan_interface", "management_cidr", "lan_cidr",
@@ -45,6 +64,7 @@ def render(site, output):
     if not site["dns_upstreams"]:
         raise ValueError("At least one bootstrap DNS address is required")
     dns = [str(ipaddress.IPv4Address(a)) for a in site["dns_upstreams"]]
+    environment = automation_environment(site)
     # Refuse an existing destination instead of overwriting private config.
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     wan, interface = site["wan_interface"], site["lan_interface"]
@@ -131,6 +151,7 @@ server=127.0.0.1#{dns_port}
             "MATCH,Browsing"],
     }
     files = {
+        "mihomo-automation.env": environment,
         "nftables.conf": nft,
         "dnsmasq-lan.conf": dnsmasq,
         "mihomo/config.yaml": json.dumps(mihomo, indent=2) + "\n",
