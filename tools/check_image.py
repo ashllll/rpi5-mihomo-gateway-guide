@@ -123,8 +123,9 @@ def main():
                  "mountpoints": [None], "children": [{"path": "/dev/test1", "mountpoints": [None]}]}
         with patch.object(image.platform, "system", return_value="Linux"), \
                 patch.object(Path, "is_block_device", return_value=True):
-            with patch.object(image, "run", return_value=json.dumps({"blockdevices": [linux]}).encode()):
+            with patch.object(image, "run", return_value=json.dumps({"blockdevices": [linux]}).encode()) as listing:
                 assert image.disk_info("/dev/test")["size"] == size
+                assert "--tree" in listing.call_args.args
             for bad in ({"type": "part"}, {"ro": True}, {"mountpoints": ["/"]},
                         {"children": [{"mountpoints": ["[SWAP]"]}]},
                         {"children": [{"type": "crypt", "mountpoints": [None]}]}):

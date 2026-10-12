@@ -406,7 +406,7 @@ def disk_info(device):
         raise ValueError("Restore supports Linux and macOS")
     if not Path(device).is_block_device():
         raise ValueError("Target must be a physical whole-disk block device")
-    info = json.loads(run("lsblk", "--json", "--bytes", "-o", "PATH,TYPE,SIZE,RO,MOUNTPOINTS,MODEL,SERIAL", device, capture=True))["blockdevices"]
+    info = json.loads(run("lsblk", "--tree", "--json", "--bytes", "-o", "PATH,TYPE,SIZE,RO,MOUNTPOINTS,MODEL,SERIAL", device, capture=True))["blockdevices"]
     if len(info) != 1 or info[0]["type"] != "disk" or info[0]["ro"]:
         raise ValueError("Refusing a partition, virtual or read-only disk")
     pending = info.copy()
