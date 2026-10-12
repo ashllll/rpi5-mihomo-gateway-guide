@@ -18,6 +18,11 @@ __pycache__/
 *.tar
 *.tar.gz
 *.tar.zst
+*.img
+*.img.xz
+*.img.gz
+image-output/
+.gateway-restore-*/
 
 # Local tool state: CodeGraph index and cognitive-graph index notes.
 # Never published, and must stay ignored so the publication gates keep
