@@ -7,7 +7,7 @@
 本仓库同时保留手动配置生成器、已有生产部署的运维层和无节点恢复镜像。它们的配置目录和部署流程各自独立。
 仓库不含真实订阅、节点凭据、个人网络配置或管理密钥。
 
-文档更新：2026-10-12。一键安装已通过本地模拟与真实核心解析测试；真实 Linux 网关及下游客户端仍需验收。
+文档更新：2026-10-12。一键安装已通过本地模拟、真实核心解析和 Linux 命名空间 CI；真实网关及下游客户端仍需验收。
 
 ## 快速开始：只输入订阅链接
 
@@ -344,7 +344,7 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 
 ## 验证记录与持续检查
 
-2026-10-12 的本地验证结果如下，全部使用脱敏合成数据；[完整说明与复现命令](docs/one-click-setup.zh-CN.md)。
+2026-10-12 的本地与 CI 验证结果如下，全部使用脱敏合成数据；[完整说明与复现命令](docs/one-click-setup.zh-CN.md)。
 
 | 验证层 | 结果与边界 |
 |---|---|
@@ -352,7 +352,7 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 | 真实 Mihomo v1.19.32 | Darwin ARM64 核心摘要已核对；4 种有效订阅通过、4 种无效订阅拒绝，生成配置通过核心校验 |
 | 原有项目回归 | 生成器、运维层、策略、订阅候选与更新、规则更新、恢复镜像检查通过 |
 | 发布检查 | ShellCheck、Python 编译、文档链接、隐私扫描与 Gitleaks 通过 |
-| Linux 命名空间 | 已接入 GitHub Actions，检查真实 nftables/dnsmasq 解析、防火墙重复加载与外部表保留；本地 macOS 未执行 |
+| Linux 命名空间 | [GitHub Actions 已通过](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/runs/38201843668)：真实 nftables/dnsmasq 解析、防火墙重复加载、删除与外部表保留 |
 | 实机与下游 | 真实网卡、网络管理器切换、DHCP、透明 TCP/UDP 和重启恢复尚待目标机验收 |
 
 ```sh
