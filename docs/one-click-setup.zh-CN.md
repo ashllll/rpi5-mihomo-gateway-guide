@@ -129,7 +129,7 @@ sudo python3 tools/check_setup_linux.py
 [TUN](https://wiki.metacubex.one/config/inbound/tun/)、[rule-provider](https://wiki.metacubex.one/config/rule-providers/)、
 [v1.19.32 发布与校验值](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.32)。
 
-### 2026-10-12 本地验证记录
+### 2026-10-12 本地与 CI 验证记录
 
 | 验证层 | 结果 |
 |---|---|
@@ -137,5 +137,6 @@ sudo python3 tools/check_setup_linux.py
 | 真实 Mihomo 核心 | SHA256 已核对的 v1.19.32 Darwin ARM64；4 种有效订阅接受、4 种无效订阅拒绝，生成配置通过 `mihomo -t` |
 | 原有项目回归 | 配置生成器、运维层、策略 overlay、订阅候选、16 个订阅更新场景、8 个规则更新场景、恢复镜像检查通过 |
 | 发布检查 | ShellCheck、Python 编译、文档链接、发布隐私检查、Gitleaks 与 `git diff --check` 通过 |
-| Linux 内核 / 网络管理器实跑 | 命名空间检查已接入 CI；本次在 macOS 开发机上，尚未执行 Linux 检查或真实网关安装 |
+| Linux 命名空间 | [GitHub Actions 已通过](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/runs/38201843668)：真实 nftables/dnsmasq 解析、两次加载、删除及外部表保留 |
+| 网络管理器与网卡实跑 | 模拟覆盖 NetworkManager / networkd；真实网络管理器、物理网卡与完整安装仍待目标机验收 |
 | 下游实网 | DHCP 获取、透明 TCP/UDP、重启和真实网卡行为尚待目标机验收 |
