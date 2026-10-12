@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Run the subscription updater with real candidate generation and offline I/O."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+import yaml
+from check_overlay import ALL_NODES, MANIFEST_OVERLAY, build_fixture
+
+REPO = Path(__file__).resolve().parents[1]
+SOURCE = (REPO / 'automation/sbin/mihomo-update-subscription').read_text()
+STUB = r'''
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+root = Path(os.environ['SUB_TEST_ROOT'])
+mode = os.environ['SUB_TEST_MODE']
+name, args = Path(sys.argv[0]).name, sys.argv[1:]
+def fault():
+    (root / 'fault').touch()
+if name == 'curl':
+    if '--output' in args and args[args.index('--output') + 1] != '/dev/null':
+        output = Path(args[args.index('--output') + 1])
+        source = args[-1].rsplit('/', 1)[-1]
+        if mode == 'retained' and source == 'primary.yaml':
+            sys.exit(22)
+        if mode in {'cached', 'no-cache'} and source != 'primary.yaml':
+            fault()
+            output.write_text('proxies: []\n')
+        else:
+            shutil.copyfile(root / 'downloads' / source, output)
+    else:
+        url = args[-1]
+        code = '204' if 'generate_204' in url else '401' if 'docker.io' in url or 'api.openai.com' in url else '200'
+        if mode == 'health' and 'docker.io' in url:
+            fault()
+        print('500' if mode == 'health' and 'docker.io' in url else code, end='')
+elif name == 'systemctl':
+    with (root / 'calls').open('a') as stream:
+        stream.write(' '.join(args) + '\n')
+    if args[0] == 'reload':
+        if mode == 'reload' and not (root / 'reload-failed').exists():
+            fault()
+            (root / 'reload-failed').touch()
+            sys.exit(1)
+        (root / 'reloaded').touch()
+    if args[0] == 'is-active' and mode == 'inactive' and (root / 'reloaded').exists() and not (root / 'inactive-failed').exists():
+        fault()
+        (root / 'inactive-failed').touch()
+        sys.exit(1)
+elif name == 'mihomo':
+    if mode == 'validation' or (mode == 'installed-validation' and '-f' not in args):
+        fault()
+        sys.exit(1)
+elif name == 'install':
+    cleaned = []
+    while args:
+        item = args.pop(0)
+        if item in {'-o', '-g'}:
+            args.pop(0)
+        else:
+            cleaned.append(item)
+    if '-d' in cleaned:
+        if mode == 'backup' and 'backups' in Path(cleaned[-1]).parts:
+            fault()
+            sys.exit(1)
+    else:
+        source, target = map(Path, cleaned[-2:])
+        if target == root / 'etc/config.yaml' and source.parent.name.startswith('mihomo-subscription.'):
+            if mode in {'write', 'signal', 'rollback'}:
+                fault()
+                target.write_text('partial write\n')
+                if mode == 'signal':
+                    os.kill(os.getppid(), signal.SIGTERM)
+                sys.exit(1)
+        if mode == 'rollback' and 'backups' in source.parts:
+            sys.exit(1)
+    sys.exit(subprocess.call([os.environ['SUB_TEST_INSTALL'], *cleaned]))
+elif name == 'logger':
+    with (root / 'messages').open('a') as stream:
+        stream.write(' '.join(args) + '\n')
+elif name == 'flock' and mode == 'locked':
+    sys.exit(1)
+elif name == 'xargs':
+    sys.stdin.read()
+'''
+
+
+def check_case(mode):
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        for name in ('etc', 'lock', 'bin', 'downloads', 'cache'):
+            (root / name).mkdir()
+        fixture, capabilities = build_fixture(root / 'etc', MANIFEST_OVERLAY, ALL_NODES)
+        current = root / 'etc/config.yaml'
+        fixture.rename(current)
+        original = yaml.safe_load(current.read_text())
+        primary = dict(original, proxies=[p for p in original['proxies']
+                                         if not p['name'].startswith(('ByWave | ', 'BWB | ', 'InfraAPI | '))])
+        (root / 'downloads/primary.yaml').write_text(yaml.safe_dump(primary))
+        secrets = root / 'etc/secrets'
+        (secrets / 'subscriptions.d').mkdir(parents=True)
+        (secrets / 'subscription.url').write_text('https://fixture.invalid/primary.yaml\n')
+        entries = []
+        for source_id, names in (('ByWave', ['Bulk 01']), ('BWB', ['Backup 01', 'Backup 02']), ('InfraAPI', ['Backup 01'])):
+            content = yaml.safe_dump({'proxies': [{'name': name, 'type': 'ss'} for name in names]})
+            download = root / 'downloads' / (source_id + '.yaml')
+            download.write_text(content)
+            (secrets / 'subscriptions.d' / (source_id + '.url')).write_text('https://fixture.invalid/' + download.name)
+            if mode != 'no-cache':
+                old = yaml.safe_load(content)
+                for proxy in old['proxies']:
+                    proxy['server'] = 'old.example.invalid'
+                (root / 'cache' / download.name).write_text(yaml.safe_dump(old))
+            entries.append(f'{source_id}|{download}|1\n')
+        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy'):
+            command = root / 'bin' / name
+            command.write_text(f'#!{sys.executable}\n' + STUB)
+            command.chmod(0o755)
+        for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay'):
+            command = root / 'bin' / name
+            code = (REPO / 'automation/sbin' / name).read_text().split('\n', 1)[1]
+            command.write_text(f'#!{sys.executable}\n' + code)
+            command.chmod(0o755)
+        environment = dict(os.environ, PATH=f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}",
+                           MIHOMO_CAPABILITIES=str(capabilities), SUB_TEST_ROOT=str(root),
+                           SUB_TEST_MODE=mode, SUB_TEST_INSTALL=shutil.which('install'), PYTHONDONTWRITEBYTECODE='1')
+        if mode in {'unchanged', 'force'}:
+            manifest = root / 'extras'
+            manifest.write_text(''.join(sorted(entries)))
+            subprocess.run([str(root / 'bin/mihomo-subscription-candidate'), 'prepare', str(current),
+                            str(root / 'downloads/primary.yaml'), str(manifest), str(root / 'stable'), str(root / 'status')],
+                           env=environment, check=True, capture_output=True)
+            shutil.copyfile(root / 'stable', current)
+            shutil.copyfile(current, root / 'downloads/primary.yaml')
+        before = current.read_bytes()
+        cache_before = {p.name: p.read_bytes() for p in (root / 'cache').iterdir()}
+        script = SOURCE
+        for old, new in (('/etc/mihomo-automation.env', str(root / 'absent.env')), ('/etc/mihomo', str(root / 'etc')),
+                         ('/var/lib/mihomo-extra-subscriptions', str(root / 'cache')),
+                         ('/var/lib/mihomo-subscription-backups', str(root / 'backups')),
+                         ('/run/lock', str(root / 'lock')), ('/var/tmp', str(root)), ('/usr/local/sbin', str(root / 'bin'))):
+            script = script.replace(old, new)
+        updater = root / 'update.sh'
+        updater.write_text(script)
+        result = subprocess.run(['sh', str(updater), *(['--force'] if mode == 'force' else [])],
+                                env=environment, capture_output=True, text=True, timeout=45)
+        success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked'}
+        assert (result.returncode == 0) == success, (mode, result.stderr)
+        if (not success and mode != 'rollback') or mode in {'unchanged', 'locked'}:
+            assert current.read_bytes() == before, (mode, 'running configuration was not restored')
+        if mode == 'rollback':
+            messages = (root / 'messages').read_text() if (root / 'messages').exists() else ''
+            assert 'manual recovery required' in messages, (mode, messages)
+        if not success:
+            assert (root / 'fault').exists(), (mode, 'fault injection was not reached', result.stderr)
+            assert {p.name: p.read_bytes() for p in (root / 'cache').iterdir()} == cache_before
+        if mode in {'success', 'retained', 'force'}:
+            assert {p.name: p.read_bytes() for p in (root / 'cache').iterdir()} == {
+                p.name: p.read_bytes() for p in (root / 'downloads').iterdir() if p.name != 'primary.yaml'}
+        if mode == 'cached':
+            assert {p.name: p.read_bytes() for p in (root / 'cache').iterdir()} == cache_before
+        calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
+        if mode in {'validation', 'backup', 'no-cache', 'unchanged', 'locked'}:
+            assert 'reload' not in calls, (mode, calls)
+        if mode in {'success', 'cached', 'retained', 'force'}:
+            assert 'reload mihomo' in calls and isinstance(yaml.safe_load(current.read_text()), dict)
+
+
+if __name__ == '__main__':
+    cases = ('success', 'cached', 'retained', 'no-cache', 'validation', 'backup', 'write', 'signal',
+             'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked')
+    failures = []
+    for case in cases:
+        try:
+            check_case(case)
+        except (AssertionError, subprocess.SubprocessError) as error:
+            failures.append(f'{case}: {error}')
+    if failures:
+        raise SystemExit('\n'.join(failures))
+    print(f'Subscription update simulation passed ({len(cases)} scenarios)')

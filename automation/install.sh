@@ -155,11 +155,11 @@ cat <<EOF
 Installed the automation layer from $here.
 
 Still required before the gateway is fully functional:
-  1. Write /etc/mihomo-automation.env (mode 0600) from
-     /etc/mihomo-automation.env.example and set this deployment's LAN address,
-     ports and interfaces.  Every script reads it.
-  2. Generate the private runtime files (nftables, dnsmasq, sysctl, mihomo
-     config and provider stubs) with tools/render.py and site.local.json.
+  1. Generate the private runtime files and matching mihomo-automation.env
+     with tools/render.py and site.local.json.
+  2. Review the generated env's automation-only settings, then install it as
+     /etc/mihomo-automation.env (0600). For an existing env, merge shared site
+     parameters while preserving operator-specific settings.
   3. Store the subscription link in /etc/mihomo/secrets/subscription.url and the
      dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).
   4. Fill the curated-pool node labels in the overlay section of

@@ -27,7 +27,8 @@
 | `dnsmasq-safe-start` | 用 direct 基线原子安装 `/etc/dnsmasq-upstreams.conf`，先 `dnsmasq --test` 再放行，避免首次启动时 DNS 不可用 |
 | `mihomo-dns-mode` | 切换 dnsmasq 上游：`auto` / `mosdns` / `mihomo` / `direct`，带锁与原子替换 |
 | `mihomo-healthcheck` | 分类连通性检查与保守恢复；失败时调用 `mihomo-dns-mode` 回退，恢复后回到自动模式 |
-| `mihomo-subscription-update` | 下载订阅 → 校验 → 备份 → 生成 file provider；公告占位订阅视为过期，失败保留旧配置 |
+| `mihomo-update-subscription` | 下载主订阅与额外来源 → 生成候选 → 校验与备份 → 热加载并检查；公告占位订阅视为过期，失败回滚 |
+| `mihomo-subscription-candidate` | 离线生成订阅候选配置：校验来源、合并与重命名引用、应用现有 overlay、判断最终变化；不安装或重载 |
 | `mihomo-update-rules` | 更新受管规则集，遇到 GitHub 403 / 配额耗尽时保留旧规则 |
 | `mihomo-policy-overlay` | 按 `capabilities.yaml` 生成服务分组、curated 池与规则覆盖（`direct_prefix`、`download_overrides`、`service_overrides`） |
 | `mihomo-reconcile-policy` | 按 `reconcile-targets.conf` 把指定 Selector 收敛到目标组，只影响选择器，不改池成员 |
@@ -80,12 +81,14 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - 只有在运行 systemd 的主机上才 `systemctl daemon-reload`；
 - **不安装** `optional/`，也不改动 sshd、NetworkManager、路由、sysctl 或 nftables。
 
-安装后仍需人工完成：写 `/etc/mihomo-automation.env`；用 `tools/render.py` 生成私有配置；放入订阅链接与面板 token；
+安装后仍需人工完成：用 `tools/render.py` 生成私有配置与配套 `mihomo-automation.env`，审阅后按 0600 安装 env；放入订阅链接与面板 token；
 填写 `capabilities.yaml` 的 `overlay` 段与 `reconcile-targets.conf`；单独审阅 `optional/`；按需启用 timer。
 
 ## 部署参数（`/etc/mihomo-automation.env`）
 
-以 `env/automation.env.example` 为模板，安装为 **0600** 并排除在版本控制之外——这是本部署地址唯一存在的地方。
+`tools/render.py` 以 `env/automation.env.example` 为模板生成配套 env，共享的 LAN 地址、mixed/controller 端口和 WAN 接口直接来自站点参数。
+生成器不会把下游 LAN 接口当作无线管理接口；其余独有参数仍需审阅。把 env 安装为 **0600** 并排除在版本控制之外。
+已有部署应合并这四个共享字段，保留现有订阅镜像、能力清单路径和管理接口等设置；不要直接覆盖已有 env。
 脚本内置同样的示例默认值，因此不写 env 文件也能启动，但上线前必须改成实际值。
 
 | 变量 | 示例 | 作用 |
@@ -119,7 +122,7 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 
 ## 安全与失效边界
 
-- **fail-closed**：没有可用订阅节点时不落盘；配置变更先语法验证再应用，失败保留旧文件。
+- **fail-closed**：没有可用订阅节点时不落盘；配置变更先语法验证再应用。订阅写入、重载、健康检查或信号中断失败时恢复旧配置；恢复失败会报告备份位置，额外订阅缓存只在健康门禁通过后更新。
 - **有界改动**：执行阶段只隔离连续失败且已进入冷却的节点，并为每个池保留保底候选；上游整体故障时暂停节点惩罚。
 - **互斥**：定时任务用 `flock` 串行化（Mihomo 维护一条锁，MosDNS 各任务一条锁），避免更新与检查互相踩踏。
 - **DNS 自愈**：`mihomo-dns-mode` 原子替换 dnsmasq 上游文件；健康检查失败先重试、再回退、再恢复自动模式。
@@ -135,7 +138,11 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 python3 tools/validate_public.py    # 发布结构、隐私模式（含订阅节点标签分隔符）、图表可解析
 python3 tools/check_render.py       # 生成器隔离、参数传播、拒绝不安全站点
 python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池顺序、备份池、幂等性、空 manifest 时 fail-closed
+python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
+python3 tools/check_subscription_update.py  # 完整订阅更新：16 种离线场景，包括写入、中断、重载、回滚与缓存保护
 python3 tools/check_automation.py   # 语法、ASCII 与禁值扫描、env 变量双向一致、单元加载 env、沙箱安装、运行时参数化
+python3 tools/check_update_rules.py # 规则更新事务与回滚
+python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
 
 `check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、二次安装保留运维人员改过的

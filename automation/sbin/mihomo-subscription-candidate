@@ -1,0 +1,219 @@
+#!/usr/bin/python3
+"""Build a subscription candidate without changing the running gateway."""
+from __future__ import annotations
+
+import argparse
+import copy
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+import yaml
+
+NOTICE_PREFIXES = ("注：", "注意：", "剩余流量", "套餐到期", "更新订阅")
+IGNORED_TYPES = {"direct", "reject", "reject-drop", "pass", "compatible"}
+
+
+def usable_extra(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    proxies = config.get("proxies") if isinstance(config, dict) else None
+    if not isinstance(proxies, list) or not proxies or len(proxies) > 2000:
+        raise SystemExit("extra subscription exceeds limits or does not contain proxies")
+    if any(not isinstance(proxy, dict) or not proxy.get("name") or not proxy.get("type") for proxy in proxies):
+        raise SystemExit("extra subscription contains an invalid proxy entry")
+    real = [proxy for proxy in proxies if proxy["type"] not in IGNORED_TYPES
+            and not str(proxy["name"]).strip().startswith(NOTICE_PREFIXES)]
+    if not real:
+        raise SystemExit("extra subscription does not contain usable proxy nodes")
+    return real
+
+
+def merge_sources(current_path: Path, subscription_path: Path, manifest_path: Path) -> dict:
+    with open(current_path, encoding="utf-8") as stream:
+        current = yaml.safe_load(stream)
+    with open(subscription_path, encoding="utf-8") as stream:
+        subscription = yaml.safe_load(stream)
+
+    if not isinstance(current, dict) or not isinstance(subscription, dict):
+        raise SystemExit("configuration root must be a mapping")
+
+    proxies = subscription.get("proxies")
+    groups = subscription.get("proxy-groups")
+    if not isinstance(proxies, list) or not proxies:
+        raise SystemExit("subscription does not contain proxies")
+    if not isinstance(groups, list) or not groups:
+        raise SystemExit("subscription does not contain proxy-groups")
+    if len(proxies) > 2000 or len(groups) > 200:
+        raise SystemExit("subscription exceeds safety limits")
+
+    with open(manifest_path, encoding="utf-8") as manifest:
+        extra_sources = [line.rstrip("\n").split("|", 2) for line in manifest if line.strip()]
+
+    # A retained current config already contains the previous extra-source nodes.
+    # Source identifiers are reserved prefixes, so remove those nodes before
+    # appending the newly downloaded or last-known-good versions.
+    extra_prefixes = tuple(f"{source_id} | " for source_id, _path, _fresh in extra_sources)
+    proxies = [
+        copy.deepcopy(proxy)
+        for proxy in proxies
+        if not (
+            isinstance(proxy, dict)
+            and isinstance(proxy.get("name"), str)
+            and proxy["name"].startswith(extra_prefixes)
+        )
+    ]
+
+    proxy_names = [item.get("name") for item in proxies if isinstance(item, dict)]
+    group_names = [item.get("name") for item in groups if isinstance(item, dict)]
+    if len(proxy_names) != len(proxies) or any(not name for name in proxy_names):
+        raise SystemExit("subscription contains an invalid proxy entry")
+    if len(group_names) != len(groups) or any(not name for name in group_names):
+        raise SystemExit("subscription contains an invalid proxy-group entry")
+    if len(set(proxy_names)) != len(proxy_names):
+        raise SystemExit("subscription contains duplicate proxy names")
+    if len(set(group_names)) != len(group_names):
+        raise SystemExit("subscription contains duplicate proxy-group names")
+
+    for source_id, source_path, _fresh in extra_sources:
+        real_proxies = copy.deepcopy(usable_extra(Path(source_path)))
+        old_names = [proxy.get("name") for proxy in real_proxies]
+        if any(not name for name in old_names) or len(set(old_names)) != len(old_names):
+            raise SystemExit(f"{source_id} contains invalid or duplicate proxy names")
+
+        rename = {name: f"{source_id} | {name}" for name in old_names}
+        for proxy in real_proxies:
+            proxy["name"] = rename[proxy["name"]]
+            for field in ("dialer-proxy", "detour"):
+                if proxy.get(field) in rename:
+                    proxy[field] = rename[proxy[field]]
+        proxies.extend(real_proxies)
+    static_glados = [copy.deepcopy(proxy) for proxy in current.get("proxies", []) or [] if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and not proxy["name"].startswith(("STT | ", "BWB | ", "InfraAPI | ")) and proxy["name"] not in {"DIRECT", "REJECT"}]
+    existing_names = {proxy.get("name") for proxy in proxies if isinstance(proxy, dict)}
+    for proxy in static_glados:
+        if proxy.get("name") not in existing_names:
+            proxies.append(proxy)
+            existing_names.add(proxy.get("name"))
+    proxy_names = [proxy.get("name") for proxy in proxies]
+    if len(proxies) > 4000 or len(set(proxy_names)) != len(proxy_names):
+        raise SystemExit("merged subscriptions exceed limits or contain duplicate names")
+
+    groups = copy.deepcopy(groups)
+    for group in groups:
+        url = group.get("url")
+        if url == "http://www.gstatic.com/generate_204":
+            group["url"] = "https://www.gstatic.com/generate_204"
+
+        if group.get("type") in {"url-test", "fallback"}:
+            group["timeout"] = 5000
+            group["max-failed-times"] = 2
+            if group.get("url") == "https://www.gstatic.com/generate_204":
+                group["expected-status"] = "204"
+            if group.get("name") == "Download":
+                allowed_prefixes = ("STT | ", "STT-", "STT ")
+                group["proxies"] = [
+                    proxy for proxy in group.get("proxies", [])
+                    if isinstance(proxy, str) and proxy.startswith(allowed_prefixes)
+                ]
+                stt_nodes = [
+                    proxy.get("name") for proxy in proxies
+                    if isinstance(proxy, dict)
+                    and isinstance(proxy.get("name"), str)
+                    and proxy["name"].startswith("STT | ")
+                ]
+                group["proxies"] = stt_nodes + [
+                    proxy for proxy in group["proxies"] if proxy not in stt_nodes
+                ]
+
+    # Convert the remaining fixed selectors into self-switching groups while
+    # preserving their original member order and a DIRECT last-resort member.
+    automatic_groups = {
+        "Download": {"type": "url-test", "interval": 180, "tolerance": 100},
+        "Apple": {"type": "fallback", "interval": 120},
+        "Microsoft": {"type": "fallback", "interval": 120},
+    }
+    for group in groups:
+        policy = automatic_groups.get(group.get("name"))
+        if policy is None:
+            continue
+        group.update(policy)
+        group["url"] = "https://www.gstatic.com/generate_204"
+        group["timeout"] = 5000
+        group["max-failed-times"] = 2
+        group["expected-status"] = "204"
+
+    static_glados_names = {proxy.get("name") for proxy in static_glados if isinstance(proxy, dict) and isinstance(proxy.get("name"), str)}
+    stt_nodes = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and (proxy["name"].startswith("STT | ") or proxy["name"] in static_glados_names)]
+    if stt_nodes:
+        stt_group = {
+            "name": "STT",
+            "type": "url-test",
+            "proxies": stt_nodes,
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": 180,
+            "tolerance": 80,
+            "lazy": False,
+            "timeout": 6000,
+            "max-failed-times": 2,
+            "expected-status": "204",
+        }
+        # Preserve the position in retained configs so a no-op update stays a no-op.
+        for index, group in enumerate(groups):
+            if group.get("name") == "STT":
+                groups[index] = stt_group
+                break
+        else:
+            groups.append(stt_group)
+    else:
+        groups = [group for group in groups if group.get("name") != "STT"]
+
+    merged = copy.deepcopy(current)
+    merged["proxies"] = proxies
+    merged["proxy-groups"] = groups
+    return merged
+
+
+def prepare(current: Path, subscription: Path, extras: Path, destination: Path, status: Path) -> None:
+    inputs = {path.resolve() for path in (current, subscription, extras)}
+    if destination.resolve() in inputs or status.resolve() in inputs or destination.resolve() == status.resolve():
+        raise SystemExit("candidate and status outputs must be distinct from the inputs and each other")
+    merged = merge_sources(current, subscription, extras)
+    # Intermediate files stay behind the candidate seam. The standalone overlay
+    # remains the policy implementation used by both commands.
+    with tempfile.TemporaryDirectory(prefix="candidate-", dir=destination.parent) as raw:
+        work = Path(raw)
+        source = work / "merged.yaml"
+        result = work / "candidate.yaml"
+        source.write_text(yaml.safe_dump(merged, allow_unicode=True, sort_keys=False, width=4096))
+        subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("mihomo-policy-overlay")), str(source), str(result)],
+            check=True,
+        )
+        with current.open(encoding="utf-8") as stream:
+            before = yaml.safe_load(stream)
+        with result.open(encoding="utf-8") as stream:
+            after = yaml.safe_load(stream)
+        os.chmod(result, 0o600)
+        result.replace(destination)
+        status.write_text("unchanged\n" if before == after else "changed\n", encoding="ascii")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    validate = commands.add_parser("validate-extra")
+    validate.add_argument("source", type=Path)
+    build = commands.add_parser("prepare")
+    for name in ("current", "subscription", "extras", "destination", "status"):
+        build.add_argument(name, type=Path)
+    args = parser.parse_args()
+    if args.command == "validate-extra":
+        usable_extra(args.source)
+    else:
+        prepare(args.current, args.subscription, args.extras, args.destination, args.status)
+
+
+if __name__ == "__main__":
+    main()
