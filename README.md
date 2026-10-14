@@ -1,13 +1,30 @@
-# Mihomo 双网口透明代理网关：一键配置与运维
+# Mihomo 透明代理网关
 
-把一台 Linux 主机放在上游路由器与下游交换机 / 桥接 AP 之间，让下游设备通过 Mihomo 自动分流。
-新安装从根目录的 **`setup.sh`** 开始：常规双网口环境只需输入机场的 HTTPS 订阅链接，系统依赖、网口、网段、DHCP/DNS、
-分流策略和 systemd 服务由脚本检测并生成。支持 Raspberry Pi 5，也支持符合下述条件的其他 Linux 主机。
+**双网口 Linux 网关，让下游设备通过 Mihomo 自动分流。**
 
-本仓库同时保留手动配置生成器、已有生产部署的运维层和无节点恢复镜像。它们的配置目录和部署流程各自独立。
-仓库不含真实订阅、节点凭据、个人网络配置或管理密钥。
+支持 Raspberry Pi 5 与符合要求的 Linux 主机。从一个 HTTPS 节点订阅开始，自动检测网口、规划网段，配置 DHCP / DNS、分流策略与 systemd 服务。
 
-文档更新：2026-10-12。一键安装已通过本地模拟、真实核心解析和 Linux 命名空间 CI；真实网关及下游客户端仍需验收。
+[快速开始](#快速开始只输入订阅链接) · [适用范围](#自动配置与适用范围) · [检查与恢复](#一键安装的检查与恢复) · [故障排查](#故障排查) · [完整文档](#文档导航)
+
+> **验证状态** · 一键安装已通过模拟、真实核心解析和 Linux 命名空间 CI；真实网关与下游客户端仍待验收。历史验证记录见下文，不代表当前实机状态。
+
+## 网关放在哪里
+
+**上游路由器 → 双网口 Mihomo 网关 → 交换机 / 桥接 AP → 下游设备**
+
+上联保留原有联网配置，下联提供 DHCP / DNS 与透明转发。管理终端从上游内网访问网关。
+
+<details>
+<summary>查看完整生产拓扑（虚构示例地址）</summary>
+
+[![当前双网口透明网关架构：上游路由器、管理终端、树莓派与下游 AP](assets/current-topology.svg)](assets/current-topology.svg)
+
+图示为已有生产部署参考，示例地址均为虚构值。实线表示物理连接，虚线表示 SSH 管理路径。管理终端接上游 Wi-Fi，不要求树莓派启用 wlan0。
+
+`10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，一键入口自动选择实际网段，手动生成器由部署者提供参数；生成器要求两侧都是 RFC1918 私有网段、
+互不重叠，并要求下游有可用主机地址。
+
+</details>
 
 ## 快速开始：只输入订阅链接
 
@@ -51,7 +68,7 @@ sudo sh setup.sh --dry-run  # 检测环境并打印计划，不安装、不下�
 策略默认值集中在 [`gateway/defaults.json`](gateway/defaults.json)，可以用 `--defaults` 指定自定义文件。
 自动延迟选路无法仅凭订阅判断平台解锁或供应商的下载授权，相关限制仍应遵守供应商说明。
 
-### 选择对应入口
+## 选择你的部署方式
 
 | 需求 | 入口 | 配置与边界 |
 |---|---|---|
@@ -60,56 +77,99 @@ sudo sh setup.sh --dry-run  # 检测环境并打印计划，不安装、不下�
 | 维护已有生产方案 | [`automation/`](automation/README.zh-CN.md) | 16 个运维脚本、24 个 systemd 单元和 MosDNS 骨架；依赖已有站点配置与节点能力数据 |
 | 从空白介质恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) | 独立的预发布镜像；写盘会清空目标盘，恢复后配置账号、网络与订阅 |
 
-一键入口不调用生产运维层的 overlay、评分或隔离流程。下文的生产拓扑和运维机制用于理解已有部署，
+一键入口不调用生产运维层的 overlay、评分或隔离流程。本页的生产拓扑和运维机制用于理解已有部署，
 不会全部自动安装到新网关；[当前生产架构](docs/current-architecture.zh-CN.md)与[历史档案](docs/deployment-debugging-summary.zh-CN.md)分开维护。
 
-## 已有生产部署参考
-
-| 项目 | 说明 |
-|---|---|
-| 目标环境 | 单点、可信的本地内网（家庭 / 小工作室）；不适用于公网远程管理、多租户隔离 |
-| 网关位置 | 上游路由器（DHCP / NAT）与下游交换机 / 桥接 AP 之间，下游为 IPv4 only |
-| 分流方式 | Mihomo rule 模式 + TUN / auto-redirect 透明转发 |
-| 管理方式 | 管理终端连接上游 Wi-Fi，经上游 LAN 访问 Pi 的 wan0 地址（SSH） |
-| iKuai | 无依赖：旧方案里的 iKuai 设备已经移除，上游路由器与下游 AP 都不需要运行代理 |
-
-Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经上游内网访问 wan0 的地址即可。WAN / LAN 接口在部署端
-按永久 MAC 固定命名，仓库不发布真实 MAC、SSID 或 NetworkManager 连接文件。
-
-## 生产拓扑参考（示例地址均为虚构值）
-
-[![当前双网口透明网关架构：上游路由器、管理终端、树莓派与下游 AP](assets/current-topology.svg)](assets/current-topology.svg)
-
-实线表示物理连接，虚线表示 SSH 管理路径。管理终端接上游 Wi-Fi，不要求树莓派启用 wlan0。
-
-`10.66.0.0/24` 与 `10.77.0.0/24` 只是示例，一键入口自动选择实际网段，手动生成器由部署者提供参数；生成器要求两侧都是 RFC1918 私有网段、
-互不重叠，并要求下游有可用主机地址。
-
-### DNS 数据流：生产分层与生成器基线
-
-[![DNS 数据流：生产通过 MosDNS 分层，生成器直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
-
-实线为已有生产 DNS 路径；虚线是手动生成器和一键安装使用的 dnsmasq → Mihomo 简化路径。MosDNS 的分流配置与自定义域名规则已随 `automation/` 发布，
-规则数据（国内 / 代理域名集合与 CN IP 集合）仍属部署端。MosDNS 不是替代 DHCP 的服务，dnsmasq 始终承担下游 DHCP。
-
-## 无节点恢复镜像
-
-从 [GitHub Release](https://github.com/ashllll/rpi5-mihomo-gateway-guide/releases/tag/recovery-2026.10.12)
-下载 `.img.xz`、`image-manifest.json`、`SHA256SUMS` 和 `gateway_image.py`。镜像可用 Raspberry Pi Imager 写入，
-也可在 macOS / Linux 上执行一条命令完成校验、写盘、回读和首次启动配置：
+## 一键安装的检查与恢复
 
 ```sh
-# 先查看磁盘列表，替换为你要清空的备用 SD 卡 / USB NVMe；不能选择正在运行的系统盘。
-sudo python3 gateway_image.py restore \
-  --image rpi5-gateway-node-free.img.xz --manifest image-manifest.json \
-  --device /dev/diskN --user myadmin --ssh-key "$HOME/.ssh/id_ed25519.pub"
+sudo systemctl status mihomo-gateway mihomo-gateway-dhcp mihomo-gateway-firewall
+sudo journalctl -u mihomo-gateway -n 80 --no-pager
+sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 ```
 
-工具会要求输入完整的目标盘确认语句，**目标盘原有数据会全部清空**。macOS 使用 `/dev/diskN`，Linux 使用实际整盘路径；
-加 `--dry-run` 可只校验。镜像默认通过有线上游 DHCP 联网，代理、DHCP 服务、NAT 与自动化定时任务暂不启用，
-避免恢复后沿用旧网段或抢发 DHCP。个人站点参数与订阅随后按[恢复说明](docs/recovery-image.zh-CN.md)配置。
-已发布镜像包含的是其构建时的源码快照，不包含此次新增的一键入口；使用新入口前需获取最新仓库。
-当前镜像标为预发布：已提供模拟与文件系统检查，未在承载现网的树莓派上重刷启动验收。
+日志与备份可能含节点信息，应留在本机。配置在 `/etc/mihomo-gateway/`，程序在 `/opt/mihomo-gateway/`，
+私有备份在 `/var/lib/mihomo-gateway/backups/`。回滚恢复网络配置与原服务状态，已安装的依赖包保留。
+恢复程序若遇到错误，会保留恢复标记并输出独立恢复命令；完整机制见[一键配置文档](docs/one-click-setup.zh-CN.md)。
+
+## 三层验收
+
+1. 本机：服务 active、语法通过、路由正确，只证明基本进程与上游状态。
+2. 显式代理：`curl --proxy` 走混合端口，证明端口与节点可用（地址端口以部署参数为准）。
+3. 真实 LAN 客户端：关闭客户端本机 VPN / TUN / 系统代理，验证 DHCP、DNS 和透明 TCP / UDP。
+
+```sh
+dig @10.77.0.1 www.baidu.com
+dig @10.77.0.1 github.com
+curl --noproxy '*' --max-time 20 -I https://www.baidu.com
+curl --noproxy '*' --max-time 20 -I https://github.com
+curl --noproxy '*' --max-time 20 -I https://www.youtube.com
+```
+
+`--noproxy '*'` 只是让 curl 忽略代理环境变量，**不会关闭系统 VPN / TUN**，必须人工确认客户端流量真的经过 LAN。
+Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要先核对接口和路由，不能凭一次 curl 成功宣布网关转发
+成功。之后还要实际播放视频、测试 AI 流式会话；有回退通道时再验证 Mihomo 重启后的动态端口、基础 NAT、DNS 回退
+和真实客户端访问，不要在唯一管理连接上直接做停服务或重启设备测试。
+
+## 故障排查
+
+| 现象 | 先检查 |
+|---|---|
+| 一键入口提示网口有歧义 | 确认实际上联与独立下联，用 `--wan` / `--lan` 指定；接口名不必叫 wan0 / lan0 |
+| SSH 经过将要重配的 LAN | 从上联重新连接，或使用本地控制台，再运行安装 |
+| 下载失败或 SHA256 不符 | 检查软件源、GitHub 与规则源连通性；不要跳过摘要校验 |
+| 订阅拒绝或没有节点 | 确认是有效 HTTPS 节点订阅，非登录页、空订阅或只有远程 provider 引用的配置 |
+| 检测到旧代理、DNS/DHCP、VPN 或防火墙冲突 | 按现有方案先做迁移；安装器不会覆盖未知部署 |
+| PC 无法上网，但网关本机 curl / 显式代理正常 | LAN INPUT 是否漏掉 Mihomo auto-redirect 的动态端口；不要写死事件端口 |
+| 一次 curl 成功却仍上不了网 | 客户端是否还有本地 VPN / TUN / 系统代理；路由是否绕过 Pi |
+| 规则更新失败 | GitHub 403 / 配额；保留旧规则，配额恢复后重试 |
+| dnsmasq 起不来 | 已有 include / server / listen 选项冲突 |
+| 视频走了 AI 池 | 规则顺序是否让 `DOMAIN-KEYWORD,google` 抢先覆盖了 googlevideo |
+| 大文件下载没有变快 | 节点是否真的允许大流量；客户端是否支持分块；单流不会被聚合 |
+| ping 通但 SSH 超时 / 恢复后仍异常 | INPUT 规则、来源网段与 sshd；`nft -c -f` 只查语法，`nft -f` 才应用；不要删除 Mihomo 的表 |
+
+## 验证记录与持续检查
+
+2026-10-12 的本地与 CI 验证结果如下，全部使用脱敏合成数据；[完整说明与复现命令](docs/one-click-setup.zh-CN.md)。
+
+| 验证层 | 结果与边界 |
+|---|---|
+| 安装逻辑与故障注入 | 33 项通过，含 9 个激活阶段失败、NetworkManager / networkd、重复安装与回滚 |
+| 真实 Mihomo v1.19.32 | Darwin ARM64 核心摘要已核对；4 种有效订阅通过、4 种无效订阅拒绝，生成配置通过核心校验 |
+| 原有项目回归 | 生成器、运维层、策略、订阅候选与更新、规则更新、恢复镜像检查通过 |
+| 发布检查 | ShellCheck、Python 编译、文档链接、隐私扫描与 Gitleaks 通过 |
+| Linux 命名空间 | [GitHub Actions 已通过](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/runs/38201843668)：真实 nftables/dnsmasq 解析、防火墙重复加载、删除与外部表保留 |
+| 实机与下游 | 真实网卡、网络管理器切换、DHCP、透明 TCP/UDP 和重启恢复尚待目标机验收 |
+
+```sh
+python3 tools/check_setup.py
+python3 tools/validate_public.py
+python3 tools/check_publication_privacy.py
+# 仅限 Linux 测试机；脚本会创建独立网络命名空间：
+sudo python3 tools/check_setup_linux.py
+```
+
+[GitHub Actions](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/workflows/validate.yml) 在 push / PR 时运行完整回归。
+模拟测试、解析检查和本机显式代理成功，各自只证明对应层次；上线前仍按上面的三层验收确认真实下游路径。
+
+## 文档导航
+
+| 你要完成的事 | 文档 |
+|---|---|
+| 安装、指定网口、配置订阅与回滚 | [一键配置指南](docs/one-click-setup.zh-CN.md) |
+| 理解网络、DNS 与组件职责 | [当前架构](docs/current-architecture.zh-CN.md) |
+| 手动生成配置并分阶段上线 | [部署指南](docs/deployment-current.zh-CN.md) |
+| 排查转发、动态端口与客户端路径 | [运维指南](docs/operations-current.zh-CN.md) |
+| 配置定时任务与生产运维层 | [自动化层](automation/README.zh-CN.md) · [智能选节点设计](docs/adaptive-selection.zh-CN.md) |
+| 校验镜像、写盘与恢复 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) |
+| 评估 Landscape 融合 | [可行性](docs/landscape-feasibility.zh-CN.md) · [能力报告](docs/landscape-capabilities.zh-CN.md) · [验收计划](docs/landscape-acceptance.zh-CN.md) |
+
+## 进阶参考
+
+新安装优先使用 `setup.sh`。以下保留手动生成器、已有生产运维层与恢复镜像的独立流程。
+
+<details>
+<summary>手动配置生成器：参数、生成文件与安装映射</summary>
 
 ## 进阶：手动配置生成器
 
@@ -199,24 +259,35 @@ Mihomo 的 systemd 单元需要自己准备（`ExecStart` 用实际二进制和 
 DHCP / DNS、NAT 和代理。nftables 需要支持 `destroy table`；不要为了绕过报错使用 `flush ruleset`，语法检查必须在
 目标系统上进行。
 
-## 三层验收
+</details>
 
-1. 本机：服务 active、语法通过、路由正确，只证明基本进程与上游状态。
-2. 显式代理：`curl --proxy` 走混合端口，证明端口与节点可用（地址端口以部署参数为准）。
-3. 真实 LAN 客户端：关闭客户端本机 VPN / TUN / 系统代理，验证 DHCP、DNS 和透明 TCP / UDP。
+<details>
+<summary>已有生产部署：环境与 DNS 数据流</summary>
 
-```sh
-dig @10.77.0.1 www.baidu.com
-dig @10.77.0.1 github.com
-curl --noproxy '*' --max-time 20 -I https://www.baidu.com
-curl --noproxy '*' --max-time 20 -I https://github.com
-curl --noproxy '*' --max-time 20 -I https://www.youtube.com
-```
+## 已有生产部署参考
 
-`--noproxy '*'` 只是让 curl 忽略代理环境变量，**不会关闭系统 VPN / TUN**，必须人工确认客户端流量真的经过 LAN。
-Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要先核对接口和路由，不能凭一次 curl 成功宣布网关转发
-成功。之后还要实际播放视频、测试 AI 流式会话；有回退通道时再验证 Mihomo 重启后的动态端口、基础 NAT、DNS 回退
-和真实客户端访问，不要在唯一管理连接上直接做停服务或重启设备测试。
+| 项目 | 说明 |
+|---|---|
+| 目标环境 | 单点、可信的本地内网（家庭 / 小工作室）；不适用于公网远程管理、多租户隔离 |
+| 网关位置 | 上游路由器（DHCP / NAT）与下游交换机 / 桥接 AP 之间，下游为 IPv4 only |
+| 分流方式 | Mihomo rule 模式 + TUN / auto-redirect 透明转发 |
+| 管理方式 | 管理终端连接上游 Wi-Fi，经上游 LAN 访问 Pi 的 wan0 地址（SSH） |
+| iKuai | 无依赖：旧方案里的 iKuai 设备已经移除，上游路由器与下游 AP 都不需要运行代理 |
+
+Pi 不需要连接管理 Wi-Fi，也不需要 wlan0：只要管理终端能经上游内网访问 wan0 的地址即可。WAN / LAN 接口在部署端
+按永久 MAC 固定命名，仓库不发布真实 MAC、SSID 或 NetworkManager 连接文件。
+
+### DNS 数据流：生产分层与生成器基线
+
+[![DNS 数据流：生产通过 MosDNS 分层，生成器直接转到 Mihomo DNS](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
+
+实线为已有生产 DNS 路径；虚线是手动生成器和一键安装使用的 dnsmasq → Mihomo 简化路径。MosDNS 的分流配置与自定义域名规则已随 `automation/` 发布，
+规则数据（国内 / 代理域名集合与 CN IP 集合）仍属部署端。MosDNS 不是替代 DHCP 的服务，dnsmasq 始终承担下游 DHCP。
+
+</details>
+
+<details>
+<summary>生产运维层：业务选路、自适应机制与网络经验</summary>
 
 ## 生产运维层：多供应商与选路策略
 
@@ -275,34 +346,52 @@ Mac 同时连 Wi-Fi、有线和本地 TUN 时默认路由可能绕过 Pi，要�
   约 99% CPU idle、约 34°C、可用内存约 6.7GiB，只说明当时有余量，不构成加密转发吞吐承诺；单队列网卡共享
   中断且 RPS 关闭，未实施 BBR、超频、performance governor 或未经验证的 backlog 调参。
 
-## 一键安装的检查与恢复
+</details>
+
+<details>
+<summary>无节点恢复镜像：校验、写盘与首次启动</summary>
+
+## 无节点恢复镜像
+
+从 [GitHub Release](https://github.com/ashllll/rpi5-mihomo-gateway-guide/releases/tag/recovery-2026.10.12)
+下载 `.img.xz`、`image-manifest.json`、`SHA256SUMS` 和 `gateway_image.py`。镜像可用 Raspberry Pi Imager 写入，
+也可在 macOS / Linux 上执行一条命令完成校验、写盘、回读和首次启动配置：
 
 ```sh
-sudo systemctl status mihomo-gateway mihomo-gateway-dhcp mihomo-gateway-firewall
-sudo journalctl -u mihomo-gateway -n 80 --no-pager
-sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
+# 先查看磁盘列表，替换为你要清空的备用 SD 卡 / USB NVMe；不能选择正在运行的系统盘。
+sudo python3 gateway_image.py restore \
+  --image rpi5-gateway-node-free.img.xz --manifest image-manifest.json \
+  --device /dev/diskN --user myadmin --ssh-key "$HOME/.ssh/id_ed25519.pub"
 ```
 
-日志与备份可能含节点信息，应留在本机。配置在 `/etc/mihomo-gateway/`，程序在 `/opt/mihomo-gateway/`，
-私有备份在 `/var/lib/mihomo-gateway/backups/`。回滚恢复网络配置与原服务状态，已安装的依赖包保留。
-恢复程序若遇到错误，会保留恢复标记并输出独立恢复命令；完整机制见[一键配置文档](docs/one-click-setup.zh-CN.md)。
+工具会要求输入完整的目标盘确认语句，**目标盘原有数据会全部清空**。macOS 使用 `/dev/diskN`，Linux 使用实际整盘路径；
+加 `--dry-run` 可只校验。镜像默认通过有线上游 DHCP 联网，代理、DHCP 服务、NAT 与自动化定时任务暂不启用，
+避免恢复后沿用旧网段或抢发 DHCP。个人站点参数与订阅随后按[恢复说明](docs/recovery-image.zh-CN.md)配置。
+已发布镜像包含的是其构建时的源码快照，不包含此次新增的一键入口；使用新入口前需获取最新仓库。
+当前镜像标为预发布：已提供模拟与文件系统检查，未在承载现网的树莓派上重刷启动验收。
 
-## 故障排查
+</details>
 
-| 现象 | 先检查 |
-|---|---|
-| 一键入口提示网口有歧义 | 确认实际上联与独立下联，用 `--wan` / `--lan` 指定；接口名不必叫 wan0 / lan0 |
-| SSH 经过将要重配的 LAN | 从上联重新连接，或使用本地控制台，再运行安装 |
-| 下载失败或 SHA256 不符 | 检查软件源、GitHub 与规则源连通性；不要跳过摘要校验 |
-| 订阅拒绝或没有节点 | 确认是有效 HTTPS 节点订阅，非登录页、空订阅或只有远程 provider 引用的配置 |
-| 检测到旧代理、DNS/DHCP、VPN 或防火墙冲突 | 按现有方案先做迁移；安装器不会覆盖未知部署 |
-| PC 无法上网，但网关本机 curl / 显式代理正常 | LAN INPUT 是否漏掉 Mihomo auto-redirect 的动态端口；不要写死事件端口 |
-| 一次 curl 成功却仍上不了网 | 客户端是否还有本地 VPN / TUN / 系统代理；路由是否绕过 Pi |
-| 规则更新失败 | GitHub 403 / 配额；保留旧规则，配额恢复后重试 |
-| dnsmasq 起不来 | 已有 include / server / listen 选项冲突 |
-| 视频走了 AI 池 | 规则顺序是否让 `DOMAIN-KEYWORD,google` 抢先覆盖了 googlevideo |
-| 大文件下载没有变快 | 节点是否真的允许大流量；客户端是否支持分块；单流不会被聚合 |
-| ping 通但 SSH 超时 / 恢复后仍异常 | INPUT 规则、来源网段与 sshd；`nft -c -f` 只查语法，`nft -f` 才应用；不要删除 Mihomo 的表 |
+## Landscape 融合验收计划
+
+[逐步验收与回滚清单](docs/landscape-acceptance.zh-CN.md)覆盖平台预检、隔离启动、DNS/DHCP、透明 TCP/UDP、
+业务策略、故障注入、重启、升级降级与完整回退，并给出只读预检命令、逐项证据字段和恢复流程。当前仅完成
+验收设计：尚未实现 Landscape 部署、恢复工具或执行实网验收，清单中的用例全部保持待测。
+
+## 隐私与安全边界
+
+- 仓库有意排除运营凭据：不含订阅 URL / 令牌、节点凭据、Wi-Fi 或面板密码、私钥与证书、完整 `/etc/mihomo`
+  归档、未脱敏的路由器备份；文档里的私有 IPv4 示例描述网络结构，不是凭据。
+- 已发布的自动化源码遵守同一边界：订阅链接、节点标签、面板 token 与真实地址分别来自
+  `/etc/mihomo-automation.env`、`/etc/mihomo/secrets` 与 `capabilities.yaml` 的 `overlay` 段，仓库里只有示例值与空清单。
+- 一键入口的 `/etc/mihomo-gateway/` 与 `/var/lib/mihomo-gateway/` 包含订阅、节点缓存、管理密钥或备份，均应保持 root 私有，不得上传。
+- 生成的候选配置包含随机 controller secret，必须保持私有；不要提交 `rendered/` 或 `site.local.json`。
+- [工具](tools/validate_public.py) 与 CI 是附加防线，不是“任意归档都无密钥”的证明；发布前还应按
+  [SECURITY.md](SECURITY.md) 用 Gitleaks 扫描工作区和 Git 历史（输出需脱敏）。发现误发布的凭据时不要开包含该
+  值的公开 issue：先吊销，再通过私有渠道联系仓库所有者。
+
+<details>
+<summary>仓库结构与检查工具</summary>
 
 ## 仓库结构
 
@@ -330,47 +419,21 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 | [`.github/workflows/validate.yml`](.github/workflows/validate.yml) | CI：发布隐私、原有回归、一键安装模拟与隔离 Linux 命名空间检查 |
 | [`SECURITY.md`](SECURITY.md) | 隐私与安全边界、禁止提交清单、凭据泄露处理 |
 
-## 隐私与安全边界
+</details>
 
-- 仓库有意排除运营凭据：不含订阅 URL / 令牌、节点凭据、Wi-Fi 或面板密码、私钥与证书、完整 `/etc/mihomo`
-  归档、未脱敏的路由器备份；文档里的私有 IPv4 示例描述网络结构，不是凭据。
-- 已发布的自动化源码遵守同一边界：订阅链接、节点标签、面板 token 与真实地址分别来自
-  `/etc/mihomo-automation.env`、`/etc/mihomo/secrets` 与 `capabilities.yaml` 的 `overlay` 段，仓库里只有示例值与空清单。
-- 一键入口的 `/etc/mihomo-gateway/` 与 `/var/lib/mihomo-gateway/` 包含订阅、节点缓存、管理密钥或备份，均应保持 root 私有，不得上传。
-- 生成的候选配置包含随机 controller secret，必须保持私有；不要提交 `rendered/` 或 `site.local.json`。
-- [工具](tools/validate_public.py) 与 CI 是附加防线，不是“任意归档都无密钥”的证明；发布前还应按
-  [SECURITY.md](SECURITY.md) 用 Gitleaks 扫描工作区和 Git 历史（输出需脱敏）。发现误发布的凭据时不要开包含该
-  值的公开 issue：先吊销，再通过私有渠道联系仓库所有者。
-
-## 验证记录与持续检查
-
-2026-10-12 的本地与 CI 验证结果如下，全部使用脱敏合成数据；[完整说明与复现命令](docs/one-click-setup.zh-CN.md)。
-
-| 验证层 | 结果与边界 |
-|---|---|
-| 安装逻辑与故障注入 | 33 项通过，含 9 个激活阶段失败、NetworkManager / networkd、重复安装与回滚 |
-| 真实 Mihomo v1.19.32 | Darwin ARM64 核心摘要已核对；4 种有效订阅通过、4 种无效订阅拒绝，生成配置通过核心校验 |
-| 原有项目回归 | 生成器、运维层、策略、订阅候选与更新、规则更新、恢复镜像检查通过 |
-| 发布检查 | ShellCheck、Python 编译、文档链接、隐私扫描与 Gitleaks 通过 |
-| Linux 命名空间 | [GitHub Actions 已通过](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/runs/38201843668)：真实 nftables/dnsmasq 解析、防火墙重复加载、删除与外部表保留 |
-| 实机与下游 | 真实网卡、网络管理器切换、DHCP、透明 TCP/UDP 和重启恢复尚待目标机验收 |
-
-```sh
-python3 tools/check_setup.py
-python3 tools/validate_public.py
-python3 tools/check_publication_privacy.py
-# 仅限 Linux 测试机；脚本会创建独立网络命名空间：
-sudo python3 tools/check_setup_linux.py
-```
-
-[GitHub Actions](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/workflows/validate.yml) 在 push / PR 时运行完整回归。
-模拟测试、解析检查和本机显式代理成功，各自只证明对应层次；上线前仍按上面的三层验收确认真实下游路径。
+<details>
+<summary>历史档案（2026-07）</summary>
 
 ## 历史档案
 
 以下内容记录 2026-07 的部署，其中的拓扑、网段、供应商和选路均已变化，只作为历史记录保留，不代表当前配置，也不应直接复制：
 [部署、调试与优化长文](docs/deployment-debugging-summary.zh-CN.md)（文首已标注历史档案，性能数据是当时设备的测试记录）、
 [拓扑浏览页面](web/index.html)、[`assets/network-topology.svg`](assets/network-topology.svg) 和 [`assets/network-topology.png`](assets/network-topology.png)（页面顶部已注明历史档案）。
+
+</details>
+
+<details>
+<summary>架构图维护：可编辑源文件与导出命令</summary>
 
 ## 架构图维护
 
@@ -392,6 +455,8 @@ npx --yes --package @mermaid-js/mermaid-cli@12.0.0 mmdc -i assets/current-automa
 `PUPPETEER_EXECUTABLE_PATH` 指定本机已安装的兼容 Chromium / Chrome；该路径不应写入公开配置。
 
 发布前检查文字、箭头与实际配置是否一致，并运行隐私检查；不要把真实网段、MAC 或订阅填入图中。
+
+</details>
 
 ## License
 
