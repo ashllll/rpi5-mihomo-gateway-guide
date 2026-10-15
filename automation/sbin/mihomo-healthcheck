@@ -26,7 +26,7 @@ install -d -m 700 "$state_dir"
 
 http_code() {
   curl --silent --show-error --output /dev/null \
-    --connect-timeout 5 --max-time 15 --write-out '%{http_code}' "$@" \
+    --connect-timeout 3 --max-time 8 --write-out '%{http_code}' "$@" \
     2>/dev/null || true
 }
 
@@ -62,7 +62,7 @@ probe_ai() {
   do
     code=$(http_code --proxy "$proxy" "$target")
     case "$code" in
-      2??|3??|401|403)
+      2??|3??|401)
         successes=$((successes + 1))
         [ "$target" = https://api.openai.com/v1/models ] && openai_ok=true
         ;;
@@ -91,15 +91,22 @@ set_failures() {
 
 trigger_group_check() {
   group=$1
-  url=$2
   [ -s "$secret_file" ] || return 0
   secret=$(cat "$secret_file")
   encoded_group=$(printf %s "$group" | jq -sRr @uri)
+  # Native group retests may use their configured URL, regardless of the
+  # diagnostic request URL. Always obtain URL and status from the same group.
+  state=$(curl --fail --silent --connect-timeout 3 --max-time 5 \
+    -H "Authorization: Bearer $secret" \
+    "$controller/proxies/$encoded_group" 2>/dev/null) || return 0
+  url=$(printf %s "$state" | jq -er '.testUrl // empty') || return 0
+  expected=$(printf %s "$state" | jq -er '.expectedStatus | tostring | select(length > 0 and . != "null")') || return 0
   encoded_url=$(printf %s "$url" | jq -sRr @uri)
+  encoded_expected=$(printf %s "$expected" | jq -sRr @uri)
   curl --fail --silent --output /dev/null \
     --connect-timeout 3 --max-time 12 \
     -H "Authorization: Bearer $secret" \
-    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=6000" \
+    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=5000&expected=$encoded_expected" \
     2>/dev/null || true
 }
 
@@ -117,20 +124,44 @@ else
   direct=false
 fi
 
-default_ok=false
-developer_ok=false
-streaming_ok=false
-ai_ok=false
-download_ok=false
-probe_exact 204 https://www.gstatic.com/generate_204 && default_ok=true
-probe_success 'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack' && developer_ok=true
-probe_exact 204 https://www.youtube.com/generate_204 && streaming_ok=true
-probe_ai && ai_ok=true
-if probe_exact 401 https://registry-1.docker.io/v2/ && \
-  probe_success https://codeload.github.com/github/gitignore/zip/refs/heads/main && \
-  probe_success https://huggingface.co/gpt2/resolve/main/config.json; then
-  download_ok=true
-fi
+probe_download() {
+  probe_exact 401 https://registry-1.docker.io/v2/ &&
+    probe_success https://codeload.github.com/github/gitignore/zip/refs/heads/main &&
+    probe_success https://huggingface.co/gpt2/resolve/main/config.json
+}
+
+probe_chatgpt() {
+  code=$(http_code --proxy "$proxy" https://chatgpt.com/api/auth/session)
+  printf '%s\n' "$code" >"$state_dir/.chatgpt_code"
+  [ "$code" = 200 ]
+}
+
+# Independent service probes run concurrently so one stalled service cannot
+# delay all the other recovery decisions. The maintenance lock owns the files.
+run_probe() {
+  name=$1
+  shift
+  if "$@"; then result=true; else result=false; fi
+  printf '%s\n' "$result" >"$state_dir/.$name.probe"
+}
+run_probe default probe_exact 204 https://www.gstatic.com/generate_204 &
+run_probe developer probe_success 'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack' &
+run_probe streaming probe_exact 204 https://www.youtube.com/generate_204 &
+run_probe ai probe_ai &
+run_probe social probe_exact 200 https://x.com/robots.txt &
+run_probe telegram probe_exact 200 https://core.telegram.org/ &
+run_probe chatgpt_web probe_chatgpt &
+run_probe download probe_download &
+wait
+default_ok=$(cat "$state_dir/.default.probe")
+developer_ok=$(cat "$state_dir/.developer.probe")
+streaming_ok=$(cat "$state_dir/.streaming.probe")
+ai_ok=$(cat "$state_dir/.ai.probe")
+social_ok=$(cat "$state_dir/.social.probe")
+telegram_ok=$(cat "$state_dir/.telegram.probe")
+chatgpt_web_ok=$(cat "$state_dir/.chatgpt_web.probe")
+chatgpt_code=$(cat "$state_dir/.chatgpt_code")
+download_ok=$(cat "$state_dir/.download.probe")
 
 failed_categories=0
 max_failures=0
@@ -140,7 +171,6 @@ process_category() {
   name=$1
   healthy=$2
   group=$3
-  url=$4
   failures=$(read_failures "$name")
 
   if [ "$healthy" = true ]; then
@@ -162,46 +192,50 @@ process_category() {
   set_failures "$name" "$failures"
   [ "$failures" -le "$max_failures" ] || max_failures=$failures
 
-  if [ "$failures" -ge 2 ]; then
-    trigger_group_check "$group" "$url"
+  if [ "$failures" -ge 1 ]; then
+    trigger_group_check "$group"
     actions="group-check"
   fi
 }
 
-process_category default "$default_ok" Auto https://www.gstatic.com/generate_204
-process_category developer "$developer_ok" "GitHub Control" \
-  'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack'
-process_category streaming "$streaming_ok" Streaming https://www.youtube.com/generate_204
-process_category ai "$ai_ok" "Research + AI" https://api.openai.com/v1/models
-process_category download "$download_ok" Download \
-  https://codeload.github.com/github/gitignore/zip/refs/heads/main
-
-if [ "$direct" = true ] && [ "$failed_categories" -gt 0 ]; then
-  if [ "$max_failures" -eq 3 ]; then
-    actions="reload"
-    logger -t mihomo-healthcheck \
-      "A service path remains unhealthy after group retest; reloading Mihomo"
-    systemctl reload mihomo
-  elif [ "$max_failures" -ge 5 ] && [ "$failed_categories" -ge 2 ]; then
-    actions="restart"
-    logger -t mihomo-healthcheck \
-      "Multiple service paths remain unhealthy; restarting Mihomo"
-    systemctl restart mihomo
-  fi
+process_category default "$default_ok" Auto
+process_category developer "$developer_ok" "GitHub Control"
+process_category streaming "$streaming_ok" Streaming
+process_category ai "$ai_ok" "Research + AI"
+case "$chatgpt_code" in
+  200) chatgpt_state=available ;;
+  403) chatgpt_state=restricted ;;
+  000) chatgpt_state=unreachable ;;
+  *) chatgpt_state=http-error ;;
+esac
+if [ "$chatgpt_web_ok" != true ]; then
+  # Keep web observations independent of API health. Retesting the API cannot
+  # prove recovery of a web-only failure; browser acceptance is separate.
+  failed_categories=$((failed_categories + 1))
+  set_failures chatgpt_web 0
+  if [ "$actions" = none ]; then actions="site-$chatgpt_state"; fi
 fi
+process_category social "$social_ok" Social
+process_category telegram "$telegram_ok" Telegram
+process_category download "$download_ok" Download
+
+# Service failures are isolated to their groups. Reloading/restarting a live
+# core here disrupts unrelated sessions and resets its health history.
+# The inactive-process recovery above remains available for an actual crash.
 
 if [ "$direct" != true ]; then
   mode=upstream-down
   actions="wait"
-elif [ "$failed_categories" -eq 0 ]; then
+elif [ "$failed_categories" -eq 0 ] && [ "$chatgpt_web_ok" = true ]; then
   mode=healthy
 else
   mode=degraded
 fi
 
-printf '%s mode=%s direct=%s default=%s developer=%s streaming=%s ai=%s download=%s failed_categories=%s max_failures=%s action=%s\n' \
+printf '%s mode=%s direct=%s default=%s developer=%s streaming=%s ai=%s download=%s failed_categories=%s max_failures=%s action=%s social=%s telegram=%s chatgpt_web=%s chatgpt_http=%s chatgpt_state=%s\n' \
   "$(date -Is)" "$mode" "$direct" "$default_ok" "$developer_ok" \
   "$streaming_ok" "$ai_ok" "$download_ok" "$failed_categories" "$max_failures" "$actions" \
+  "$social_ok" "$telegram_ok" "$chatgpt_web_ok" "$chatgpt_code" "$chatgpt_state" \
   >"$status_file"
 
 if [ "$failed_categories" -gt 0 ]; then

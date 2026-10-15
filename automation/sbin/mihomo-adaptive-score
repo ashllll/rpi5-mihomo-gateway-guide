@@ -102,15 +102,20 @@ def choose_sample(candidates: list[str], limit: int, cursor: int) -> tuple[list[
     return selected, (start + limit) % len(candidates)
 
 
-def probe(node: str, target: str, secret: str) -> dict:
+def probe(node: str, target: str, secret: str, expected: str = "200-399") -> dict:
     started = time.monotonic()
-    query = urlencode({"url": target, "timeout": "6000"})
+    query = urlencode({"url": target, "timeout": "6000", "expected": expected})
     path = f"/proxies/{quote(node, safe='')}/delay?{query}"
     try:
         value = api_get(path, secret)
         delay = value.get("delay")
         if isinstance(delay, bool) or not isinstance(delay, (int, float)) or delay <= 0:
             raise RuntimeError("controller returned no valid delay")
+        # This core can return delay>0 even when expected HTTP status fails.
+        # Selection uses per-URL state, not the global transport 'alive' bit.
+        details = api_get(f"/proxies/{quote(node, safe='')}", secret)
+        if details.get("extra", {}).get(target, {}).get("alive") is not True:
+            raise RuntimeError("probe HTTP status did not satisfy expected range")
         return {
             "node": node,
             "ok": True,
@@ -216,7 +221,7 @@ def main() -> int:
     state.setdefault("services", {})
     state.setdefault("cursors", {})
     now = time.time()
-    jobs: list[tuple[str, str, str]] = []
+    jobs: list[tuple[str, str, str, str]] = []
     samples_by_service: dict[str, list[str]] = {}
 
     for service, spec in services.items():
@@ -237,11 +242,12 @@ def main() -> int:
         state["cursors"][service] = next_cursor
         samples_by_service[service] = selected
         for node in selected:
-            jobs.append((service, node, target))
+            jobs.append((service, node, target, str(spec.get("expected", "200-399"))))
 
     results_by_service: dict[str, list[dict]] = {service: [] for service in samples_by_service}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(probe, node, target, secret): (service, node) for service, node, target in jobs}
+        futures = {executor.submit(probe, node, target, secret, expected): (service, node)
+                   for service, node, target, expected in jobs}
         for future in as_completed(futures):
             service, _node = futures[future]
             results_by_service.setdefault(service, []).append(future.result())
