@@ -13,7 +13,7 @@
 #   sudo automation/install.sh [--dry-run] [--enable-timers]
 #
 #   --dry-run        print every action without touching the filesystem
-#   --enable-timers  also enable the eight automation timers via systemctl
+#   --enable-timers  also enable the seven default automation timers via systemctl
 #
 # GATEWAY_ROOT prefixes every destination path and exists so the installer can
 # be exercised in a sandbox (`GATEWAY_ROOT=/tmp/root automation/install.sh`);
@@ -32,7 +32,7 @@ usage() {
 usage: install.sh [--dry-run] [--enable-timers]
 
   --dry-run        print planned actions without changing the filesystem
-  --enable-timers  enable the automation timers with systemctl
+  --enable-timers  enable seven timers; adaptive application stays opt-in
 EOF
 }
 
@@ -139,7 +139,6 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
     for timer in \
       mihomo-healthcheck.timer \
       mihomo-adaptive-score.timer \
-      mihomo-adaptive-apply.timer \
       mihomo-subscription-update.timer \
       mihomo-rules-update.timer \
       mosdns-healthcheck.timer \

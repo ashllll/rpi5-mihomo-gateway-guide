@@ -26,7 +26,7 @@
 |---|---|
 | `dnsmasq-safe-start` | 用 direct 基线原子安装 `/etc/dnsmasq-upstreams.conf`，先 `dnsmasq --test` 再放行，避免首次启动时 DNS 不可用 |
 | `mihomo-dns-mode` | 切换 dnsmasq 上游：`auto` / `mosdns` / `mihomo` / `direct`，带锁与原子替换 |
-| `mihomo-healthcheck` | 分类连通性检查与保守恢复；失败时调用 `mihomo-dns-mode` 回退，恢复后回到自动模式 |
+| `mihomo-healthcheck` | 并行分类连通检查与组内复测；单业务失败不重载整个核心，ChatGPT 网页状态单独记录；进程未运行才请求重启 |
 | `mihomo-update-subscription` | 下载主订阅与额外来源 → 生成候选 → 校验与备份 → 热加载并检查；公告占位订阅视为过期，失败回滚 |
 | `mihomo-subscription-candidate` | 离线生成订阅候选配置：校验来源、合并与重命名引用、应用现有 overlay、判断最终变化；不安装或重载 |
 | `mihomo-update-rules` | 更新受管规则集，遇到 GitHub 403 / 配额耗尽时保留旧规则 |
@@ -50,9 +50,9 @@
 
 | Timer | 周期 | 作用 |
 |---|---|---|
-| `mihomo-healthcheck.timer` | 每 2 分钟（抖动 20s） | 连通性与 DNS 模式自愈 |
+| `mihomo-healthcheck.timer` | 每 1 分钟（抖动 3s） | 分类连通性与组内恢复 |
 | `mihomo-adaptive-score.timer` | 每 5 分钟（偏移 `*:0/5`，抖动 45s） | 影子评分采集 |
-| `mihomo-adaptive-apply.timer` | 每 5 分钟（偏移 `*:1/5`，抖动 30s） | 受门禁的隔离执行 |
+| `mihomo-adaptive-apply.timer` | 每 5 分钟（偏移 `*:1/5`，抖动 30s） | 可选隔离执行；默认不启用 |
 | `mihomo-subscription-update.timer` | 04:30（抖动 15min） | 订阅更新（至少 24 小时间隔） |
 | `mihomo-rules-update.timer` | 04:15（抖动 1h） | 规则集更新 |
 | `mosdns-rules-update.timer` | 04:20（抖动 30min） | MosDNS 路由数据更新 |
@@ -60,14 +60,18 @@
 | `mosdns-healthcheck.timer` | 启动 30s 后，之后每 1 分钟 | MosDNS 分流自检与回退选择 |
 
 `Persistent=true` 的 timer 可能在首次启动或补执行时立即触发一次，不能只看 `OnCalendar` 判断是否会执行。
-评分采集与执行分离：基础联网未稳定前不要启用 `mihomo-adaptive-apply.timer`。
+评分采集与执行分离：默认不启用 `mihomo-adaptive-apply.timer`；既有部署的启用状态不会被安装器改变。
+若要停用旧执行任务，先等待在途事务完成，再执行 `sudo systemctl disable --now mihomo-adaptive-apply.timer`。
+`stability.groups` 给核心业务配置 45 秒主动探测；既有 manifest 需合并新字段，安装器不会覆盖部署数据。
+编辑 manifest 不会直接改变运行中的配置；下一次满足更新间隔且通过校验和健康门禁的订阅更新，
+会重新生成并加载 overlay。随后核对运行配置的检测周期、Telegram 网段及实际业务路径。
 
 ## 安装
 
 ```sh
 sudo automation/install.sh --dry-run        # 只打印计划，不碰文件系统
 sudo automation/install.sh                  # 安装脚本与单元，创建运行目录
-sudo automation/install.sh --enable-timers  # 同时 enable --now 八个 timer
+sudo automation/install.sh --enable-timers  # enable --now 七个默认 timer，隔离执行保持显式启用
 GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，也不装到真实系统）
 ```
 
@@ -141,6 +145,7 @@ python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
 python3 tools/check_subscription_update.py  # 完整订阅更新：16 种离线场景，包括写入、中断、重载、回滚与缓存保护
 python3 tools/check_automation.py   # 语法、ASCII 与禁值扫描、env 变量双向一致、单元加载 env、沙箱安装、运行时参数化
+python3 tools/check_stability.py    # 业务组内恢复、HTTP 状态与 per-URL 健康、网页状态独立记录
 python3 tools/check_update_rules.py # 规则更新事务与回滚
 python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
