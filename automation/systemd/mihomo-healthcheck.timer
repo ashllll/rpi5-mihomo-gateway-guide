@@ -1,11 +1,10 @@
 [Unit]
-Description=Periodically verify and recover Mihomo connectivity
+Description=Check service paths once per minute
 
 [Timer]
-OnCalendar=*:0/2
-RandomizedDelaySec=20s
-AccuracySec=15s
-Persistent=true
+OnCalendar=*-*-* *:*:00
+RandomizedDelaySec=3s
+AccuracySec=1s
 Unit=mihomo-healthcheck.service
 
 [Install]

@@ -5,6 +5,23 @@
 `mihomo-adaptive-apply` 只在门禁满足时执行隔离，`mihomo-policy-overlay` 依据能力清单生成分组。
 节点标签、阈值与供应商能力数据是部署数据，不随仓库发布。
 
+## 当前稳定性策略
+
+`capabilities.yaml` 的 `stability.groups` 可覆盖业务组的探测参数，公开模板为 AI、X、Telegram、
+YouTube 设置 45 秒主动检测，Auto 为 60 秒。节点成员与供应商能力限制保持独立。
+`stability.telegram_cidrs` 保存 Telegram 官方公布的网段，规则在域名规则前匹配 IP 直连客户端。
+
+健康检查每分钟并行测试业务，只对失败的业务组发起带期望状态码的复测；进程仍在运行时，
+不因为单业务异常重载或重启整个 Mihomo。进程未运行时保留重启恢复。
+影子评分必须检查 `extra[url].alive`：部分核心在 HTTP 状态不匹配时仍返回非零延迟，不能仅凭数字判健康。
+
+ChatGPT 网页 GET 与 OpenAI API 分开检查。网页 403 标为 `restricted`，连接失败标为 `unreachable`，
+不把 API 复测宣称为网页恢复。命令行受到网站验证时，应再用真实浏览器 / App 验收。
+
+默认 timer 集合不启用 `mihomo-adaptive-apply.timer`，避免隔离执行频繁热加载全配置。
+升级既有部署时保留原有 timer 状态，需人工停用旧执行 timer；manifest 也需合并新字段。
+45 秒只是检测周期，不保证固定恢复时间或长期零断连。
+
 ## 先筛能力，再比较质量
 
 每个供应商和节点用配置描述 allowed_services、download_allowed、region、

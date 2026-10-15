@@ -1,4 +1,49 @@
 version: 1
+stability:
+  groups:
+    Research + AI:
+      url: https://api.openai.com/v1/models
+      expected-status: 401
+      interval: 45
+      timeout: 5000
+      lazy: false
+      max-failed-times: 1
+    Streaming:
+      interval: 45
+      timeout: 5000
+      lazy: false
+      max-failed-times: 1
+      tolerance: 200
+    Social:
+      interval: 45
+      timeout: 5000
+      lazy: false
+      max-failed-times: 1
+    Telegram:
+      interval: 45
+      timeout: 5000
+      lazy: false
+      max-failed-times: 1
+    Auto:
+      interval: 60
+      lazy: false
+      timeout: 5000
+      max-failed-times: 1
+  telegram_cidrs:
+  - 91.108.56.0/22
+  - 91.108.4.0/22
+  - 91.108.8.0/22
+  - 91.108.16.0/22
+  - 91.108.12.0/22
+  - 149.154.160.0/20
+  - 91.105.192.0/23
+  - 91.108.20.0/22
+  - 185.76.151.0/24
+  - 2001:b28:f23d::/48
+  - 2001:b28:f23f::/48
+  - 2001:67c:4e8::/48
+  - 2001:b28:f23c::/48
+  - 2a0a:f280::/32
 
 # This file is policy data, not a subscription.  Subscription updates keep
 # the original source rules; the local overlay reads this manifest to decide
@@ -26,18 +71,22 @@ services:
   ai:
     groups: ["Research + AI"]
     url: "https://api.openai.com/v1/models"
+    expected: "401"
     sample_limit: 8
   streaming:
     groups: ["Streaming"]
     url: "https://www.youtube.com/generate_204"
+    expected: "204"
     sample_limit: 8
   social:
     groups: ["Social"]
     url: "https://x.com/robots.txt"
+    expected: "200"
     sample_limit: 8
   telegram:
     groups: ["Telegram"]
     url: "https://core.telegram.org/"
+    expected: "200"
     sample_limit: 8
   github_control:
     groups: ["GitHub Control"]
