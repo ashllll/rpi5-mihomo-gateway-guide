@@ -91,21 +91,22 @@ set_failures() {
 
 trigger_group_check() {
   group=$1
-  url=$2
   [ -s "$secret_file" ] || return 0
   secret=$(cat "$secret_file")
   encoded_group=$(printf %s "$group" | jq -sRr @uri)
+  # Native group retests may use their configured URL, regardless of the
+  # diagnostic request URL. Always obtain URL and status from the same group.
+  state=$(curl --fail --silent --connect-timeout 3 --max-time 5 \
+    -H "Authorization: Bearer $secret" \
+    "$controller/proxies/$encoded_group" 2>/dev/null) || return 0
+  url=$(printf %s "$state" | jq -er '.testUrl // empty') || return 0
+  expected=$(printf %s "$state" | jq -er '.expectedStatus | tostring | select(length > 0 and . != "null")') || return 0
   encoded_url=$(printf %s "$url" | jq -sRr @uri)
-  case "$url" in
-    */generate_204) expected=204 ;;
-    */v1/models|*/v2/) expected=401 ;;
-    *chatgpt.com/api/auth/session|*x.com/robots.txt|*core.telegram.org/) expected=200 ;;
-    *) expected=200-399 ;;
-  esac
+  encoded_expected=$(printf %s "$expected" | jq -sRr @uri)
   curl --fail --silent --output /dev/null \
     --connect-timeout 3 --max-time 12 \
     -H "Authorization: Bearer $secret" \
-    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=5000&expected=$expected" \
+    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=5000&expected=$encoded_expected" \
     2>/dev/null || true
 }
 
@@ -170,7 +171,6 @@ process_category() {
   name=$1
   healthy=$2
   group=$3
-  url=$4
   failures=$(read_failures "$name")
 
   if [ "$healthy" = true ]; then
@@ -193,16 +193,15 @@ process_category() {
   [ "$failures" -le "$max_failures" ] || max_failures=$failures
 
   if [ "$failures" -ge 1 ]; then
-    trigger_group_check "$group" "$url"
+    trigger_group_check "$group"
     actions="group-check"
   fi
 }
 
-process_category default "$default_ok" Auto https://www.gstatic.com/generate_204
-process_category developer "$developer_ok" "GitHub Control" \
-  'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack'
-process_category streaming "$streaming_ok" Streaming https://www.youtube.com/generate_204
-process_category ai "$ai_ok" "Research + AI" https://api.openai.com/v1/models
+process_category default "$default_ok" Auto
+process_category developer "$developer_ok" "GitHub Control"
+process_category streaming "$streaming_ok" Streaming
+process_category ai "$ai_ok" "Research + AI"
 case "$chatgpt_code" in
   200) chatgpt_state=available ;;
   403) chatgpt_state=restricted ;;
@@ -216,10 +215,9 @@ if [ "$chatgpt_web_ok" != true ]; then
   set_failures chatgpt_web 0
   if [ "$actions" = none ]; then actions="site-$chatgpt_state"; fi
 fi
-process_category social "$social_ok" Social https://x.com/robots.txt
-process_category telegram "$telegram_ok" Telegram https://core.telegram.org/
-process_category download "$download_ok" Download \
-  https://codeload.github.com/github/gitignore/zip/refs/heads/main
+process_category social "$social_ok" Social
+process_category telegram "$telegram_ok" Telegram
+process_category download "$download_ok" Download
 
 # Service failures are isolated to their groups. Reloading/restarting a live
 # core here disrupts unrelated sessions and resets its health history.
