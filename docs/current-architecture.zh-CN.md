@@ -3,6 +3,10 @@
 更新日期：2026-10-11。本文不包含真实 IP、MAC、用户名、SSID、订阅和节点凭据。
 这里的示例拓扑使用虚构的 10.66/10.77 网段，具体值由部署者提供。
 
+2026-10-20 新增 [UCG / WireGuard 单设备试点](ucg-wireguard-pilot.zh-CN.md)：客户端仍以 UCG 为网关，
+由 UCG 选择设备送入 Pi，复用本文的 Mihomo 服务。该分支与下述双网口下游方案并存；
+当前只完成单台 PC 的 Wi-Fi 链路验证，有线推广与重启恢复另行验收。
+
 ```text
 Internet → 上游路由器（DHCP / NAT）
                  ├── 主 Wi-Fi → 管理终端 → Pi 的 wan0 地址（SSH）
