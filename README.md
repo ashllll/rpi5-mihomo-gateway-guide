@@ -108,6 +108,7 @@ sudo sh setup.sh --dry-run  # 只检查环境与打印计划，不下载、不�
 | 一台新 Linux 主机 | [setup.sh](setup.sh) | `/etc/mihomo-gateway/` |
 | 自己规划网络、分阶段上线 | [tools/render.py](tools/render.py) | `site.local.json` → 9 个私有文件，随后手动部署 |
 | 维护已有 Mihomo / MosDNS 网关 | [automation/](automation/README.zh-CN.md) | `/etc/mihomo`、`/etc/mosdns` 与部署 manifest |
+| 保持 UCG 为客户端网关，按设备接入 Mihomo | [UCG / WireGuard 单设备试点](docs/ucg-wireguard-pilot.zh-CN.md) | UCG 原生策略与 Pi 私有 WireGuard 配置；手动整合 |
 | 从备用介质恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) | 独立预发布镜像；写盘会清空目标盘 |
 
 生产运维层的安装方式：
@@ -197,6 +198,7 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 | 手动配置与分阶段上线 | [部署指南](docs/deployment-current.zh-CN.md) · [站点参数模板](examples/site.example.json) |
 | 业务策略、定时任务与评分 | [自动化层](automation/README.zh-CN.md) · [智能选节点](docs/adaptive-selection.zh-CN.md) |
 | 故障定位与真实 LAN 验收 | [运维指南](docs/operations-current.zh-CN.md) |
+| 查看 UCG 设备分流的配置前后、验证与回退边界 | [2026-10-20 链路迭代记录](docs/ucg-wireguard-pilot.zh-CN.md) · [参数清单](examples/ucg-pilot.example.json) |
 | 校验、写盘与恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) |
 | 评估 Landscape 融合 | [可行性](docs/landscape-feasibility.zh-CN.md) · [能力报告](docs/landscape-capabilities.zh-CN.md) · [验收计划](docs/landscape-acceptance.zh-CN.md) |
 | 查看早期方案 | [2026-07 历史档案](docs/deployment-debugging-summary.zh-CN.md) · [历史拓扑](web/index.html) |

@@ -1,0 +1,40 @@
+{
+  "_purpose": "人工整合的参数清单；不是 setup.sh 或 tools/render.py 的输入文件。真实值只保存在部署端。",
+  "client": {
+    "ipv4": "<SELECTED_CLIENT_IPV4>",
+    "wifi_mac": "<SELECTED_CLIENT_WIFI_MAC>",
+    "wired_mac": "<SEPARATE_WIRED_MAC_IF_LATER_ENABLED>"
+  },
+  "ucg": {
+    "lan_ipv4": "<UCG_LAN_IPV4>",
+    "lan_network_id": "<NATIVE_NETWORK_ID>",
+    "vpn_profile": "<PILOT_VPN_PROFILE_NAME>",
+    "policy_name": "<CLIENT_ONLY_POLICY_NAME>",
+    "kill_switch": true
+  },
+  "pi": {
+    "upstream_interface": "<UPSTREAM_INTERFACE>",
+    "upstream_ipv4": "<RESERVED_PI_UPSTREAM_IPV4>",
+    "existing_downstream_interface": "<EXISTING_LAN_INTERFACE>"
+  },
+  "wireguard": {
+    "interface": "<WG_INTERFACE>",
+    "listen_port": "<SITE_SELECTED_UDP_PORT>",
+    "server_cidr": "<PI_TUNNEL_IPV4_AND_PREFIX>",
+    "peer_cidr": "<UCG_TUNNEL_IPV4_WITH_32_PREFIX>",
+    "mtu": 1380,
+    "table": "off",
+    "private_key_file": "<LOCAL_ROOT_ONLY_KEY_FILE>"
+  },
+  "firewall": {
+    "filter_table": "<EXISTING_FILTER_TABLE>",
+    "nat_table": "<EXISTING_NAT_TABLE>",
+    "mihomo_tun_interface": "<EXISTING_MIHOMO_TUN_INTERFACE>"
+  },
+  "acceptance": {
+    "require_dns_tcp_udp": true,
+    "require_forced_ipv6_test": true,
+    "require_remote_control_experience": true,
+    "require_approved_reboot_test": true
+  }
+}
