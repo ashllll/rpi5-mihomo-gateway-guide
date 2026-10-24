@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" role="img">
+  <title>一次连接的路径</title>
+  <desc>一条从客户端到出口的信号链：TUN 接管、nftables 白名单与 DNS 改写、规则与预算、最后出口；下方标出两条旁路。</desc>
+  <rect width="1200" height="460" fill="#0F1311"/>
+  <rect x="0.5" y="0.5" width="1199" height="459" fill="none" stroke="#242C26"/>
+  <text x="64" y="60" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#93A293">一次连接的路径 / IPv4</text>
+  <line x1="64" y1="210" x2="1136" y2="210" stroke="#2A332B" stroke-width="2"/>
+  <rect x="134" y="204" width="12" height="12" fill="#0F1311" stroke="#CBF16D" stroke-width="2"/>
+  <text x="140" y="176" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#E6EDE3">客户端</text>
+  <text x="140" y="252" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">LAN / VLAN20</text>
+  <text x="140" y="280" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">默认路由指向网关</text>
+  <rect x="354" y="204" width="12" height="12" fill="#0F1311" stroke="#CBF16D" stroke-width="2"/>
+  <text x="360" y="176" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#E6EDE3">TUN 接管</text>
+  <text x="360" y="252" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">auto-route</text>
+  <text x="360" y="280" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">auto-redirect</text>
+  <rect x="574" y="204" width="12" height="12" fill="#0F1311" stroke="#CBF16D" stroke-width="2"/>
+  <text x="580" y="176" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#E6EDE3">nftables</text>
+  <text x="580" y="252" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">forward 白名单 + NAT</text>
+  <text x="580" y="280" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">dnat 198.18.0.2:53</text>
+  <rect x="794" y="204" width="12" height="12" fill="#0F1311" stroke="#CBF16D" stroke-width="2"/>
+  <text x="800" y="176" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#E6EDE3">规则与预算</text>
+  <text x="800" y="252" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">GEOSITE 分流</text>
+  <text x="800" y="280" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">显式拨号先记账</text>
+  <rect x="1014" y="204" width="12" height="12" fill="#0F1311" stroke="#CBF16D" stroke-width="2"/>
+  <text x="1020" y="176" text-anchor="middle" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#E6EDE3">出口</text>
+  <text x="1020" y="252" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">机场节点 / 直连</text>
+  <text x="1020" y="280" text-anchor="middle" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA395">由分组与规则决定</text>
+  <line x1="240" y1="330" x2="1080" y2="330" stroke="#242C26" stroke-width="1.5" stroke-dasharray="5 6"/>
+  <text x="64" y="336" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8B9A8D">直连</text>
+  <text x="140" y="392" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="20" fill="#A7B3A7">国内域名与 IP 不进 TUN：nft 白名单放行，客户端直接出网。</text>
+  <text x="64" y="434" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8B9A8D">网关自身</text>
+  <text x="196" y="434" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="20" fill="#A7B3A7">订阅、规则与健康检查不走 TUN；网关 curl 通，不等于下游能上网。</text>
+</svg>

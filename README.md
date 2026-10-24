@@ -1,11 +1,7 @@
-<p align="center">RASPBERRY PI 5 · LINUX · MIHOMO TUN · LOCAL BUDGET LEDGER</p>
+<img src="assets/readme/hero.svg" width="100%" alt="深色仪表盘：左侧标题「一个会自证的网关」与一次事故说明，右侧列出 TUN、nft、策略路由、出口四项真实状态与转发计数">
 
-<h1 align="center">网关先证明它能上网，再证明它退得回去</h1>
-
-<p align="center">
-双网口透明网关：DNS 分层 + TUN 透明代理 + 按账号计量预算，<br>
-启动时校验真实路由，失败就换回上一颗内核并发消息给你。
-</p>
+双网口透明网关：上游路由器 → Raspberry Pi 5 → 交换机 / 桥接 AP → 下游设备。
+电脑和手机不装代理客户端；国内直连，海外流量由 TUN 接管，DNS 分层收口，显式节点拨号按账号计量预算。
 
 <p align="center">
 <a href="#一分钟读懂">一分钟读懂</a> ·
@@ -16,16 +12,11 @@
 <a href="docs/README.md">RepoWiki</a>
 </p>
 
----
-
 ## 一分钟读懂
-
-**上游路由器 → 双网口 Linux 网关 → 交换机 / 桥接 AP → 下游设备。**
-上联沿用原有联网配置，下联提供 DHCP、DNS 与透明转发；电脑、手机无需安装代理客户端。
 
 | 你关心的事 | 网关怎么处理 |
 |---|---|
-| 国内站点与本地设备 | 直连规则，不经过代理 |
+| 国内站点与本地设备 | 直连规则，不经过代理，也不进预算 |
 | 海外站点 | TUN + `auto-redirect` 把流量送进 Mihomo，按业务分组选出口 |
 | DNS | dnsmasq → mosdns 分层：国内域名直连解析，其余返回 fake-IP，由代理内部再解析 |
 | 额度与限流 | 自编核心把每次显式节点拨号记进本地账本，按账号预算放行 |
@@ -33,21 +24,14 @@
 | 出事之后 | 一条命令看门禁状态、内核槽位与最近一次部署结果 |
 
 > **2026-10-25 的真实事故**：内核漏编 `with_gvisor` 后，`mihomo -t` 通过、进程常驻，但 TUN 设备
-> 从未建立——国内直连照常工作，所有需要代理的流量静默黑洞三个小时，健康检查当时只判进程存活。
-> 现在的部署路径不再相信"进程还活着"，只相信内核状态。
+> 从未建立——国内直连照常工作，所有需要代理的流量静默黑洞约 7 分钟。当时的健康检查只判进程存活，
+> 因此没有留下任何告警。现在的部署路径不再相信"进程还活着"，只相信内核状态。
 
 ## 架构
 
-**网络位置**
-
-[![拓扑：上游路由器、双网口网关、下游交换机与 AP](assets/current-topology.svg)](assets/current-topology.svg)
-
-生产部署里还有两条独立链路：一条专用下联给 NAS（自己的 dnsmasq 实例），一条 WireGuard 接口
-供控制端点对点接入；两者都通过 `tun.include-interface` 单独纳入透明代理，不混入主 LAN。
+<img src="assets/readme/path.svg" width="100%" alt="一次连接的路径：客户端 → TUN 接管 → nftables → 规则与预算 → 出口；下方标出国内直连与网关自身两条旁路">
 
 **DNS 分层**
-
-[![DNS：dnsmasq → mosdns → 直连解析或 Mihomo fake-IP](assets/current-dns-flow.svg)](assets/current-dns-flow.svg)
 
 1. 客户端只认下联地址，`dnsmasq` 负责 DHCP 下发的 DNS 与少量静态主机名。
 2. `mosdns` 按域名分流：国内域名走 AliDNS / doh.pub 直连解析，其余转给 Mihomo 的 DNS。
@@ -56,20 +40,8 @@
 4. 客户端拿着 fake-IP 发起连接，`auto-redirect` 把 TCP 重定向进核心，核心按规则选择出口后
    在代理内部用真实域名重新解析。
 
-**数据面**
-
-```text
-客户端 ──► TUN 设备 Mihomo（auto-route + auto-redirect + strict-route）
-              │  只接管 include-interface 列出的网段；上游网段整段排除
-              ▼
-        nftables：forward 白名单 + NAT + 核心自建的拦截/重定向表
-        策略路由：ip rule 9000… → table 2022 → 默认路由指向 TUN
-              ▼
-        Mihomo 规则：直连 / 业务分组 / 显式叶子节点（拨号前先过预算）
-```
-
-网关自身的出站流量不经过 TUN（这是设计选择：更新订阅、拉规则和健康检查都能在代理坏掉时照常工作）。
-也正因如此，**在网关上 `curl` 外网成功并不证明下游客户端能上网**——验证要分层做。
+生产部署里还有两条独立链路：一条专用下联给 NAS（自己的 dnsmasq 实例），一条 WireGuard 接口
+供控制端点对点接入；两者都通过 `tun.include-interface` 单独纳入透明代理，不混入主 LAN。
 
 **组件**
 
@@ -87,7 +59,7 @@
 
 ## 安全网
 
-一次部署现在必须同时过四道关，任何一道失败都会带着证据退回去：
+<img src="assets/readme/gates.svg" width="100%" alt="上线依次判定：单元门禁、部署门禁、常态观测、换核回滚四步串联；任一步失败都沿下方支路回退并复验">
 
 | 关卡 | 检查什么 | 失败之后 |
 |---|---|---|
@@ -183,7 +155,7 @@ automation/     运维层：sbin 脚本、systemd 单元、env 模板、可选 d
 core/           自编内核：固定提交、预算补丁、可复现构建说明
 tools/          离线校验器与渲染器（隐私、安装、稳定性、订阅、预算策略）
 docs/           RepoWiki：架构、部署、运维、ADR、验收与恢复
-assets/         拓扑、DNS、自动化与历史图
+assets/         拓扑、DNS、数据面与门禁图
 examples/       站点参数与清理后的示例配置
 ```
 
