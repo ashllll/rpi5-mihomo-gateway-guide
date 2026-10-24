@@ -1,0 +1,27 @@
+version: 1
+# Public routing defaults shared by upgraded private manifests that predate
+# download_routes/video_routes. Private entries override these defaults by ID.
+download_routes:
+  github-release:
+    group: GitHub Download
+    domains: [release-assets.githubusercontent.com, objects.githubusercontent.com, codeload.github.com, github-releases.githubusercontent.com, pkg-containers.githubusercontent.com]
+  git-transport:
+    group: GitHub Control
+    domains: [github.com, api.github.com, alive.github.com]
+  packages:
+    group: Package Download
+    domains: [registry.npmjs.org, registry.yarnpkg.com, unpkg.com, cdn.jsdelivr.net, nodejs.org]
+video_routes:
+  youtube:
+    group: Streaming
+    domains: [youtube.com, youtu.be, googlevideo.com, ytimg.com, youtube-nocookie.com, youtubei.googleapis.com, youtube.googleapis.com, youtubeembeddedplayer.googleapis.com]
+  instagram:
+    group: Streaming
+    domains: [cdninstagram.com, instagr.am, instagram.com]
+  x:
+    group: Social
+    domains: [twitter.com, x.com, twimg.com, t.co, twittercdn.com]
+# These fixed IDs are emitted by the removed built-in download and Social
+# generators. The overlay also recognizes configured legacy profile IDs, but
+# it never sweeps arbitrary quality-prefixed user providers.
+retired_quality_profile_ids: [github-release, git-transport, packages, x-video]

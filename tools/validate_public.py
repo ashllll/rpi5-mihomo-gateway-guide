@@ -21,8 +21,9 @@ def main():
     for name in required:
         if not (ROOT / name).is_file():
             raise SystemExit(f"Missing publication file: {name}")
-    # Every diagram the README embeds must be a parseable SVG next to its source.
-    for stem in ("current-topology", "current-dns-flow", "current-routing-policy", "current-automation"):
+    # Current and archived diagrams published in the README need a source and parseable SVG.
+    for stem in ("current-topology", "current-dns-flow", "current-routing-policy",
+                 "historical-automation-2026-10-11"):
         if not (ROOT / f"assets/{stem}.mmd").is_file():
             raise SystemExit(f"Missing diagram source: assets/{stem}.mmd")
         ET.parse(ROOT / f"assets/{stem}.svg")

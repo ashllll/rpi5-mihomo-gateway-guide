@@ -3,8 +3,8 @@
 # Install the published gateway automation layer.
 #
 # The layer is the executable half of this guide: systemd units for the Mihomo
-# and MosDNS stack plus the health-check, subscription-update and adaptive
-# policy scripts they run.  Deployment data (node labels, subscription links,
+# and MosDNS stack plus the health-check, subscription-update and policy
+# scripts they run.  Deployment data (node labels, subscription links,
 # secrets, addresses) is never part of this repository; it stays in
 # /etc/mihomo-automation.env, /etc/mihomo/secrets and
 # /etc/mihomo/adaptive/capabilities.yaml.
@@ -32,7 +32,7 @@ usage() {
 usage: install.sh [--dry-run] [--enable-timers]
 
   --dry-run        print planned actions without changing the filesystem
-  --enable-timers  enable seven timers; adaptive application stays opt-in
+  --enable-timers  enable the seven supported maintenance timers
 EOF
 }
 
@@ -92,6 +92,8 @@ if [ "$dry_run" = false ]; then
   for directory in \
     /etc/mihomo/secrets \
     /etc/mihomo/adaptive \
+    /etc/mihomo/providers \
+    /var/lib/mihomo-measurements \
     /var/lib/mihomo-adaptive \
     /var/lib/mihomo-extra-subscriptions \
     /var/lib/mihomo-subscription-backups; do
@@ -117,8 +119,10 @@ for rule in "$here"/etc/mosdns/rules/*; do
 done
 
 install_default "$here/policy/capabilities.yaml" /etc/mihomo/adaptive/capabilities.yaml 0644
+install_default "$here/policy/route-defaults.yaml" /etc/mihomo/adaptive/route-defaults.yaml 0644
 
 install_default "$here/env/automation.env.example" /etc/mihomo-automation.env.example 0600
+install_default "$here/env/mihomo-alert.env.example" /etc/mihomo-alert.env.example 0600
 install_default "$here/env/reconcile-targets.conf.example" /etc/mihomo/reconcile-targets.conf.example 0644
 
 # dnsmasq reads /etc/dnsmasq-upstreams.conf, which mihomo-dns-mode rewrites on
@@ -138,7 +142,7 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
   if [ "$enable_timers" = true ]; then
     for timer in \
       mihomo-healthcheck.timer \
-      mihomo-adaptive-score.timer \
+      mihomo-watch.timer \
       mihomo-subscription-update.timer \
       mihomo-rules-update.timer \
       mosdns-healthcheck.timer \

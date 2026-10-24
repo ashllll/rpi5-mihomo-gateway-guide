@@ -1,34 +1,90 @@
 version: 1
+# Activation and account budgets are deployment decisions. Missing/false keeps
+# all generated native URL checks paused.
+measurement:
+  enabled: false
+  # Native URLTests require the pinned patched core and local admission service.
+  native_budget: true
+  native_interval_seconds: 900
+  accounts: {}
+  # Account IDs must be non-empty strings; quote numeric IDs, e.g. "12345".
+  # Each account uses positive prefixes/names, native_probes_per_hour (planned
+  # periodic checks) and quality_attempts_per_hour (the shared HTTP-attempt
+  # budget for every native URLTest, including startup, failure, refresh and
+  # rollback checks). The existing quality_attempts_per_hour key is retained
+  # for the persisted account ledger contract.
+# Optional private download_routes/video_routes entries override the
+# separately installed route-defaults.yaml by route ID. Missing, null or empty
+# tables inherit defaults; explicit route entries must contain domains.
 stability:
   groups:
     Research + AI:
       url: https://api.openai.com/v1/models
       expected-status: 401
-      interval: 45
+      interval: 900
       timeout: 5000
-      lazy: false
-      max-failed-times: 1
+      lazy: true
+      max-failed-times: 3
     Streaming:
-      interval: 45
+      url: https://www.youtube.com/generate_204
+      expected-status: 204
+      interval: 900
       timeout: 5000
-      lazy: false
-      max-failed-times: 1
-      tolerance: 200
+      lazy: true
+      max-failed-times: 3
     Social:
-      interval: 45
+      url: https://api.x.com/2/users/me
+      # Native fallback checks transport only; the shell diagnoses X paths.
+      expected-status: 200-499
+      interval: 900
       timeout: 5000
-      lazy: false
-      max-failed-times: 1
+      lazy: true
+      max-failed-times: 3
     Telegram:
-      interval: 45
+      interval: 900
       timeout: 5000
-      lazy: false
-      max-failed-times: 1
+      lazy: true
+      max-failed-times: 3
     Auto:
-      interval: 60
-      lazy: false
+      interval: 900
+      lazy: true
       timeout: 5000
-      max-failed-times: 1
+      max-failed-times: 3
+    Download:
+      url: https://www.gstatic.com/generate_204
+      expected-status: 204
+      interval: 900
+      timeout: 5000
+      lazy: true
+      max-failed-times: 3
+    GitHub Download:
+      url: https://www.gstatic.com/generate_204
+      expected-status: 204
+      interval: 900
+      timeout: 5000
+      lazy: true
+      max-failed-times: 3
+    Model Download:
+      url: https://www.gstatic.com/generate_204
+      expected-status: 204
+      interval: 900
+      timeout: 5000
+      lazy: true
+      max-failed-times: 3
+    Package Download:
+      url: https://www.gstatic.com/generate_204
+      expected-status: 204
+      interval: 900
+      timeout: 5000
+      lazy: true
+      max-failed-times: 3
+    GitHub Control:
+      url: https://github.com/robots.txt
+      expected-status: 200
+      interval: 900
+      timeout: 5000
+      lazy: true
+      max-failed-times: 3
   telegram_cidrs:
   - 91.108.56.0/22
   - 91.108.4.0/22
@@ -66,40 +122,6 @@ roles:
     # Add exact names here only after confirming their capability in the
     # provider console.  This keeps renamed dedicated nodes data-driven.
     glados_explicit_allow: []
-
-services:
-  ai:
-    groups: ["Research + AI"]
-    url: "https://api.openai.com/v1/models"
-    expected: "401"
-    sample_limit: 8
-  streaming:
-    groups: ["Streaming"]
-    url: "https://www.youtube.com/generate_204"
-    expected: "204"
-    sample_limit: 8
-  social:
-    groups: ["Social"]
-    url: "https://x.com/robots.txt"
-    expected: "200"
-    sample_limit: 8
-  telegram:
-    groups: ["Telegram"]
-    url: "https://core.telegram.org/"
-    expected: "200"
-    sample_limit: 8
-  github_control:
-    groups: ["GitHub Control"]
-    url: "https://github.com/github/gitignore.git/info/refs?service=git-upload-pack"
-    sample_limit: 8
-  github_download:
-    groups: ["GitHub Download"]
-    url: "https://codeload.github.com/github/gitignore/zip/refs/heads/main"
-    sample_limit: 8
-  model_download:
-    groups: ["Model Download"]
-    url: "https://huggingface.co/gpt2/resolve/main/config.json"
-    sample_limit: 8
 
 # ---------------------------------------------------------------------------
 # Curated-pool preferences used by mihomo-policy-overlay.  Node labels are

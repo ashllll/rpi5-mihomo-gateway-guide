@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Fail-closed local admission for the patched core's URLTest entry point."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import runpy
+import socket
+import socketserver
+import stat
+import subprocess
+import threading
+import time
+
+import yaml
+
+POLICY = runpy.run_path(str(Path(__file__).with_name('mihomo-measurement-policy')))
+PROTOCOL = 'mihomo-budget-v1'
+SOCKET_DEFAULT = '/run/mihomo-measurements/budget.sock'
+BUDGET_DEFAULT = Path('/var/lib/mihomo-measurements/quality-budget.json')
+
+
+def socket_path() -> str:
+    return os.environ.get("MIHOMO_MEASUREMENT_SOCKET") or SOCKET_DEFAULT
+
+
+def authorize(request: dict, config: dict, measurement: dict, budget: Path, *, policy_check=None) -> bool:
+    if not isinstance(request, dict) or request.get('protocol') != PROTOCOL:
+        return False
+    if any(not isinstance(request.get(k), str) for k in ('name', 'addr', 'dialer')):
+        return False
+    deadline_ms = request.get('deadline_ms')
+    if type(deadline_ms) is not int:
+        return False
+    now = time.time()
+    deadline = deadline_ms / 1000
+    if not 0 < deadline - now <= 31:
+        return False
+    node = POLICY['definitions'](config).get(request['name'])
+    # Native ownership currently admits explicit leaves only, never a dynamic group/dialer.
+    if not node or node.get('dialer-proxy') or request['dialer']:
+        return False
+    server, port = node.get('server'), node.get('port')
+    if not isinstance(server, str) or not server or type(port) is not int or not 1 <= port <= 65535:
+        return False
+    address = ('[' + server + ']' if ':' in server else server) + ':' + str(port)
+    if request['addr'] != address:
+        return False
+    return POLICY['reserve_native'](budget, measurement, [node], 2,
+        hold_seconds=deadline - now + 2, deadline=deadline,
+        policy_check=policy_check, monotonic_deadline=time.monotonic()+deadline-now) and time.time() < deadline
+
+
+def read_inputs(config_path: Path, manifest_path: Path) -> tuple[dict, dict]:
+    config = yaml.safe_load(config_path.read_bytes())
+    manifest = yaml.safe_load(manifest_path.read_bytes())
+    if not isinstance(config, dict) or not isinstance(manifest, dict):
+        raise ValueError('invalid budget inputs')
+    measurement = manifest.get('measurement', {})
+    if not isinstance(measurement, dict):
+        raise ValueError('invalid measurement policy')
+    POLICY['validate_accounts'](measurement)
+    return config, measurement
+
+
+def status(config: dict, measurement: dict, budget: Path) -> dict:
+    POLICY['load_budget'](budget)
+    return {'protocol': PROTOCOL, 'config_id': POLICY['fingerprint'](config),
+            'measurement_id': POLICY['fingerprint'](measurement),
+            'budget_path': str(budget.resolve())}
+
+
+def request_status(path: str, *, deadline: float | None = None) -> dict:
+    deadline = POLICY['rpc_deadline'](1, deadline)
+    with POLICY['rpc_socket'](socket.AF_UNIX, deadline) as client:
+        client.connect(path)
+        client.sendall(json.dumps({'protocol': PROTOCOL, 'op': 'status'}).encode() + b'\n')
+        with client.makefile('rb') as stream:
+            raw = stream.readline(4097)
+        if len(raw) > 4096:
+            raise ValueError('oversized budget response')
+        reply = json.loads(raw)
+        if not isinstance(reply, dict) or reply.get('protocol') != PROTOCOL:
+            raise ValueError('invalid budget response')
+        return reply
+
+
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.request.settimeout(1)
+        response = {'protocol': PROTOCOL, 'allowed': False}
+        try:
+            raw = self.rfile.readline(4097)
+            if len(raw) > 4096 or not raw.endswith(b'\n'):
+                raise ValueError('invalid request length')
+            request = json.loads(raw)
+            if not isinstance(request, dict) or request.get('protocol') != PROTOCOL:
+                raise ValueError('invalid request protocol')
+            config, measurement = read_inputs(self.server.config_path, self.server.manifest_path)
+            if request.get('op') == 'status':
+                response = status(config, measurement, self.server.budget_path)
+            else:
+                expected = POLICY['fingerprint']((config, measurement))
+                response['allowed'] = authorize(request, config, measurement, self.server.budget_path,
+                    policy_check=lambda: POLICY['fingerprint'](read_inputs(
+                        self.server.config_path, self.server.manifest_path)) == expected)
+        except (OSError, ValueError, TypeError, KeyError, OverflowError, yaml.YAMLError):
+            pass
+        try:
+            self.wfile.write(json.dumps(response).encode() + b'\n')
+        except OSError:
+            pass
+
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+    def __init__(self, path: str, config: Path, manifest: Path, budget: Path):
+        self.config_path, self.manifest_path, self.budget_path = config, manifest, budget
+        self.slots = threading.BoundedSemaphore(32)
+        super().__init__(path, Handler)
+
+    def process_request(self, request, address):
+        if not self.slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, address):
+        try:
+            super().process_request_thread(request, address)
+        finally:
+            self.slots.release()
+
+
+def serve(path: Path, config: Path, manifest: Path, budget: Path):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.with_suffix('.owner.lock').open('a+b') as owner:
+        fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if path.exists():
+            if not stat.S_ISSOCK(path.lstat().st_mode):
+                raise ValueError('budget socket path is not a socket')
+            path.unlink()
+        with Server(str(path), config, manifest, budget) as server:
+            os.chmod(path, 0o600)
+            try:
+                server.serve_forever()
+            finally:
+                path.unlink(missing_ok=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--socket', type=Path, default=Path(socket_path()))
+    parser.add_argument('--config', type=Path, default=Path('/etc/mihomo/config.yaml'))
+    parser.add_argument('--manifest', type=Path, default=Path(os.environ.get(
+        "MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml")))
+    parser.add_argument('--budget-state', type=Path, default=BUDGET_DEFAULT)
+    parser.add_argument('--check-core', type=Path)
+    parser.add_argument('--run-core', type=Path)
+    args = parser.parse_args()
+    core = args.check_core or args.run_core
+    if core:
+        result = subprocess.run([str(core), '-measurement-budget-protocol'],
+                                capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0 or result.stdout.strip() != PROTOCOL:
+            return 1
+        if args.run_core:
+            config, measurement = read_inputs(args.config, args.manifest)
+            observed = request_status(str(args.socket))
+            if observed != status(config, measurement, args.budget_state):
+                return 1
+            os.execve(str(core), [str(core), '-d', str(args.config.parent), '-f', str(args.config)],
+                      {**os.environ, 'MIHOMO_MEASUREMENT_SOCKET': str(args.socket)})
+        return 0
+    serve(args.socket, args.config, args.manifest, args.budget_state)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

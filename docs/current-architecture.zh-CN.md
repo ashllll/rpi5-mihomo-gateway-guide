@@ -1,11 +1,11 @@
 # 当前架构：本地双网口透明网关
 
-更新日期：2026-10-11。本文不包含真实 IP、MAC、用户名、SSID、订阅和节点凭据。
+更新日期：2026-10-24。本文不包含真实 IP、MAC、用户名、SSID、订阅和节点凭据。
 这里的示例拓扑使用虚构的 10.66/10.77 网段，具体值由部署者提供。
 
-2026-10-20 新增 [UCG / WireGuard 单设备试点](ucg-wireguard-pilot.zh-CN.md)：客户端仍以 UCG 为网关，
-由 UCG 选择设备送入 Pi，复用本文的 Mihomo 服务。该分支与下述双网口下游方案并存；
-当前只完成单台 PC 的 Wi-Fi 链路验证，有线推广与重启恢复另行验收。
+本文保留生产参考拓扑与当时现场采样，不是实时状态页。当前源码入口、稳定性策略和证据边界以
+[RepoWiki](README.md)、[架构说明](wiki/architecture.md)及[原生选路与预算](adaptive-selection.zh-CN.md)交叉核对；
+下文性能数字和 timer 描述不可不看日期直接用于生产变更。
 
 ```text
 Internet → 上游路由器（DHCP / NAT）
@@ -41,7 +41,8 @@ MosDNS 的配置骨架与自定义域名规则已随 [`automation/`](../automati
 | 国内网站 | 国内规则 / IP 直连，避免视频和 CDN 绕远 |
 | 游戏 | 域名/IP 规则直连；网关不能按客户端进程完整识别所有游戏 |
 | AI | 专用供应商池（本部署使用 GLaDOS），优先稳定地区和出口 |
-| 浏览 / Telegram / Streaming | 按业务使用自动组，允许跨供应商备份 |
+| 浏览 / Telegram / Streaming / Social | 浏览按延迟选择；Streaming 与 Social 保留部署顺序，失败时原生 fallback 到既有授权节点 |
+| YouTube / Instagram | 域名规则进入现有 Streaming 组；Instagram 复用媒体池 |
 | GitHub Control | 网页 / API / Git 控制路径独立选路 |
 | Download / Model / GitHub Download | STT、ByWave 和明确授权下载的 GLaDOS 节点 |
 
@@ -52,12 +53,8 @@ MosDNS 的配置骨架与自定义域名规则已随 [`automation/`](../automati
 
 ## 自动化层
 
-[![自动化与自愈：定时任务与受门禁的评分、应用流水线](../assets/current-automation.svg)](../assets/current-automation.svg)
-
-生产环境有订阅更新、规则更新、分类健康检查、评分采集及受保护的节点隔离任务。这些单元与脚本已随
-[`automation/`](../automation/README.zh-CN.md) 发布：八个 timer、评分采集（影子模式）、受门禁的隔离执行、
-DNS 模式自愈与 MosDNS 回退，节点标签与订阅链接留在部署端。评分采集以影子模式观察；隔离执行仅在连续故障、
-候选池保底和验证门禁满足时动作。机制细节见[智能选择](adaptive-selection.zh-CN.md)。
+当前自动化层仅由六个维护 timer 和按需运行的维护服务构成；自动业务选路由 Mihomo 原生 `url-test` 与 `fallback` 负责，预算准入由本地服务提供。
+生成模板默认暂停原生检测，启用后必须配置授权账户及持久预算。源码与线上部署状态分开记录，细节以[原生选路与预算](adaptive-selection.zh-CN.md)为准。
 
 订阅更新间隔至少 24 小时，低峰运行并加随机延迟。systemd 的 Persistent=true
 可能在首次启动或补漏时立即触发一次任务，不能只看 OnCalendar 判断是否会执行。

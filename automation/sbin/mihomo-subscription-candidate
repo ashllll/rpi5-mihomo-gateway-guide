@@ -90,7 +90,8 @@ def merge_sources(current_path: Path, subscription_path: Path, manifest_path: Pa
                 if proxy.get(field) in rename:
                     proxy[field] = rename[proxy[field]]
         proxies.extend(real_proxies)
-    static_glados = [copy.deepcopy(proxy) for proxy in current.get("proxies", []) or [] if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and not proxy["name"].startswith(("STT | ", "BWB | ", "InfraAPI | ")) and proxy["name"] not in {"DIRECT", "REJECT"}]
+    retained_prefixes = tuple(dict.fromkeys((*extra_prefixes, "STT | ", "ByWave | ", "BWB | ", "InfraAPI | ")))
+    static_glados = [copy.deepcopy(proxy) for proxy in current.get("proxies", []) or [] if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and not proxy["name"].startswith(retained_prefixes) and proxy["name"] not in {"DIRECT", "REJECT"}]
     existing_names = {proxy.get("name") for proxy in proxies if isinstance(proxy, dict)}
     for proxy in static_glados:
         if proxy.get("name") not in existing_names:
@@ -144,8 +145,7 @@ def merge_sources(current_path: Path, subscription_path: Path, manifest_path: Pa
         group["max-failed-times"] = 2
         group["expected-status"] = "204"
 
-    static_glados_names = {proxy.get("name") for proxy in static_glados if isinstance(proxy, dict) and isinstance(proxy.get("name"), str)}
-    stt_nodes = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and (proxy["name"].startswith("STT | ") or proxy["name"] in static_glados_names)]
+    stt_nodes = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and proxy["name"].startswith("STT | ")]
     if stt_nodes:
         stt_group = {
             "name": "STT",
@@ -186,7 +186,8 @@ def prepare(current: Path, subscription: Path, extras: Path, destination: Path, 
         work = Path(raw)
         source = work / "merged.yaml"
         result = work / "candidate.yaml"
-        source.write_text(yaml.safe_dump(merged, allow_unicode=True, sort_keys=False, width=4096))
+        # Preserve escaped name controls until the overlay can reject them.
+        source.write_text(yaml.safe_dump(merged, allow_unicode=False, sort_keys=False, width=4096))
         subprocess.run(
             [sys.executable, str(Path(__file__).with_name("mihomo-policy-overlay")), str(source), str(result)],
             check=True,

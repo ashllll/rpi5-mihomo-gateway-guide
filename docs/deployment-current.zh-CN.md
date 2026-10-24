@@ -71,7 +71,7 @@ sudo automation/install.sh             # 覆盖脚本与单元，保留已存在
 
 安装后审阅生成的 env，再按 0600 安装到 /etc/mihomo-automation.env；已有部署只合并共享字段并保留独有设置。
 随后放入 secrets、填写 capabilities.yaml 的
-overlay 段与 reconcile-targets.conf，最后按需 `--enable-timers`。详见
+overlay 段与 reconcile-targets.conf。安装器会独立补入公共 `route-defaults.yaml`，已有旧 capabilities.yaml 保持原字节；如需覆写域名路由，再在私有清单填写非空 `download_routes` / `video_routes` 表。最后按需 `--enable-timers`。详见
 [自动化层说明](../automation/README.zh-CN.md)。
 
 controller 有随机 secret；SSH 保留发行版当前认证策略。若需要密码登录，用 sshd -T
@@ -92,7 +92,5 @@ mosdns-update-binary / mosdns-rollout-rollback 等脚本已随 automation/ 发�
 
 完成 [真实 LAN 验收](operations-current.zh-CN.md)，再配置自动更新。
 更新任务需要互斥、候选验证、回滚和业务检查，至少 24 小时更新订阅。
-启用 Persistent 的 timer 前评估补执行行为。高频探测也有流量成本，不能无预算测速。
-评分观察和动作执行分离；基础联网未稳定前不部署自动隔离动作。八个 timer 的周期与
-启用方式见[自动化层说明](../automation/README.zh-CN.md)，先用 `--enable-timers` 之外的
-默认安装让单元就位，确认参数与 secrets 后再逐个启用。
+启用 Persistent 的 timer 前评估补执行行为。原生节点检测默认关闭；如部署者显式开启，必须配置账户授权、固定核心预算补丁和本地准入服务。
+六个维护 timer 的周期与启用方式见[自动化层说明](../automation/README.zh-CN.md)，先用默认安装让单元就位，确认参数与 secrets 后再按需启用。

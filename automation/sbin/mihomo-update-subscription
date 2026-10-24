@@ -38,6 +38,11 @@ else
   # An empty setting uses the overlay's default, including inherited exports.
   unset MIHOMO_CAPABILITIES
 fi
+if [ -n "${MIHOMO_ROUTE_DEFAULTS:-}" ]; then
+  export MIHOMO_ROUTE_DEFAULTS
+else
+  unset MIHOMO_ROUTE_DEFAULTS
+fi
 : "${GATEWAY_LAN_IP:=10.77.0.1}"
 : "${MIHOMO_MIXED_PORT:=7890}"
 proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
@@ -52,7 +57,11 @@ backup_dir=
 update_started=false
 
 rollback() {
-  install -o root -g root -m 600 "$backup_dir/config.yaml" "$config" || return 1
+  # Restore old nodes through the current policy so a rollback cannot regrant roles.
+  rollback_config=$work_dir/rollback.yaml
+  /usr/local/sbin/mihomo-policy-overlay "$backup_dir/config.yaml" "$rollback_config" || return 1
+  mihomo -t -d /etc/mihomo -f "$rollback_config" >/dev/null 2>&1 || return 1
+  install -o root -g root -m 600 "$rollback_config" "$config" || return 1
   if ! systemctl reload mihomo 2>/dev/null || ! systemctl is-active --quiet mihomo; then
     systemctl restart mihomo
   fi
@@ -64,7 +73,7 @@ cleanup() {
   if [ "$update_started" = true ]; then
     result=1
     if rollback; then
-      logger -t mihomo-update-subscription "Subscription update failed; previous configuration restored" || true
+      logger -t mihomo-update-subscription "Subscription update failed; previous nodes restored under current policy" || true
     else
       logger -t mihomo-update-subscription "Subscription rollback failed; manual recovery required: $backup_dir" || true
     fi

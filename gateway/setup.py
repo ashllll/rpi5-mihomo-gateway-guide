@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 import uuid
 
 HERE = Path(__file__).resolve().parent
+BUDGET_PROTOCOL = 'mihomo-budget-v1'  # core/upstream.json:protocol
 CONFIG = Path('/etc/mihomo-gateway')
 APP = Path('/opt/mihomo-gateway')
 STATE = Path('/var/lib/mihomo-gateway')
@@ -293,6 +294,7 @@ def make_config(plan, defaults, url, secret):
         'lan-allowed-ips': [plan['subnet']], 'external-controller': f"{address}:{ports['controller']}",
         'secret': secret, 'interface-name': plan['wan'],
         'profile': {'store-selected': True},
+        'unified-delay': False,
         'tun': {'enable': True, 'device': 'MihomoGW', 'stack': 'mixed', 'auto-route': True,
                 'auto-redirect': True, 'strict-route': True, 'include-interface': [lan],
                 'dns-hijack': ['any:53', 'tcp://any:53']},
@@ -554,6 +556,43 @@ def preflight_network(plan, owned):
                 raise SetupError('Another DNS/DHCP listener occupies the downstream address')
 
 
+def require_capabilities(binary, defaults):
+    """Refuse a core that cannot honour the unit it is installed for.
+
+    A core built without the gVisor tag starts, passes `mihomo -t`, and then has
+    no TUN device: every proxied connection is dropped silently (2026-10-25).
+    When the budget drop-in is in place the same core must also speak the
+    measurement protocol, because that pair is one artifact.
+    """
+    built = run(binary, '-v', check=False)
+    if 'with_gvisor' not in built.stdout + built.stderr:
+        raise SetupError('Mihomo core lacks the with_gvisor graph driver; '
+                         'rebuild it with -tags with_gvisor')
+    dropin = Path('/etc/systemd/system/mihomo.service.d/measurement-budget.conf')
+    if dropin.exists():
+        protocol = run(binary, '-measurement-budget-protocol', check=False)
+        if protocol.stdout.strip() != BUDGET_PROTOCOL:
+            raise SetupError('Budget drop-in installed but the core does not speak '
+                             + BUDGET_PROTOCOL)
+
+
+def use_core(directory, args, defaults):
+    """Install an operator-built core through the same checks as the release one."""
+    if not args.core_sha256:
+        raise SetupError('--core-sha256 is required with --core')
+    source = Path(args.core)
+    if not source.is_file() or source.is_symlink():
+        raise SetupError('--core must be a regular file')
+    data = source.read_bytes()
+    if hashlib.sha256(data).hexdigest() != args.core_sha256.lower():
+        raise SetupError('--core SHA256 mismatch')
+    binary = Path(directory) / 'mihomo'
+    binary.write_bytes(data)
+    binary.chmod(0o700)
+    require_capabilities(binary, defaults)
+    return binary
+
+
 def download_inputs(directory, defaults, url):
     directory = Path(directory)
     version = defaults['mihomo_version']
@@ -569,7 +608,7 @@ def download_inputs(directory, defaults, url):
     with gzip.open(archive, 'rb') as source, binary.open('xb') as output:
         shutil.copyfileobj(source, output)
     binary.chmod(0o700)
-    run(binary, '-v')
+    require_capabilities(binary, defaults)
     (directory / 'providers').mkdir(mode=0o700)
     fetch(url, directory / 'providers/airport.yaml', 10485760,
           'mihomo/' + version.lstrip('v'))
@@ -841,6 +880,8 @@ def main(argv=None):
     parser.add_argument('--lan', help='override ambiguous downstream detection')
     parser.add_argument('--lan-cidr', help='override automatic private /24 selection')
     parser.add_argument('--defaults', type=Path, default=HERE / 'defaults.json', help='policy/dependency defaults JSON')
+    parser.add_argument('--core', type=Path, help='install this core binary instead of the pinned release')
+    parser.add_argument('--core-sha256', help='SHA256 of --core; required with it (the binary is not trusted by path)')
     args = parser.parse_args(argv)
     if platform.system() != 'Linux' or not Path('/run/systemd/system').is_dir():
         raise SetupError('Requires Linux with systemd; no host changes made')
@@ -920,7 +961,7 @@ def prepare(args, dry):
     with tempfile.TemporaryDirectory(prefix='mihomo-gateway-', dir=STATE) as raw:
         directory = Path(raw)
         print('Downloading verified Mihomo core, subscription and routing data...', flush=True)
-        binary = download_inputs(directory, defaults, url)
+        binary = use_core(directory, args, defaults) if args.core else download_inputs(directory, defaults, url)
         count = validate_provider(binary, directory, config)
         print(f'Subscription validated by Mihomo: {count} usable nodes.', flush=True)
         files, network_path = make_files(plan, config, connection_uuid)

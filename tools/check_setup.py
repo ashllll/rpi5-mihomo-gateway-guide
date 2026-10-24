@@ -284,12 +284,29 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             def fetch(_url, path, *unused):
                 Path(path).write_bytes(payload if Path(path).name == 'mihomo.gz' else b'synthetic-data')
-            with patch.object(gw, 'fetch', fetch), patch.object(gw, 'run'), \
+            version = subprocess.CompletedProcess([], 0, 'Mihomo Meta v1.19.28 with_gvisor', '')
+            with patch.object(gw, 'fetch', fetch), \
+                    patch.object(gw, 'run', return_value=version), \
                     patch.object(gw.platform, 'machine', return_value='aarch64'):
                 binary = gw.download_inputs(Path(raw), defaults, 'https://example.invalid/test')
                 self.assertEqual(binary.read_bytes(), b'synthetic executable')
                 self.assertTrue((Path(raw) / 'providers/airport.yaml').is_file())
                 self.assertTrue((Path(raw) / 'rules/cn.mrs').is_file())
+
+    def test_core_without_glibc_graph_driver_is_refused(self):
+        payload = gzip.compress(b'synthetic executable')
+        defaults = copy.deepcopy(DEFAULTS)
+        defaults['assets']['aarch64']['sha256'] = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as raw:
+            def fetch(_url, path, *unused):
+                Path(path).write_bytes(payload if Path(path).name == 'mihomo.gz' else b'synthetic-data')
+            version = subprocess.CompletedProcess([], 0, 'Mihomo Meta v1.19.28', '')
+            with patch.object(gw, 'fetch', fetch), \
+                    patch.object(gw, 'run', return_value=version), \
+                    patch.object(gw.platform, 'machine', return_value='aarch64'):
+                with self.assertRaises(gw.SetupError) as error:
+                    gw.download_inputs(Path(raw), defaults, 'https://example.invalid/test')
+            self.assertIn('with_gvisor', str(error.exception))
 
     def test_download_failure_redacts_url_and_argv(self):
         secret = 'https://example.invalid/private?token=synthetic-sensitive-value'
@@ -303,6 +320,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_policy_is_provider_driven(self):
         config = gw.make_config(PLAN, DEFAULTS, 'https://subscription.example.invalid/test', 'test-secret')
+        self.assertIs(config['unified-delay'], False)
         self.assertEqual(config['tun']['include-interface'], [PLAN['lan']])
         self.assertEqual(config['interface-name'], PLAN['wan'])
         for group in config['proxy-groups']:

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the gateway anomaly watchdog every 2 minutes
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=120s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

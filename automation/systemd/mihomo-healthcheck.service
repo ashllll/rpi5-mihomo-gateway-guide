@@ -1,5 +1,5 @@
 [Unit]
-Description=Conservative Mihomo connectivity health check and recovery
+Description=Mihomo process liveness check and stopped-process recovery
 Wants=network-online.target
 After=network-online.target mihomo.service
 

@@ -5,8 +5,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import re
+import runpy
 import sys
 from pathlib import Path
 
@@ -17,6 +20,12 @@ import yaml
 CAPABILITIES_PATH = os.environ.get(
     "MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml"
 )
+ROUTE_DEFAULTS_PATH = os.environ.get(
+    "MIHOMO_ROUTE_DEFAULTS", "/etc/mihomo/adaptive/route-defaults.yaml"
+)
+
+DOWNLOAD_ROUTE_GROUPS = {"Download", "GitHub Download", "GitHub Control", "Model Download", "Package Download"}
+VIDEO_ROUTE_GROUPS = {"Streaming", "Social"}
 
 
 def ordered_existing(candidates: list[str], existing: set[str]) -> list[str]:
@@ -58,6 +67,173 @@ def load_capabilities() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def load_route_defaults() -> dict:
+    path = Path(ROUTE_DEFAULTS_PATH)
+    with path.open(encoding="utf-8") as stream:
+        value = yaml.safe_load(stream)
+    if not isinstance(value, dict):
+        raise ValueError("invalid route defaults mapping")
+    return value
+
+
+def validated_routes(routes: object, key: str, allowed_groups: set[str]) -> dict:
+    if not isinstance(routes, dict):
+        raise ValueError(f"invalid {key} route table")
+    result = {}
+    for route_id, spec in routes.items():
+        if (not isinstance(route_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", route_id)
+                or not isinstance(spec, dict)
+                or spec.get("group") not in allowed_groups):
+            raise ValueError(f"invalid {key} route entry")
+        domains = spec.get("domains")
+        if not isinstance(domains, list) or not domains:
+            raise ValueError(f"invalid {key} domains: route entries require at least one domain")
+        for domain in domains:
+            if (not isinstance(domain, str) or not domain
+                    or any(character.isspace() or character in ",*" for character in domain)):
+                raise ValueError(f"invalid {key} domain")
+        result[route_id] = {"group": spec["group"], "domains": unique(domains)}
+    return result
+
+
+def _legacy_download_routes(capabilities: dict, defaults: dict) -> dict:
+    policy = capabilities.get("download_quality", {})
+    if policy is None:
+        return {}
+    if not isinstance(policy, dict):
+        raise ValueError("invalid legacy download_quality policy")
+    profiles = policy.get("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError("invalid legacy download_quality profiles")
+    migrated = copy.deepcopy(defaults)
+    for route_id, profile in profiles.items():
+        if (not isinstance(route_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", route_id)
+                or not isinstance(profile, dict)):
+            raise ValueError("invalid legacy download_quality profile")
+        domains = profile.get("domains", [])
+        if not isinstance(domains, list):
+            raise ValueError("invalid legacy download_quality domains")
+        if not domains:
+            # Old profiles with no domain rules (for example a Social helper)
+            # do not override or remove the packaged business routes.
+            continue
+        group = profile.get("group")
+        if group not in DOWNLOAD_ROUTE_GROUPS:
+            raise ValueError("legacy download_quality profile uses an unsupported route group")
+        for domain in domains:
+            if (not isinstance(domain, str) or not domain
+                    or any(character.isspace() or character in ",*" for character in domain)):
+                raise ValueError("invalid legacy download_quality domain")
+        previous = migrated.get(route_id)
+        inherited_domains = previous.get("domains", []) if isinstance(previous, dict) else []
+        migrated[route_id] = {
+            "group": group,
+            "domains": unique([*inherited_domains, *domains]),
+        }
+    return migrated
+
+
+def resolve_route_tables(capabilities: dict, route_defaults: dict) -> dict:
+    """Merge private overrides, old profile routes, and packaged route data."""
+    allowed = {
+        "download_routes": DOWNLOAD_ROUTE_GROUPS,
+        "video_routes": VIDEO_ROUTE_GROUPS,
+    }
+    result = copy.deepcopy(capabilities)
+    for key, groups in allowed.items():
+        packaged = validated_routes(route_defaults.get(key), key, groups)
+        if not packaged:
+            raise ValueError(f"route defaults must define {key}")
+        if key == "download_routes":
+            effective = _legacy_download_routes(capabilities, packaged)
+        else:
+            effective = copy.deepcopy(packaged)
+
+        explicit = capabilities.get(key, {})
+        if explicit is None:
+            # A YAML key left blank is null; treat it as an empty table, not
+            # as an invalid override that drops the public defaults.
+            explicit = {}
+        if not isinstance(explicit, dict):
+            raise ValueError(f"invalid {key} route table")
+        overrides = validated_routes(explicit, key, groups)
+        effective.update(overrides)
+        if set(packaged) - set(effective):
+            raise ValueError(f"required {key} routes are missing")
+        result[key] = effective
+    return result
+
+
+def retire_legacy_quality_providers(config: dict, capabilities: dict, route_defaults: dict) -> None:
+    """Drop only file providers matching the retired generator's identity contract."""
+    providers = config.get("proxy-providers")
+    if providers is None:
+        return
+    if not isinstance(providers, dict):
+        raise ValueError("invalid proxy-provider mapping")
+    retired_ids = route_defaults.get("retired_quality_profile_ids", [])
+    if (not isinstance(retired_ids, list)
+            or any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", item)
+                   for item in retired_ids)):
+        raise ValueError("invalid retired quality profile IDs")
+    owned_ids = set(retired_ids)
+    download = capabilities.get("download_quality", {})
+    if isinstance(download, dict) and isinstance(download.get("profiles", {}), dict):
+        owned_ids.update(
+            item for item in download.get("profiles", {})
+            if isinstance(item, str) and re.fullmatch(r"[A-Za-z0-9_-]+", item)
+        )
+    social = capabilities.get("social_quality", {})
+    if isinstance(social, dict):
+        profiles = social.get("profiles", {})
+        if isinstance(profiles, dict):
+            profile = profiles.get("x-video")
+            if isinstance(profile, dict) and profile.get("group") == "Social":
+                owned_ids.add("x-video")
+
+    groups = config.get("proxy-groups", [])
+    if not isinstance(groups, list):
+        raise ValueError("invalid proxy-group list")
+    for provider_name, spec in list(providers.items()):
+        if not isinstance(provider_name, str):
+            continue
+        match = re.fullmatch(r"quality-([A-Za-z0-9_-]+)", provider_name)
+        if not match or match.group(1) not in owned_ids or not isinstance(spec, dict):
+            continue
+        profile_id = match.group(1)
+        if spec.get("type") != "file":
+            continue
+        payload = spec.get("payload")
+        if (not isinstance(payload, list) or not payload
+                or any(not isinstance(node, dict) or not isinstance(node.get("name"), str)
+                       for node in payload)):
+            continue
+        canonical = sorted(
+            (copy.deepcopy(node) for node in payload),
+            key=lambda node: str(node.get("name", "")),
+        )
+        try:
+            encoded = json.dumps(
+                canonical, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+            ).encode("ascii")
+        except (TypeError, ValueError):
+            continue
+        digest = hashlib.sha256(encoded).hexdigest()[:16]
+        expected_path = f"./providers/quality-{profile_id}-{digest}.yaml"
+        if spec.get("path") != expected_path:
+            continue
+        referenced = any(
+            provider_name in use
+            for group in groups if isinstance(group, dict)
+            for use in [group.get("use", [])]
+            if isinstance(use, list)
+        )
+        if not referenced:
+            providers.pop(provider_name)
+
+
 def matches_any(name: str, patterns: list[str]) -> bool:
     return any(re.search(pattern, name) for pattern in patterns)
 
@@ -72,10 +248,23 @@ def apply_stability(config: dict, capabilities: dict) -> None:
         options = overrides.get(group.get("name"), {})
         if set(options) - allowed:
             raise ValueError("unsupported stability group fields")
+        strategy = options.get("type", group.get("type"))
+        if strategy != group.get("type") and not (
+                group.get("name") == "Research + AI" and strategy == "select"):
+            raise ValueError(f"stability strategy conflicts with {group.get('name')} policy")
         group.update(options)
     additions = [f"IP-CIDR{('6' if ':' in cidr else '')},{cidr},Telegram,no-resolve"
                  for cidr in policy.get("telegram_cidrs", [])]
     config["rules"] = unique([*additions, *config.get("rules", [])])
+
+
+def domain_routes(capabilities: dict, key: str, rule_type: str, allowed_groups: set[str]) -> list[str]:
+    routes = validated_routes(capabilities.get(key, {}), key, allowed_groups)
+    result = []
+    for spec in routes.values():
+        for domain in spec["domains"]:
+            result.append(f"{rule_type},{domain},{spec['group']}")
+    return result
 
 
 def overlay_labels(capabilities: dict, key: str) -> list[str]:
@@ -151,7 +340,8 @@ def main() -> None:
         for proxy in proxies
         if isinstance(proxy, dict) and proxy.get("name")
     }
-    capabilities = load_capabilities()
+    route_defaults = load_route_defaults()
+    capabilities = resolve_route_tables(load_capabilities(), route_defaults)
     secondary_nodes = sorted(name for name in nodes if name.startswith("BWB | "))
     infra_nodes = sorted(name for name in nodes if name.startswith("InfraAPI | "))
     non_glados_nodes = unique([*infra_nodes, *secondary_nodes])
@@ -170,6 +360,7 @@ def main() -> None:
     glados_github_nodes = glados_download_nodes
     model_download_nodes = unique([*bywave_model_nodes, *stt_model_nodes, *glados_model_nodes])
     github_download_nodes = unique([*bywave_github_nodes, *stt_github_nodes, *glados_github_nodes])
+    download_nodes = unique([*stt_model_nodes, *bywave_model_nodes, *glados_model_nodes])
     github_control_nodes = unique([*bywave_github_nodes, *stt_github_nodes])
 
     # Media, AI and default pools keep a deployment-defined preference order
@@ -185,16 +376,18 @@ def main() -> None:
         (group for group in groups if group.get("name") == "Research + AI"),
         None,
     )
+    measurement = runpy.run_path(str(Path(__file__).with_name("mihomo-measurement-policy")))
+    restored_ai = measurement["owned_group_members"](
+        ai_group or {}, config.get("proxy-providers", {}), nodes)
     ai_source_nodes = [
         name
-        for name in (ai_group or {}).get("proxies", [])
+        for name in (restored_ai if restored_ai is not None else (ai_group or {}).get("proxies", []))
         if name in nodes
         and not str(name).startswith(("STT | ", "ByWave | ", "BWB | ", "InfraAPI | "))
     ]
-    # Preference order for the AI pool: the deployment lists the nodes that
-    # passed its latest real OpenAI probe first and keeps the remaining
-    # subscription nodes as automatic fallbacks.  The ordering is adaptive
-    # preference, never a permanent deletion of subscription nodes.
+    # The AI candidate order is static: deployment-selected nodes lead, then
+    # eligible subscription nodes.  Mihomo fallback uses this order without
+    # runtime scoring or reordering.
     ai_nodes = ordered_existing(overlay_labels(capabilities, "ai_nodes"), nodes)
     ai_nodes = unique([*ai_nodes, *ai_source_nodes])
 
@@ -218,13 +411,6 @@ def main() -> None:
         overlay_labels(capabilities, "tw_fixed_nodes"),
         nodes,
     )
-    download_provider_groups = ["STT Download", "ByWave Download"]
-    model_provider_groups = ["STT Download", "ByWave Download"]
-    github_provider_groups = ["STT GitHub Download", "ByWave GitHub Download"]
-    if glados_download_nodes:
-        download_provider_groups.append("GLaDOS Download")
-        model_provider_groups.append("GLaDOS Download")
-        github_provider_groups.append("GLaDOS GitHub Download")
     for name, candidates in (
         ("Auto", auto_nodes),
         ("Developer", developer_nodes),
@@ -232,14 +418,15 @@ def main() -> None:
         ("Social", social_nodes),
         ("Telegram", telegram_nodes),
         ("Research + AI", ai_nodes),
-        ("Download", download_provider_groups),
+        ("Download", download_nodes),
         ("STT Download", stt_model_nodes),
         ("ByWave Download", bywave_model_nodes),
         ("STT GitHub Download", stt_github_nodes),
         ("ByWave GitHub Download", bywave_github_nodes),
         ("GitHub Control", github_control_nodes),
-        ("GitHub Download", github_provider_groups),
-        ("Model Download", model_provider_groups),
+        ("GitHub Download", github_download_nodes),
+        ("Model Download", model_download_nodes),
+        ("Package Download", download_nodes),
         ("TW Fixed IP", tw_fixed_nodes),
     ):
         if not candidates:
@@ -293,14 +480,13 @@ def main() -> None:
         groups,
         "Streaming",
         {
-            "type": "url-test",
+            "type": "fallback",
             "proxies": streaming_nodes,
             "url": "https://www.youtube.com/generate_204",
-            "interval": 300,
-            "tolerance": 120,
+            "interval": 900,
             "lazy": False,
-            "timeout": 6000,
-            "max-failed-times": 2,
+            "timeout": 5000,
+            "max-failed-times": 3,
             "expected-status": 204,
         },
     )
@@ -332,45 +518,24 @@ def main() -> None:
             "expected-status": 200,
         },
     )
-    replace_group(
-        groups,
-        "TW Fixed IP",
-        {
-            "type": "fallback",
-            "proxies": tw_fixed_nodes,
-            "url": "https://api.openai.com/v1/models",
-            "interval": 180,
-            "lazy": False,
-            "timeout": 6000,
-            "max-failed-times": 2,
-            "expected-status": 401,
-        },
-    )
+    replace_group(groups, "TW Fixed IP", {"type": "select", "proxies": tw_fixed_nodes})
 
-    # Use small, service-specific probes instead of a generic CDN probe. The
-    # probe bodies are intentionally small. GLaDOS nodes enter bulk groups
-    # only when the capability manifest explicitly marks them as eligible.
-    github_download_probe = (
-        "https://codeload.github.com/github/gitignore/zip/refs/heads/main"
-    )
-    model_download_probe = "https://huggingface.co/gpt2/resolve/main/config.json"
-
-    # Each provider keeps its own URLTest pool. The top-level groups rotate
-    # between provider pools, so STT and ByWave are both used while one large
-    # connection remains on one selected provider/node.
+    # Provider child groups remain available, while service routes test the
+    # combined authorized leaf nodes through one shared, lightweight URLTest.
+    download_probe = "https://www.gstatic.com/generate_204"
     upsert_group(
         groups,
         "STT Download",
         {
             "type": "url-test",
             "proxies": stt_model_nodes,
-            "url": model_download_probe,
-            "interval": 600,
-            "lazy": False,
+            "url": download_probe,
+            "interval": 900,
+            "lazy": True,
             "tolerance": 120,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     upsert_group(
@@ -379,13 +544,13 @@ def main() -> None:
         {
             "type": "url-test",
             "proxies": bywave_model_nodes,
-            "url": model_download_probe,
-            "interval": 600,
-            "lazy": False,
+            "url": download_probe,
+            "interval": 900,
+            "lazy": True,
             "tolerance": 120,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     if glados_download_nodes:
@@ -395,28 +560,32 @@ def main() -> None:
             {
                 "type": "url-test",
                 "proxies": glados_download_nodes,
-                "url": model_download_probe,
-                "interval": 600,
-                "lazy": False,
+                "url": download_probe,
+                "interval": 900,
+                "lazy": True,
                 "tolerance": 150,
-                "timeout": 8000,
-                "max-failed-times": 2,
-                "expected-status": "200/302",
+                "timeout": 5000,
+                "max-failed-times": 3,
+                "expected-status": 204,
             },
         )
+    else:
+        # Retained selectors/rules may still reference this owned child. Keep a
+        # deny target so revocation neither revives old leaves nor routes direct.
+        upsert_group(groups, "GLaDOS Download", {"type": "select", "proxies": ["REJECT"]})
     upsert_group(
         groups,
         "STT GitHub Download",
         {
             "type": "url-test",
             "proxies": stt_github_nodes,
-            "url": github_download_probe,
-            "interval": 600,
-            "lazy": False,
+            "url": download_probe,
+            "interval": 900,
+            "lazy": True,
             "tolerance": 120,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     upsert_group(
@@ -425,13 +594,13 @@ def main() -> None:
         {
             "type": "url-test",
             "proxies": bywave_github_nodes,
-            "url": github_download_probe,
-            "interval": 600,
-            "lazy": False,
+            "url": download_probe,
+            "interval": 900,
+            "lazy": True,
             "tolerance": 120,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     if glados_github_nodes:
@@ -441,15 +610,17 @@ def main() -> None:
             {
                 "type": "url-test",
                 "proxies": glados_github_nodes,
-                "url": github_download_probe,
-                "interval": 600,
-                "lazy": False,
+                "url": download_probe,
+                "interval": 900,
+                "lazy": True,
                 "tolerance": 150,
-                "timeout": 8000,
-                "max-failed-times": 2,
-                "expected-status": "200/302",
+                "timeout": 5000,
+                "max-failed-times": 3,
+                "expected-status": 204,
             },
         )
+    else:
+        upsert_group(groups, "GLaDOS GitHub Download", {"type": "select", "proxies": ["REJECT"]})
     upsert_group(
         groups,
         "GitHub Control",
@@ -468,45 +639,60 @@ def main() -> None:
         groups,
         "GitHub Download",
         {
-            "type": "load-balance",
-            "proxies": github_provider_groups,
-            "strategy": "round-robin",
-            "url": github_download_probe,
-            "interval": 600,
-            "lazy": False,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "type": "url-test",
+            "proxies": github_download_nodes,
+            "url": download_probe,
+            "interval": 900,
+            "tolerance": 120,
+            "lazy": True,
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     upsert_group(
         groups,
         "Model Download",
         {
-            "type": "load-balance",
-            "proxies": model_provider_groups,
-            "strategy": "round-robin",
-            "url": model_download_probe,
-            "interval": 600,
-            "lazy": False,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": "200/302",
+            "type": "url-test",
+            "proxies": model_download_nodes,
+            "url": download_probe,
+            "interval": 900,
+            "tolerance": 120,
+            "lazy": True,
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
     upsert_group(
         groups,
         "Download",
         {
-            "type": "load-balance",
-            "proxies": download_provider_groups,
-            "strategy": "round-robin",
-            "url": "https://registry-1.docker.io/v2/",
-            "interval": 600,
-            "lazy": False,
-            "timeout": 8000,
-            "max-failed-times": 2,
-            "expected-status": 401,
+            "type": "url-test",
+            "proxies": download_nodes,
+            "url": download_probe,
+            "interval": 900,
+            "tolerance": 120,
+            "lazy": True,
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
+        },
+    )
+    upsert_group(
+        groups,
+        "Package Download",
+        {
+            "type": "url-test",
+            "proxies": download_nodes,
+            "url": download_probe,
+            "interval": 900,
+            "tolerance": 120,
+            "lazy": True,
+            "timeout": 5000,
+            "max-failed-times": 3,
+            "expected-status": 204,
         },
     )
 
@@ -573,13 +759,12 @@ def main() -> None:
         "RULE-SET,cn-ip,DIRECT,no-resolve",
     ]
     download_overrides = [
+        *domain_routes(
+            capabilities, "download_routes", "DOMAIN",
+            DOWNLOAD_ROUTE_GROUPS,
+        ),
         # GitHub release assets and container images, while normal browsing
         # continues to use the latency-optimized Developer group.
-        "DOMAIN,release-assets.githubusercontent.com,GitHub Download",
-        "DOMAIN,objects.githubusercontent.com,GitHub Download",
-        "DOMAIN,codeload.github.com,GitHub Download",
-        "DOMAIN,github-releases.githubusercontent.com,GitHub Download",
-        "DOMAIN,pkg-containers.githubusercontent.com,GitHub Download",
         "DOMAIN,ghcr.io,Download",
         "DOMAIN,registry-1.docker.io,Download",
         "DOMAIN-SUFFIX,production.cloudflare.docker.com,Download",
@@ -613,7 +798,7 @@ def main() -> None:
         "DOMAIN-SUFFIX,ardownload.adobe.com,Download",
     ]
     service_overrides = [
-        # AI services keep a sticky, fixed-IP path.
+        # AI domains use the explicitly ordered Research + AI fallback group.
         "DOMAIN-SUFFIX,openai.com,Research + AI",
         "DOMAIN-SUFFIX,chatgpt.com,Research + AI",
         "DOMAIN-SUFFIX,oaistatic.com,Research + AI",
@@ -632,20 +817,7 @@ def main() -> None:
         "DOMAIN-SUFFIX,cursor.com,Research + AI",
         "DOMAIN-SUFFIX,cursor.sh,Research + AI",
         "DOMAIN-SUFFIX,cursorapi.com,Research + AI",
-        # Streaming gets its own availability-first group.
-        "DOMAIN-SUFFIX,youtube.com,Streaming",
-        "DOMAIN-SUFFIX,ytimg.com,Streaming",
-        "DOMAIN-SUFFIX,googlevideo.com,Streaming",
-        "DOMAIN-SUFFIX,youtu.be,Streaming",
-        "DOMAIN-SUFFIX,youtube-nocookie.com,Streaming",
-        # Social traffic uses real-service probes instead of the generic
-        # latency probe, which can select a node that is fast only for CDN
-        # health checks but slow for Telegram/X.
-        "DOMAIN-SUFFIX,twitter.com,Social",
-        "DOMAIN-SUFFIX,x.com,Social",
-        "DOMAIN-SUFFIX,twimg.com,Social",
-        "DOMAIN-SUFFIX,t.co,Social",
-        "DOMAIN-SUFFIX,twittercdn.com,Social",
+        *domain_routes(capabilities, "video_routes", "DOMAIN-SUFFIX", {"Streaming", "Social"}),
         "DOMAIN-SUFFIX,telegram.org,Telegram",
         "DOMAIN-SUFFIX,t.me,Telegram",
         "DOMAIN-SUFFIX,telegram.me,Telegram",
@@ -653,9 +825,6 @@ def main() -> None:
         "DOMAIN-SUFFIX,telesco.pe,Telegram",
         "DOMAIN-KEYWORD,telegram,Telegram",
         # Developer traffic is tested against GitHub itself.
-        "DOMAIN,github.com,GitHub Control",
-        "DOMAIN,api.github.com,GitHub Control",
-        "DOMAIN,alive.github.com,GitHub Control",
         "DOMAIN-SUFFIX,github.com,GitHub Download",
         "DOMAIN-SUFFIX,github.io,Developer",
         "DOMAIN-SUFFIX,githubusercontent.com,GitHub Download",
@@ -684,7 +853,12 @@ def main() -> None:
 
     config["proxy-groups"] = groups
     config["rules"] = unique(normalized_rules)
+    config["unified-delay"] = False
+    # Rebuild the owned business groups and rules first. Only after their old
+    # references are gone may exact legacy file-provider owners be retired.
+    retire_legacy_quality_providers(config, capabilities, route_defaults)
     apply_stability(config, capabilities)
+    measurement["configure_measurement"](config, capabilities)
     with open(destination, "w", encoding="utf-8") as stream:
         yaml.safe_dump(
             config,

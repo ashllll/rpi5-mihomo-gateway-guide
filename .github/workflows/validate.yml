@@ -27,6 +27,8 @@ jobs:
           python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
           python3 tools/check_stability.py
+          python3 tools/check_measurement_policy.py
+          python3 tools/check_native_budget.py
           python3 tools/check_update_rules.py
           python3 tools/check_publication_privacy.py
           python3 tools/check_image.py
@@ -37,3 +39,34 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y iproute2 nftables dnsmasq-base
           sudo python3 tools/check_setup_linux.py
+
+  core-build:
+    # The shipped core must be built with the gVisor graph driver: a core without
+    # it passes `mihomo -t`, then starts with no TUN device and drops every
+    # proxied connection (2026-10-25 incident). Build the pinned patch and prove
+    # the capability from the binary itself.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Build the pinned core and verify its graph driver
+        run: |
+          set -eu
+          commit=$(python3 -c "import json;print(json.load(open('core/upstream.json'))['commit'])")
+          git clone --filter=blob:none --no-checkout https://github.com/MetaCubeX/mihomo.git src
+          git -C src checkout --quiet "$commit"
+          test "$(git -C src rev-parse HEAD)" = "$commit"
+          git -C src apply "$GITHUB_WORKSPACE/core/mihomo-v1.19.28-budget.patch"
+          cd src
+          go build -trimpath -tags "with_gvisor no_tailscale" -o "$RUNNER_TEMP/core-host" .
+          "$RUNNER_TEMP/core-host" -v | grep -q with_gvisor
+          test "$("$RUNNER_TEMP/core-host" -measurement-budget-protocol)" = mihomo-budget-v1
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -tags "with_gvisor no_tailscale" -o "$RUNNER_TEMP/core-arm64" .

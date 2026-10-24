@@ -1,5 +1,11 @@
-#!/usr/bin/python3
-"""Offline regression checks for service-local recovery and HTTP health."""
+#!/usr/bin/env python3
+"""Offline checks: process recovery never fans out into business probes.
+
+The healthcheck may restart a dead process and, at most once per sample window,
+fetch one 204 through the proxy port to prove the chain egresses. What it must
+never do is turn one failure into a burst: no restart loops, no repeated active
+probes after a restart, and no egress attempt at all while the core is down.
+"""
 import copy
 import os
 from pathlib import Path
@@ -7,106 +13,122 @@ import runpy
 import subprocess
 import sys
 import tempfile
-from urllib.parse import parse_qs, urlsplit
 
-sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[1]
 SBIN = ROOT / 'automation/sbin'
+sys.dont_write_bytecode = True
+
+HEADER = '#!' + sys.executable + '\n'
+SYSTEMCTL = '''import os,sys
+from pathlib import Path
+with open(os.environ['TEST_ACTIONS'],'a') as f: f.write(' '.join(sys.argv[1:])+'\\n')
+if sys.argv[1] == 'restart': Path(os.environ['TEST_RESTARTED']).touch()
+if sys.argv[1] == 'is-active':
+    mode, restarted = os.environ['TEST_MODE'], Path(os.environ['TEST_RESTARTED']).exists()
+    quiet = '--quiet' in sys.argv
+    if mode == 'active' or (mode == 'recover' and restarted):
+        if quiet: sys.exit(0)
+        print('active'); sys.exit(0)
+    if quiet: sys.exit(3)
+    print('inactive'); sys.exit(3)
+if sys.argv[1] == 'show':
+    print('2026-10-25 01:35:57'); sys.exit(0)
+sys.exit(0)
+'''
+NET = '''import os,sys
+table_ok = os.environ['TEST_TABLE_OK'] == '1'
+kind, verb = sys.argv[1], sys.argv[2]
+if kind == 'link':
+    sys.exit(0 if (table_ok and verb == 'show') else 2)
+if kind == 'rule':
+    print('9000:\\tfrom all lookup 2022'); sys.exit(0)
+name = sys.argv[4] if len(sys.argv) > 4 else ''
+if not (table_ok and name in ('mihomo', 'rp_filter')):
+    sys.exit(1)
+print('counter packets %s bytes 0' % os.environ['TEST_PACKETS'])
+'''
+CURL = '''import os,sys
+with open(os.environ['TEST_ACTIONS'],'a') as f: f.write('CURL\\n')
+print('204', end='')
+'''
+
+
+def run_mode(script, root, commands, mode, packets='100', table_ok='1', fresh=True) -> tuple[int, list[str]]:
+    actions = root / 'actions'
+    actions.write_text('')
+    (root / 'restarted').unlink(missing_ok=True)
+    if fresh:
+        for stale in ('packets', 'status', 'egress', 'egress_at'):
+            (root / stale).unlink(missing_ok=True)
+    env = dict(os.environ, PATH=str(commands) + ':' + os.environ['PATH'],
+               TEST_ACTIONS=str(actions), TEST_RESTARTED=str(root / 'restarted'),
+               TEST_MODE=mode, TEST_TABLE_OK=table_ok, TEST_PACKETS=packets)
+    result = subprocess.run(['sh', '-c', script], env=env, capture_output=True, text=True, timeout=20)
+    return result.returncode, actions.read_text().splitlines()
 
 
 def main():
     overlay = runpy.run_path(str(SBIN / 'mihomo-policy-overlay'))
+    policy = runpy.run_path(str(SBIN / 'mihomo-measurement-policy'))
     config = {'proxies': [{'name': 'test-node'}], 'rules': ['MATCH,Auto'],
-              'proxy-groups': [{'name': 'Streaming', 'proxies': ['test-node'], 'interval': 300}]}
+              'proxy-groups': [{'name': 'Streaming', 'type': 'url-test', 'proxies': ['test-node']}]}
     manifest = {'stability': {'groups': {'Streaming': {'interval': 45}},
                               'telegram_cidrs': ['149.154.160.0/20']}}
+    overlay['apply_stability'](config, manifest)
+    policy['configure_measurement'](config, manifest)
+    assert config['proxy-groups'][0] == {'name': 'Streaming', 'type': 'select', 'proxies': ['test-node']}
     before = copy.deepcopy(config)
-    overlay['apply_stability'](config, manifest)
-    assert config['proxies'] == before['proxies']
-    assert config['proxy-groups'][0]['proxies'] == ['test-node']
-    assert config['proxy-groups'][0]['interval'] == 45
-    assert config['rules'] == ['IP-CIDR,149.154.160.0/20,Telegram,no-resolve', 'MATCH,Auto']
-    snapshot = copy.deepcopy(config)
-    overlay['apply_stability'](config, manifest)
-    assert config == snapshot
+    policy['configure_measurement'](config, manifest)
+    assert config == before
 
-    score = runpy.run_path(str(SBIN / 'mihomo-adaptive-score'))
-    for expected in ('200', '401'):
-        for alive in (False, True):
-            calls = []
-            replies = iter([{'delay': 100}, {'extra': {'https://test/': {'alive': alive}}}])
-            def api_get(path, secret):
-                calls.append(path)
-                return next(replies)
-            score['probe'].__globals__['api_get'] = api_get
-            assert score['probe']('test-node', 'https://test/', 'TEST-ONLY', expected)['ok'] is alive
-            assert urlsplit(calls[0]).path == '/proxies/test-node/delay'
-            assert parse_qs(urlsplit(calls[0]).query) == {
-                'url': ['https://test/'], 'timeout': ['6000'], 'expected': [expected]}
-            assert calls[1] == '/proxies/test-node'
-
-    # Execute the real shell branches in isolated state with fake commands.
-    # No gateway, subscription, credentials or Linux-only utilities required.
     source = (SBIN / 'mihomo-healthcheck').read_text()
     with tempfile.TemporaryDirectory(prefix='stability-check-') as raw:
         temp = Path(raw)
         commands = temp / 'bin'
         commands.mkdir()
-        actions = temp / 'actions'
-        fixtures = {
-            'curl': '''import os, sys, json
-args = ' '.join(sys.argv[1:])
-if '/proxies/' in args:
-    print(json.dumps({'testUrl': 'https://checks.example.test/custom', 'expectedStatus': '200'}))
-    sys.exit(0)
-if '/group/' in args:
-    with open(os.environ['TEST_ACTIONS'], 'a') as output: output.write(args + '\\n')
-    sys.exit(0)
-if 'x.com/' in args or 'core.telegram.org/' in args or 'youtube.com/' in args: print('000', end=''); sys.exit(28)
-if 'chatgpt.com/' in args: print(os.environ['TEST_WEB_CODE'], end='')
-elif 'generate_204' in args: print('204', end='')
-elif 'api.openai.com/' in args or 'registry-1.docker.io/' in args: print('401', end='')
-else: print('200', end='')
-''',
-            'systemctl': '''import os, sys
-with open(os.environ['TEST_ACTIONS'], 'a') as output: output.write(' '.join(sys.argv[1:]) + '\\n')
-''',
-            'jq': '''import sys, json
-from urllib.parse import quote
-if '@uri' in sys.argv: print(quote(sys.stdin.read(), safe=''))
-elif '.testUrl' in sys.argv[-1]: print(json.load(sys.stdin)['testUrl'])
-else: print(json.load(sys.stdin)['expectedStatus'])
-''',
-            'flock': 'pass\n',
-            'logger': 'pass\n',
-            'date': "from datetime import datetime; print(datetime.now().astimezone().isoformat(timespec='seconds'))\n",
-        }
-        for name, body in fixtures.items():
+        for name, body in {'systemctl': SYSTEMCTL, 'ip': NET, 'nft': NET, 'curl': CURL,
+                           'flock': 'pass\n', 'logger': 'pass\n', 'journalctl': 'pass\n',
+                           'date': "import sys,datetime;print(str(int(datetime.datetime.now().timestamp())) if '+%s' in sys.argv else datetime.datetime.now().astimezone().isoformat())\n"}.items():
             path = commands / name
-            path.write_text('#!' + sys.executable + '\n' + body)
+            path.write_text(HEADER + body)
             path.chmod(0o755)
-        secret = temp / 'test-secret'
-        secret.write_text('TEST-ONLY-NOT-A-CREDENTIAL')
         script = source.replace('/run/lock/mihomo-maintenance.lock', str(temp / 'lock'))
         script = script.replace('state_dir=/run/mihomo-healthcheck', 'state_dir=' + raw)
-        script = script.replace('/etc/mihomo-automation.env', str(temp / 'unused.env'))
-        script = script.replace('/etc/mihomo/secrets/dashboard.secret', str(secret))
-        script = script.replace('/usr/local/sbin/mihomo-reconcile-policy', 'true')
-        for code, state in [('403', 'restricted'), ('000', 'unreachable')]:
-            env = dict(os.environ, PATH=str(commands) + ':' + os.environ['PATH'],
-                       TEST_ACTIONS=str(actions), TEST_WEB_CODE=code)
-            subprocess.run(['sh', '-c', script], env=env, check=True, timeout=20)
-            status = (temp / 'status').read_text()
-            assert 'social=false' in status and 'telegram=false' in status
-            assert 'chatgpt_web=false' in status and 'chatgpt_state=' + state in status
-            assert 'mode=degraded' in status
-        logged = actions.read_text()
-        assert 'reload' not in logged and 'restart' not in logged
-        assert 'expected=200' in logged
-        assert 'Social' in logged and 'Telegram' in logged
-        assert 'Streaming' in logged and 'expected=204' not in logged
-        assert 'checks.example.test' in logged
-    print('stability checks passed: preserved policy, per-URL health, isolated recovery, web states')
+
+        # Healthy: the sample is idle on the first tick and verified once the
+        # packet counter advances.
+        code, actions = run_mode(script, temp, commands, 'active', packets='100')
+        assert code == 0, (code, actions)
+        assert not [line for line in actions if 'restart' in line]
+        assert actions.count('CURL') <= 1
+        status = (temp / 'status').read_text()
+        assert 'mode=process-running' in status and 'business=idle' in status and 'tun=1' in status
+        code, actions = run_mode(script, temp, commands, 'active', packets='100')
+        assert code == 0 and 'business=idle' in (temp / 'status').read_text()
+        (temp / 'packets').write_text('100\n')
+        code, _ = run_mode(script, temp, commands, 'active', packets='140', fresh=False)
+        assert code == 0 and 'business=verified' in (temp / 'status').read_text()
+
+        # Recovery: one restart, at most one active probe, and the pass is real.
+        code, actions = run_mode(script, temp, commands, 'recover')
+        assert code == 0, (code, actions)
+        assert len([line for line in actions if line.startswith('restart')]) == 1
+        assert actions.count('CURL') <= 1
+        assert 'action=restart' in (temp / 'status').read_text()
+
+        # Down: never report a healthy business, never probe egress, exit red.
+        code, actions = run_mode(script, temp, commands, 'inactive')
+        assert code == 1, (code, actions)
+        assert 'business=failed' in (temp / 'status').read_text()
+        assert 'CURL' not in actions
+
+        # Broken hooks with a running process: red, and egress is not attempted
+        # to "prove" a chain the kernel does not have.
+        code, actions = run_mode(script, temp, commands, 'active', table_ok='0')
+        assert code == 1 and 'CURL' not in actions
+        assert 'business=failed' in (temp / 'status').read_text()
+        assert 'reload' not in ' '.join(actions)
+    print('stability checks passed: one restart, one probe window, no fanout')
 
 
 if __name__ == '__main__':

@@ -1,244 +1,156 @@
 #!/bin/sh
-
+# Passive observer for the mihomo gateway. Reads kernel state; the one active
+# check (egress, at most every 5 minutes) goes through the proxy port and is
+# ordinary traffic, not a measurement probe, so it never spends budget.
+#
+#   (no args)          timer mode: restart a dead process, then observe
+#   --observe-only     same probe, no lock and no restart; exit 1 when failed
+#   --startup-check N  wait up to N seconds for TUN + hooks (default: 20, or 75
+#                      during the first 5 minutes after boot)
+#   --egress           run the egress probe now and print the result
+#
+# The startup-check mode exists because `mihomo -t` validates the config but
+# cannot prove the TUN device or its nftables hooks exist: on 2026-10-25 a core
+# built without gVisor started cleanly, passed `-t`, and black-holed every
+# proxied connection while domestic traffic kept working.
 set -eu
 umask 077
-
-exec 8>/run/lock/mihomo-maintenance.lock
-if ! flock -n 8; then
-  exit 0
-fi
-
 state_dir=/run/mihomo-healthcheck
-status_file=$state_dir/status
-# Deployment parameters.  See automation/env/automation.env.example; copy it to
-# /etc/mihomo-automation.env and adjust the values before the first run.
-if [ -r /etc/mihomo-automation.env ]; then
-  . /etc/mihomo-automation.env
-fi
-: "${GATEWAY_LAN_IP:=10.77.0.1}"
-: "${MIHOMO_MIXED_PORT:=7890}"
-: "${MIHOMO_CONTROLLER_PORT:=9090}"
-proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
-controller=http://${GATEWAY_LAN_IP}:${MIHOMO_CONTROLLER_PORT}
-secret_file=/etc/mihomo/secrets/dashboard.secret
-
 install -d -m 700 "$state_dir"
+lan_ip=${GATEWAY_LAN_IP:-127.0.0.1}
+mixed_port=${MIHOMO_MIXED_PORT:-7890}
+egress_every=${EGRESS_EVERY:-300}
+egress_url=${EGRESS_URL:-https://www.gstatic.com/generate_204}
+alert=/usr/local/sbin/mihomo-alert
 
-http_code() {
-  curl --silent --show-error --output /dev/null \
-    --connect-timeout 3 --max-time 8 --write-out '%{http_code}' "$@" \
-    2>/dev/null || true
-}
-
-direct_is_healthy() {
-  code=$(http_code --noproxy '*' https://www.baidu.com/)
-  case "$code" in
-    2??|3??) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-probe_exact() {
-  expected=$1
-  url=$2
-  [ "$(http_code --proxy "$proxy" "$url")" = "$expected" ]
-}
-
-probe_success() {
-  code=$(http_code --proxy "$proxy" "$1")
-  case "$code" in
-    2??|3??) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-probe_ai() {
-  successes=0
-  openai_ok=false
-  for target in \
-    https://api.openai.com/v1/models \
-    https://claude.ai/ \
-    https://gemini.google.com/
-  do
-    code=$(http_code --proxy "$proxy" "$target")
-    case "$code" in
-      2??|3??|401)
-        successes=$((successes + 1))
-        [ "$target" = https://api.openai.com/v1/models ] && openai_ok=true
-        ;;
-    esac
-  done
-  [ "$openai_ok" = true ] && [ "$successes" -ge 2 ]
-}
-
-read_failures() {
-  name=$1
-  file=$state_dir/$name.failures
-  if [ -s "$file" ]; then
-    value=$(cat "$file")
-    case "$value" in
-      *[!0-9]*|'') printf '0\n' ;;
-      *) printf '%s\n' "$value" ;;
-    esac
-  else
-    printf '0\n'
-  fi
-}
-
-set_failures() {
-  printf '%s\n' "$2" >"$state_dir/$1.failures"
-}
-
-trigger_group_check() {
-  group=$1
-  [ -s "$secret_file" ] || return 0
-  secret=$(cat "$secret_file")
-  encoded_group=$(printf %s "$group" | jq -sRr @uri)
-  # Native group retests may use their configured URL, regardless of the
-  # diagnostic request URL. Always obtain URL and status from the same group.
-  state=$(curl --fail --silent --connect-timeout 3 --max-time 5 \
-    -H "Authorization: Bearer $secret" \
-    "$controller/proxies/$encoded_group" 2>/dev/null) || return 0
-  url=$(printf %s "$state" | jq -er '.testUrl // empty') || return 0
-  expected=$(printf %s "$state" | jq -er '.expectedStatus | tostring | select(length > 0 and . != "null")') || return 0
-  encoded_url=$(printf %s "$url" | jq -sRr @uri)
-  encoded_expected=$(printf %s "$expected" | jq -sRr @uri)
-  curl --fail --silent --output /dev/null \
-    --connect-timeout 3 --max-time 12 \
-    -H "Authorization: Bearer $secret" \
-    "$controller/group/$encoded_group/delay?url=$encoded_url&timeout=5000&expected=$encoded_expected" \
-    2>/dev/null || true
-}
-
-if ! systemctl is-active --quiet mihomo; then
-  logger -t mihomo-healthcheck "Mihomo is inactive; requesting restart"
-  systemctl restart mihomo
-  sleep 8
-fi
-
-/usr/local/sbin/mihomo-reconcile-policy >/dev/null 2>&1 || true
-
-if direct_is_healthy; then
-  direct=true
-else
-  direct=false
-fi
-
-probe_download() {
-  probe_exact 401 https://registry-1.docker.io/v2/ &&
-    probe_success https://codeload.github.com/github/gitignore/zip/refs/heads/main &&
-    probe_success https://huggingface.co/gpt2/resolve/main/config.json
-}
-
-probe_chatgpt() {
-  code=$(http_code --proxy "$proxy" https://chatgpt.com/api/auth/session)
-  printf '%s\n' "$code" >"$state_dir/.chatgpt_code"
-  [ "$code" = 200 ]
-}
-
-# Independent service probes run concurrently so one stalled service cannot
-# delay all the other recovery decisions. The maintenance lock owns the files.
-run_probe() {
-  name=$1
-  shift
-  if "$@"; then result=true; else result=false; fi
-  printf '%s\n' "$result" >"$state_dir/.$name.probe"
-}
-run_probe default probe_exact 204 https://www.gstatic.com/generate_204 &
-run_probe developer probe_success 'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack' &
-run_probe streaming probe_exact 204 https://www.youtube.com/generate_204 &
-run_probe ai probe_ai &
-run_probe social probe_exact 200 https://x.com/robots.txt &
-run_probe telegram probe_exact 200 https://core.telegram.org/ &
-run_probe chatgpt_web probe_chatgpt &
-run_probe download probe_download &
-wait
-default_ok=$(cat "$state_dir/.default.probe")
-developer_ok=$(cat "$state_dir/.developer.probe")
-streaming_ok=$(cat "$state_dir/.streaming.probe")
-ai_ok=$(cat "$state_dir/.ai.probe")
-social_ok=$(cat "$state_dir/.social.probe")
-telegram_ok=$(cat "$state_dir/.telegram.probe")
-chatgpt_web_ok=$(cat "$state_dir/.chatgpt_web.probe")
-chatgpt_code=$(cat "$state_dir/.chatgpt_code")
-download_ok=$(cat "$state_dir/.download.probe")
-
-failed_categories=0
-max_failures=0
-actions=none
-
-process_category() {
-  name=$1
-  healthy=$2
-  group=$3
-  failures=$(read_failures "$name")
-
-  if [ "$healthy" = true ]; then
-    if [ "$failures" -gt 0 ]; then
-      logger -t mihomo-healthcheck \
-        "$name path recovered after $failures consecutive failures"
+usage='usage: mihomo-healthcheck [--observe-only|--startup-check [seconds]|--egress]'
+case "${1:-}" in
+  '') mode=timer; wait_s=0 ;;
+  --observe-only) mode=observe; wait_s=0 ;;
+  --egress) mode=egress; wait_s=0 ;;
+  --startup-check)
+    mode=startup
+    if [ "${2:-}" = '' ]; then
+      # A cold boot can be slower than a restart. The gate still has to pass -
+      # the longer window only avoids a false red while interfaces settle.
+      if [ "$(cut -d. -f1 /proc/uptime)" -lt 300 ]; then wait_s=75; else wait_s=20; fi
+    else
+      wait_s=$2
     fi
-    set_failures "$name" 0
-    return
-  fi
+    ;;
+  *) echo "$usage" >&2; exit 2 ;;
+esac
 
-  failed_categories=$((failed_categories + 1))
-  if [ "$direct" != true ]; then
-    set_failures "$name" 0
-    return
-  fi
+if [ "$mode" = timer ]; then
+  # The subscription updater holds the same lock while it rewrites config and
+  # restarts the core, so skipping one tick is correct.
+  exec 8>/run/lock/mihomo-maintenance.lock
+  flock -n 8 || exit 0
+fi
 
-  failures=$((failures + 1))
-  set_failures "$name" "$failures"
-  [ "$failures" -le "$max_failures" ] || max_failures=$failures
+started=$(systemctl show mihomo -p ActiveEnterTimestamp --value 2>/dev/null || true)
+[ -n "$started" ] || started=-5min
+probe() {
+  tun_ok=0; redirect_ok=0; filter_ok=0; route_ok=0
+  ip link show Mihomo >/dev/null 2>&1 && tun_ok=1
+  nft list table inet mihomo >/dev/null 2>&1 && redirect_ok=1
+  nft list table inet rp_filter >/dev/null 2>&1 && filter_ok=1
+  ip rule show 2>/dev/null | grep -q '^9000:' && route_ok=1
+  cur=$(nft list table inet mihomo 2>/dev/null \
+    | awk '/counter packets/{sub(/.*counter packets /,"");sub(/ .*/,"");s+=$1} END{print s+0}')
+}
+ok() { [ "$tun_ok" = 1 ] && [ "$redirect_ok" = 1 ] && [ "$filter_ok" = 1 ] && [ "$route_ok" = 1 ]; }
 
-  if [ "$failures" -ge 1 ]; then
-    trigger_group_check "$group"
-    actions="group-check"
-  fi
+# Egress proof: a 204 fetched through the proxy port shows the whole chain
+# (core -> outbound -> node -> internet) works, which the packet counter alone
+# cannot. SOCKS5 hostname mode also proves the proxied DNS path.
+egress_probe() {
+  code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' \
+    --socks5-hostname "$lan_ip:$mixed_port" "$egress_url" 2>/dev/null || true)
+  [ "$code" = 204 ] && echo ok || echo fail
 }
 
-process_category default "$default_ok" Auto
-process_category developer "$developer_ok" "GitHub Control"
-process_category streaming "$streaming_ok" Streaming
-process_category ai "$ai_ok" "Research + AI"
-case "$chatgpt_code" in
-  200) chatgpt_state=available ;;
-  403) chatgpt_state=restricted ;;
-  000) chatgpt_state=unreachable ;;
-  *) chatgpt_state=http-error ;;
+probe
+if [ "$mode" = startup ]; then
+  deadline=$(( $(date +%s) + wait_s ))
+  while ! ok; do
+    [ "$(date +%s)" -ge "$deadline" ] && break
+    sleep 1
+    probe
+  done
+fi
+
+if [ "$mode" = egress ]; then
+  result=$(egress_probe)
+  printf '%s\n' "$result" >"$state_dir/egress"
+  printf '%s\n' "$(date +%s)" >"$state_dir/egress_at"
+  echo "egress=$result"
+  [ "$result" = ok ]
+fi
+
+prev_business=$(sed -n 's/.*business=\([a-z]*\).*/\1/p' "$state_dir/status" 2>/dev/null | head -1 || true)
+prev=$(cat "$state_dir/packets" 2>/dev/null || echo '')
+printf '%s\n' "$cur" >"$state_dir/packets"
+# Informational only: a fatal line from an earlier run must never fail a fresh
+# start, so journal text is recorded but is not part of the decision.
+fatal=$(journalctl -u mihomo --since "$started" -o cat 2>/dev/null \
+  | grep -m1 -E 'gVisor is not included|Start TUN listening error|parse config error' || true)
+
+mode_name=process-running
+action=none
+state=$(systemctl is-active mihomo 2>/dev/null || true)
+# An ExecStartPost probe runs while the unit is still "activating", which is a
+# healthy state and must not be reported as an inactive process.
+case "$state" in
+  active|activating|reloading) ;;
+  *)
+  mode_name=process-inactive
+  if [ "$mode" = timer ]; then
+    logger -t mihomo-healthcheck "Mihomo is inactive; requesting restart"
+    systemctl restart mihomo
+    action=restart
+    systemctl is-active --quiet mihomo && mode_name=process-restarted
+  fi
+  ;;
 esac
-if [ "$chatgpt_web_ok" != true ]; then
-  # Keep web observations independent of API health. Retesting the API cannot
-  # prove recovery of a web-only failure; browser acceptance is separate.
-  failed_categories=$((failed_categories + 1))
-  set_failures chatgpt_web 0
-  if [ "$actions" = none ]; then actions="site-$chatgpt_state"; fi
-fi
-process_category social "$social_ok" Social
-process_category telegram "$telegram_ok" Telegram
-process_category download "$download_ok" Download
 
-# Service failures are isolated to their groups. Reloading/restarting a live
-# core here disrupts unrelated sessions and resets its health history.
-# The inactive-process recovery above remains available for an actual crash.
-
-if [ "$direct" != true ]; then
-  mode=upstream-down
-  actions="wait"
-elif [ "$failed_categories" -eq 0 ] && [ "$chatgpt_web_ok" = true ]; then
-  mode=healthy
+if [ "$mode_name" = process-inactive ]; then
+  # Kernel state can outlive a dying process for a moment; a gateway without a
+  # core is down no matter what the tables say.
+  business=failed
+elif ok; then
+  if [ -n "$prev" ] && [ "$cur" -gt "$prev" ]; then business=verified; else business=idle; fi
 else
-  mode=degraded
+  business=failed
 fi
 
-printf '%s mode=%s direct=%s default=%s developer=%s streaming=%s ai=%s download=%s failed_categories=%s max_failures=%s action=%s social=%s telegram=%s chatgpt_web=%s chatgpt_http=%s chatgpt_state=%s\n' \
-  "$(date -Is)" "$mode" "$direct" "$default_ok" "$developer_ok" \
-  "$streaming_ok" "$ai_ok" "$download_ok" "$failed_categories" "$max_failures" "$actions" \
-  "$social_ok" "$telegram_ok" "$chatgpt_web_ok" "$chatgpt_code" "$chatgpt_state" \
-  >"$status_file"
-
-if [ "$failed_categories" -gt 0 ]; then
-  logger -t mihomo-healthcheck \
-    "Service health: default=$default_ok developer=$developer_ok streaming=$streaming_ok ai=$ai_ok download=$download_ok action=$actions"
+# Timer mode owns the egress sample; it costs one proxied request, no budget.
+egress=$(cat "$state_dir/egress" 2>/dev/null || echo unknown)
+if [ "$mode" = timer ] && [ "$business" != failed ]; then
+  last_at=$(cat "$state_dir/egress_at" 2>/dev/null || echo 0)
+  if [ $(( $(date +%s) - last_at )) -ge "$egress_every" ]; then
+    egress=$(egress_probe)
+    printf '%s\n' "$(date +%s)" >"$state_dir/egress_at"
+    printf '%s\n' "$egress" >"$state_dir/egress"
+  fi
 fi
+# A failed egress sample after a healthy one is a gateway fault, not a slow probe.
+if [ "$business" = verified ] && [ "$egress" = fail ]; then business=degraded; fi
+
+printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s fatal=%s\n' \
+  "$(date -Is)" "$mode_name" "$action" "$business" "$tun_ok" "$redirect_ok" "$filter_ok" "$route_ok" \
+  "$egress" "$cur" "${fatal:-none}" >"$state_dir/status"
+
+# Transitions only: a stable fault must not spam the phone, and recovery is sent
+# once. Start failures are covered by the unit's OnFailure, not by this probe.
+if [ "$mode" = timer ] && [ -x "$alert" ]; then
+  case "${prev_business}:${business}" in
+    failed:verified|failed:idle|failed:degraded|degraded:verified)
+      "$alert" --health "网关已恢复：business=$business egress=$egress" health || true ;;
+    verified:failed|idle:failed|degraded:failed|verified:degraded)
+      "$alert" --health "网关异常：business=$business egress=$egress packets=$cur" health || true ;;
+  esac
+fi
+
+[ "$business" = failed ] && exit 1
+exit 0

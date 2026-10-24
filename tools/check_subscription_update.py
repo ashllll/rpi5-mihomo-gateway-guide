@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 import yaml
-from check_overlay import ALL_NODES, MANIFEST_OVERLAY, build_fixture
+from check_overlay import ALL_NODES, MANIFEST_OVERLAY, build_fixture, native_group_nodes
 
 REPO = Path(__file__).resolve().parents[1]
 SOURCE = (REPO / 'automation/sbin/mihomo-update-subscription').read_text()
@@ -40,6 +40,8 @@ if name == 'curl':
         code = '204' if 'generate_204' in url else '401' if 'docker.io' in url or 'api.openai.com' in url else '200'
         if mode == 'health' and 'docker.io' in url:
             fault()
+            if os.environ.get('SUB_TEST_BREAK_POLICY'):
+                Path(os.environ['MIHOMO_CAPABILITIES']).write_text('{broken')
         print('500' if mode == 'health' and 'docker.io' in url else code, end='')
 elif name == 'systemctl':
     with (root / 'calls').open('a') as stream:
@@ -72,14 +74,14 @@ elif name == 'install':
             sys.exit(1)
     else:
         source, target = map(Path, cleaned[-2:])
-        if target == root / 'etc/config.yaml' and source.parent.name.startswith('mihomo-subscription.'):
+        if target == root / 'etc/config.yaml' and source.name == 'config.yaml' and source.parent.name.startswith('mihomo-subscription.'):
             if mode in {'write', 'signal', 'rollback'}:
                 fault()
                 target.write_text('partial write\n')
                 if mode == 'signal':
                     os.kill(os.getppid(), signal.SIGTERM)
                 sys.exit(1)
-        if mode == 'rollback' and 'backups' in source.parts:
+        if mode == 'rollback' and ('backups' in source.parts or source.name == 'rollback.yaml'):
             sys.exit(1)
     sys.exit(subprocess.call([os.environ['SUB_TEST_INSTALL'], *cleaned]))
 elif name == 'logger':
@@ -98,6 +100,8 @@ def check_case(mode):
         for name in ('etc', 'lock', 'bin', 'downloads', 'cache'):
             (root / name).mkdir()
         fixture, capabilities = build_fixture(root / 'etc', MANIFEST_OVERLAY, ALL_NODES)
+        route_defaults = root / 'etc/route-defaults.yaml'
+        shutil.copyfile(REPO / 'automation/policy/route-defaults.yaml', route_defaults)
         current = root / 'etc/config.yaml'
         fixture.rename(current)
         original = yaml.safe_load(current.read_text())
@@ -109,7 +113,8 @@ def check_case(mode):
         (secrets / 'subscription.url').write_text('https://fixture.invalid/primary.yaml\n')
         entries = []
         for source_id, names in (('ByWave', ['Bulk 01']), ('BWB', ['Backup 01', 'Backup 02']), ('InfraAPI', ['Backup 01'])):
-            content = yaml.safe_dump({'proxies': [{'name': name, 'type': 'ss'} for name in names]})
+            content = yaml.safe_dump({'proxies': [{'name': name, 'type': 'ss',
+                'server': '198.51.100.1', 'port': 443} for name in names]})
             download = root / 'downloads' / (source_id + '.yaml')
             download.write_text(content)
             (secrets / 'subscriptions.d' / (source_id + '.url')).write_text('https://fixture.invalid/' + download.name)
@@ -123,14 +128,30 @@ def check_case(mode):
             command = root / 'bin' / name
             command.write_text(f'#!{sys.executable}\n' + STUB)
             command.chmod(0o755)
-        for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay'):
+        for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay', 'mihomo-measurement-policy'):
             command = root / 'bin' / name
             code = (REPO / 'automation/sbin' / name).read_text().split('\n', 1)[1]
             command.write_text(f'#!{sys.executable}\n' + code)
             command.chmod(0o755)
         environment = dict(os.environ, PATH=f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}",
-                           MIHOMO_CAPABILITIES=str(capabilities), SUB_TEST_ROOT=str(root),
-                           SUB_TEST_MODE=mode, SUB_TEST_INSTALL=shutil.which('install'), PYTHONDONTWRITEBYTECODE='1')
+                           MIHOMO_CAPABILITIES=str(capabilities), MIHOMO_ROUTE_DEFAULTS=str(route_defaults),
+                           SUB_TEST_ROOT=str(root),
+                           SUB_TEST_MODE=('health' if mode == 'revoke-invalid-policy' else mode.removeprefix('revoke-')),
+                           SUB_TEST_INSTALL=shutil.which('install'), PYTHONDONTWRITEBYTECODE='1')
+        if mode.startswith('revoke-'):
+            cap = yaml.safe_load(capabilities.read_text())
+            cap['measurement'] = {'enabled': True, 'native_budget': True, 'native_interval_seconds': 900,
+                'accounts': {'fixture': {'names': ALL_NODES, 'native_probes_per_hour': 10000,
+                                        'quality_attempts_per_hour': 600}}}
+            capabilities.write_text(yaml.safe_dump(cap))
+            old = root / 'old-native.yaml'
+            subprocess.run([str(root / 'bin/mihomo-policy-overlay'), str(current), str(old)],
+                           env=environment, check=True, capture_output=True)
+            shutil.copyfile(old, current)
+            cap['roles']['bulk_download'].update(glados_patterns=[], glados_explicit_allow=[])
+            capabilities.write_text(yaml.safe_dump(cap))
+            if mode == 'revoke-invalid-policy':
+                environment['SUB_TEST_BREAK_POLICY'] = '1'
         if mode in {'unchanged', 'force'}:
             manifest = root / 'extras'
             manifest.write_text(''.join(sorted(entries)))
@@ -140,6 +161,9 @@ def check_case(mode):
             shutil.copyfile(root / 'stable', current)
             shutil.copyfile(current, root / 'downloads/primary.yaml')
         before = current.read_bytes()
+        expected_rollback = root / 'expected-rollback.yaml'
+        subprocess.run([str(root / 'bin/mihomo-policy-overlay'), str(current), str(expected_rollback)],
+                       env=environment, check=True, capture_output=True)
         cache_before = {p.name: p.read_bytes() for p in (root / 'cache').iterdir()}
         script = SOURCE
         for old, new in (('/etc/mihomo-automation.env', str(root / 'absent.env')), ('/etc/mihomo', str(root / 'etc')),
@@ -153,9 +177,12 @@ def check_case(mode):
                                 env=environment, capture_output=True, text=True, timeout=45)
         success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked'}
         assert (result.returncode == 0) == success, (mode, result.stderr)
-        if (not success and mode != 'rollback') or mode in {'unchanged', 'locked'}:
+        rolled_back = mode in {'write', 'signal', 'installed-validation', 'reload', 'inactive', 'health'} or mode.startswith('revoke-')
+        if rolled_back and mode != 'revoke-invalid-policy':
+            assert yaml.safe_load(current.read_text()) == yaml.safe_load(expected_rollback.read_text()), (mode, 'rollback ignored current policy')
+        elif (not success and mode != 'rollback' and mode != 'revoke-invalid-policy') or mode in {'unchanged', 'locked'}:
             assert current.read_bytes() == before, (mode, 'running configuration was not restored')
-        if mode == 'rollback':
+        if mode in {'rollback', 'revoke-invalid-policy'}:
             messages = (root / 'messages').read_text() if (root / 'messages').exists() else ''
             assert 'manual recovery required' in messages, (mode, messages)
         if not success:
@@ -171,11 +198,18 @@ def check_case(mode):
             assert 'reload' not in calls, (mode, calls)
         if mode in {'success', 'cached', 'retained', 'force'}:
             assert 'reload mihomo' in calls and isinstance(yaml.safe_load(current.read_text()), dict)
+        if mode.startswith('revoke-'):
+            final = yaml.safe_load(current.read_text())
+            assert native_group_nodes(final, 'GLaDOS Download') == {'REJECT'}, (mode, 'revoked child revived')
+            assert 'GLaDOS | D1 Eligible' not in native_group_nodes(final, 'Download'), (mode, 'revoked aggregate member revived')
+            if mode == 'revoke-invalid-policy':
+                assert calls.count('reload mihomo') == 1, calls
 
 
 if __name__ == '__main__':
     cases = ('success', 'cached', 'retained', 'no-cache', 'validation', 'backup', 'write', 'signal',
-             'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked')
+             'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked',
+             'revoke-health', 'revoke-reload', 'revoke-write', 'revoke-signal', 'revoke-invalid-policy')
     failures = []
     for case in cases:
         try:
