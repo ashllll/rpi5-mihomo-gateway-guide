@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Shared native URLTest ownership and its persistent account budget."""
+from __future__ import annotations
+
+import copy
+from contextlib import contextmanager
+import fcntl
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import socket
+import tempfile
+import threading
+import time
+import unicodedata
+
+HEALTH_FIELDS = {'url', 'interval', 'timeout', 'lazy', 'max-failed-times',
+                 'expected-status', 'tolerance'}
+
+
+def fingerprint(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=True).encode()).hexdigest()
+
+
+def validate_accounts(measurement: dict) -> None:
+    accounts = measurement.get('accounts', {})
+    if not isinstance(accounts, dict) or any(
+            not isinstance(account, str) or not account or not isinstance(spec, dict)
+            for account, spec in accounts.items()):
+        raise ValueError('account IDs must be non-empty strings with mapping policies')
+
+
+def account_for(node: dict, measurement: dict) -> str | None:
+    validate_accounts(measurement)
+    name = node.get('name', '')
+    matches = [account for account, spec in measurement.get('accounts', {}).items()
+               if name in spec.get('names', []) or any(name.startswith(p) for p in spec.get('prefixes', []))]
+    return matches[0] if len(matches) == 1 else None
+
+
+def validate_node_name(name) -> None:
+    if not isinstance(name, str) or not name or any(unicodedata.category(c) in {'Cc', 'Zl', 'Zp'} for c in name):
+        raise ValueError('unsupported node name: control characters are not allowed')
+
+
+def normalized_node(node: dict) -> dict:
+    validate_node_name(node.get('name'))
+    result = dict(node)
+    port = result.get('port')
+    if isinstance(port, str) and re.fullmatch(r'[0-9]+', port):
+        try:
+            result['port'] = int(port)
+        except ValueError:
+            pass  # Oversized decimal inputs remain invalid identities.
+    return result
+
+
+def definitions(config: dict) -> dict[str, dict]:
+    result = {n['name']: normalized_node(n) for n in config.get('proxies', []) if isinstance(n, dict) and 'name' in n}
+    for spec in config.get('proxy-providers', {}).values():
+        for node in spec.get('payload', []) or []:
+            if isinstance(node, dict) and 'name' in node:
+                node = normalized_node(node)
+                if node['name'] in result and result[node['name']] != node:
+                    raise ValueError('conflicting node definition')
+                result[node['name']] = node
+    return result
+
+
+def members(name: str, config: dict, nodes: dict, runtime: dict | None = None) -> list[str]:
+    groups = {g['name']: g for g in config.get('proxy-groups', [])}
+    providers = config.get('proxy-providers', {})
+    result, seen = [], set()
+
+    def visit(item):
+        if item in seen:
+            return
+        seen.add(item)
+        if item in nodes:
+            result.append(item)
+            return
+        group = groups.get(item, {})
+        # The core resolves file-provider contents, include/exclude filters and nesting.
+        active = (runtime or {}).get(item)
+        if isinstance(active, dict) and isinstance(active.get('all'), list):
+            for child in active['all']:
+                visit(child)
+            return
+        for child in group.get('proxies', []) or []:
+            visit(child)
+        for provider in group.get('use', []) or []:
+            for node in providers.get(provider, {}).get('payload', []) or []:
+                visit(node['name'])
+
+    visit(name)
+    return result
+
+
+def owned_group_members(group: dict, providers: dict, current_nodes) -> list[str] | None:
+    """Recover only this group's ordered leaves from a generated shared owner."""
+    references = group.get('use', [])
+    owned = [name for name in references if re.fullmatch(r'measurement-[0-9a-f]{16}', name)
+             and providers.get(name, {}).get('type') == 'inline']
+    if not owned:
+        return None
+    if len(references) != 1 or group.get('proxies'):
+        raise ValueError('mixed generated measurement ownership')
+    names = [node['name'] for node in providers[owned[0]].get('payload', [])
+             if node['name'] in current_nodes]
+    filters = group.get('filter', '').split('`')
+    if filters != ['']:
+        names = list(dict.fromkeys(n for expression in filters for n in names if re.fullmatch(expression, n)))
+    return names
+
+
+def configure_measurement(config: dict, capabilities: dict) -> None:
+    measurement = capabilities.get('measurement', {})
+    validate_accounts(measurement)
+    groups = config.get('proxy-groups', [])
+    providers = config.setdefault('proxy-providers', {})
+    # Emit decimal integers too: the core treats zero-prefixed raw strings as octal.
+    config['proxies'] = [normalized_node(node) for node in config.get('proxies', [])]
+    for spec in providers.values():
+        if spec.get('payload') is not None:
+            spec['payload'] = [normalized_node(node) for node in spec['payload']]
+    # Subscription transactions retain old providers but replace node definitions.
+    # Rebuild only our generated owners, never restore nodes from their old payload.
+    owned = {name: spec for name, spec in providers.items()
+             if re.fullmatch(r'measurement-[0-9a-f]{16}', name) and spec.get('type') == 'inline'}
+    current_nodes = definitions({**config, 'proxy-providers': {
+        name: spec for name, spec in providers.items() if name not in owned}}) if owned else {}
+    for group in groups:
+        names = owned_group_members(group, providers, current_nodes)
+        if names is None:
+            continue
+        spec = owned[group['use'][0]]
+        if not names:
+            raise ValueError('generated measurement pool has no current nodes')
+        group['proxies'] = names
+        group.pop('use', None)
+        group.pop('filter', None)
+        health = spec.get('health-check', {})
+        group.setdefault('url', health.get('url'))
+        group.setdefault('expected-status', health.get('expected-status', '*'))
+    for name in owned:
+        providers.pop(name)
+    if measurement.get('enabled') is not True:
+        for group in groups:
+            if group.get('type') in {'url-test', 'fallback', 'load-balance'}:
+                group['type'] = 'select'
+                group.pop('strategy', None)
+            for key in HEALTH_FIELDS:
+                group.pop(key, None)
+        for spec in providers.values():
+            spec['health-check'] = {**spec.get('health-check', {}), 'enable': False, 'interval': 0}
+        return
+
+    if measurement.get('native_budget') is not True:
+        raise ValueError('native checks require the patched core budget contract')
+    # Match the core's effective URL before comparing contracts or sharing owners.
+    for check in [*groups, *(spec.get('health-check', {}) for spec in providers.values())]:
+        url = check.get('url')
+        if isinstance(url, str):
+            check['url'] = url.strip()
+    interval = int(measurement.get('native_interval_seconds', 900))
+    if interval <= 0:
+        raise ValueError('invalid native measurement interval')
+    nodes = definitions(config)
+    source = copy.deepcopy(config)
+    source_groups = {g['name']: g for g in source.get('proxy-groups', [])}
+
+    def validate_automatic_tree(name, visiting):
+        if name in nodes:
+            return
+        group = source_groups.get(name, {})
+        if (name in visiting or group.get('type') not in {'url-test', 'fallback', 'load-balance'}
+                or any(group.get(k) for k in ('filter', 'exclude-filter', 'exclude-type',
+                       'include-all', 'include-all-proxies', 'include-all-providers', 'use'))
+                or not group.get('proxies')):
+            raise ValueError('cannot flatten manual or unresolved routing choices')
+        for child in group['proxies']:
+            validate_automatic_tree(child, visiting | {name})
+    contracts = {}
+    owners = {}
+    for group in groups:
+        if group.get('type') not in {'url-test', 'fallback', 'load-balance'}:
+            # Selectors must not independently register additional checks.
+            for key in HEALTH_FIELDS:
+                group.pop(key, None)
+            continue
+        if group.get('use') and not group.get('proxies'):
+            # Existing file providers retain their live order and ownership.
+            for provider in group['use']:
+                health = providers.get(provider, {}).get('health-check', {})
+                # The core inherits the provider URL, but not its status contract.
+                group.setdefault('expected-status', health.get('expected-status', '*'))
+                if (group.get('url', health.get('url')) != health.get('url')
+                        or str(group.get('expected-status', health.get('expected-status', '*')))
+                        != str(health.get('expected-status', '*'))):
+                    raise ValueError('group and provider measurement contracts differ')
+            for key in ('url', 'interval', 'lazy'):
+                group.pop(key, None)
+            continue
+        # Retire provider round-robin: ordered leaves use native fallback.
+        # Other nesting may encode manual choices and must not be flattened.
+        children = group.get('proxies', [])
+        if (group.get('type') == 'load-balance' and children
+                and all(n in source_groups for n in children)):
+            validate_automatic_tree(group['name'], set())
+            group['proxies'] = members(group['name'], source, nodes)
+            group['type'] = 'fallback'
+            group.pop('strategy', None)
+        # Do not flatten selector choices or silently drop built-in routes.
+        if group.get('filter') or group.get('exclude-filter') or any(
+                n not in nodes for n in group.get('proxies', [])):
+            raise ValueError('native ownership requires an explicit flat node pool')
+        names = members(group['name'], source, nodes)
+        if not names:
+            raise ValueError('native group has no resolved candidates')
+        url = group.get('url')
+        expected = str(group.get('expected-status', '*'))
+        if not isinstance(url, str) or not url:
+            raise ValueError('native group requires an explicit check URL')
+        if url in contracts and contracts[url] != expected:
+            raise ValueError('conflicting expected status for one measurement URL')
+        contracts[url] = expected
+        key = fingerprint([url, expected, interval])[:16]
+        owner = 'measurement-' + key
+        spec = owners.setdefault(owner, {'type': 'inline', 'payload': [], 'health-check': {
+            'enable': True, 'url': url, 'expected-status': expected,
+            'interval': interval, 'lazy': True}})
+        known = {n['name'] for n in spec['payload']}
+        spec['payload'].extend(copy.deepcopy(nodes[n]) for n in names if n not in known)
+        group['expected-status'] = expected
+        for field in ('url', 'interval', 'lazy'):
+            group.pop(field, None)
+        group.pop('proxies', None)
+        group['use'] = [owner]
+        if any('`' in n for n in names):
+            raise ValueError('unsupported node name in measurement filter')
+        group['filter'] = '`'.join('^' + re.escape(n) + '$' for n in names)
+    providers.update(owners)
+
+    totals = {}
+    for spec in providers.values():
+        health = spec.get('health-check', {})
+        if health.get('enable') is not True:
+            continue
+        url, expected = health.get('url'), str(health.get('expected-status', '*'))
+        if not isinstance(url, str) or not url:
+            raise ValueError('native provider requires an explicit check URL')
+        if url in contracts and contracts[url] != expected:
+            raise ValueError('conflicting expected status for one measurement URL')
+        contracts[url] = expected
+        health['interval'] = max(interval, int(health.get('interval', interval)))
+        health['lazy'] = True
+        payload = spec.get('payload', [])
+        if not payload:
+            raise ValueError('native budget requires resolved provider payload')
+        for node in payload:
+            port = normalized_node(node).get('port')
+            if type(port) is not int or not 1 <= port <= 65535:
+                raise ValueError('native measurement requires a valid node port')
+            if node.get('dialer-proxy'):
+                raise ValueError('native measurement plan does not support dialer chains')
+            account = account_for(node, measurement)
+            if account is None:
+                raise ValueError('native budget requires an unambiguous account')
+            totals[account] = totals.get(account, 0) + 3600 / health['interval']
+    for account, cost in totals.items():
+        allowed = measurement['accounts'][account].get('native_probes_per_hour', 0)
+        if (isinstance(allowed, bool) or not isinstance(allowed, (int, float))
+                or not math.isfinite(allowed) or cost > allowed):
+            raise ValueError('native measurement plan exceeds account budget')
+
+
+def finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def rpc_deadline(timeout: float, deadline: float | None = None) -> float:
+    if not finite_number(timeout) or timeout <= 0 or deadline is not None and not finite_number(deadline):
+        raise ValueError('invalid RPC deadline')
+    return min(time.monotonic() + timeout, deadline if deadline is not None else float('inf'))
+
+
+@contextmanager
+def rpc_socket(family: int, deadline: float):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('RPC deadline expired')
+    with socket.socket(family, socket.SOCK_STREAM) as client, client.dup() as interrupt:
+        def expire():
+            # Keep a duplicate descriptor so deadline shutdown interrupts blocked I/O.
+            try:
+                interrupt.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            interrupt.close()
+            client.close()
+        client.settimeout(remaining)
+        timer = threading.Timer(remaining, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            yield client
+            if time.monotonic() >= deadline:
+                raise TimeoutError('RPC deadline expired')
+        finally:
+            timer.cancel()
+            timer.join()
+
+
+def load_budget(path: Path) -> dict:
+    if not path.exists():
+        return {'accounts': {}, 'last_reservation_at': 0}
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate budget field')
+            result[key] = value
+        return result
+
+    state = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    if (not isinstance(state, dict) or set(state) != {'accounts', 'last_reservation_at'}
+            or not isinstance(state['accounts'], dict)
+            or not finite_number(state['last_reservation_at']) or state['last_reservation_at'] < 0):
+        raise ValueError('invalid budget state')
+    for account, records in state['accounts'].items():
+        if not isinstance(account, str) or not account or not isinstance(records, list):
+            raise ValueError('invalid budget account')
+        for record in records:
+            if (not isinstance(record, list) or len(record) not in {2, 3}
+                    or not finite_number(record[0]) or not 0 <= record[0] <= state['last_reservation_at']
+                    or type(record[1]) is not int or record[1] <= 0):
+                raise ValueError('invalid budget entry')
+            if len(record) == 3 and (not finite_number(record[2]) or record[2] < record[0] + 3600):
+                raise ValueError('invalid budget expiry')
+    return state
+
+
+def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, now: float | None = None,
+                   *, hold_seconds: float = 0, deadline: float | None = None,
+                   policy_check=None, monotonic_deadline: float | None = None) -> bool:
+    """Pre-debit native URLTests, preserving the shared account ledger contract."""
+    if measurement.get('enabled') is not True or measurement.get('native_budget') is not True:
+        return False
+    if (type(cost) is not int or cost <= 0 or not finite_number(hold_seconds) or hold_seconds < 0):
+        raise ValueError('invalid native reservation')
+    charges = {}
+    for node in nodes:
+        account = account_for(node, measurement)
+        if account is None:
+            return False
+        charges[account] = charges.get(account, 0) + cost
+    if not charges or cost <= 0:
+        return False
+    # Binding checks, locks and atomic replacement must use the same physical path.
+    path = path.resolve()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.with_suffix('.lock').open('a+b') as lock:
+        os.chmod(path.with_suffix('.lock'), 0o600)
+        wait_until = monotonic_deadline
+        if wait_until is not None and not finite_number(wait_until):
+            raise ValueError('invalid reservation deadline')
+        if deadline is not None:
+            if not finite_number(deadline):
+                raise ValueError('invalid reservation deadline')
+            wall_limit = time.monotonic() + max(0, min(30, deadline - time.time()))
+            wait_until = min(wait_until, wall_limit) if wait_until is not None else wall_limit
+        if wait_until is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            while True:
+                if time.monotonic() >= wait_until:
+                    return False
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= wait_until:
+                        return False
+                    time.sleep(min(0.01, max(0, wait_until - time.monotonic())))
+        # A policy checked before lock contention may have been replaced while waiting.
+        if policy_check is not None and not policy_check():
+            return False
+        if wait_until is not None and time.monotonic() >= wait_until:
+            return False
+        # Runtime callers timestamp admission after lock contention, not before it.
+        now = time.time() if now is None else now
+        if deadline is not None and now >= deadline:
+            return False
+        if not finite_number(now) or now < 0 or not finite_number(now + 3600 + hold_seconds):
+            raise ValueError('invalid reservation time')
+        state = load_budget(path)
+        if now < state.get('last_reservation_at', 0):
+            return False
+        entries = state.get('accounts', {})
+        updated = {a: [e for e in entries.get(a, [])
+                       if (e[2] if len(e) == 3 else e[0] + 3600) > now] for a in charges}
+        for account, amount in charges.items():
+            limit = measurement['accounts'][account].get('quality_attempts_per_hour', 0)
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit):
+                return False
+            if sum(e[1] for e in updated[account]) + amount > limit:
+                return False
+        for account, amount in charges.items():
+            entries[account] = [*updated[account], [now, amount, now + 3600 + hold_seconds]]
+        state = {'accounts': entries, 'last_reservation_at': now}
+        fd, temporary = tempfile.mkstemp(prefix='budget-', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as stream:
+                json.dump(state, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return True

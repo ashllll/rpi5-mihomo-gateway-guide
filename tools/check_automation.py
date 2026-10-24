@@ -12,7 +12,8 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the curated-pool keys read by the overlay match automation/policy/capabilities.yaml,
+* curated-pool keys match capabilities.yaml and route data comes from the
+  independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
   operator-edited deployment data, and changes nothing in --dry-run mode,
 * the gateway address and ports really come from the environment at runtime.
@@ -40,12 +41,22 @@ sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[1]
 AUTOMATION = REPO / "automation"
 ENV_EXAMPLE = AUTOMATION / "env" / "automation.env.example"
+# The alert notifier and the watchdog keep their secrets and thresholds in their
+# own least-privilege site file, so those variables are documented there.
+ALERT_ENV_EXAMPLE = AUTOMATION / "env" / "mihomo-alert.env.example"
+ALERT_ENV_FILE = "EnvironmentFile=-/etc/mihomo-alert.env"
+ALERT_SCRIPTS = {"mihomo-alert", "mihomo-watch"}
 
 from publication_privacy import AUTOMATION_PATTERNS, NODE_PATTERNS, matching_labels
 
 # The subscription validator has to recognise the provider's announcement
 # entries; those strings are the only non-ASCII content allowed in the layer.
-CJK_ALLOWED = {"sbin/mihomo-subscription-candidate"}
+CJK_ALLOWED = {
+    "sbin/mihomo-subscription-candidate",
+    "sbin/mihomo-alert",
+    "sbin/mihomo-healthcheck",
+    "sbin/mihomo-watch",
+}
 
 FAILURES: list[str] = []
 
@@ -173,14 +184,20 @@ def used_variables() -> dict[str, set[str]]:
     return used
 
 
-def documented_variables() -> set[str]:
-    return set(re.findall(r"^([A-Z_][A-Z0-9_]*)=", ENV_EXAMPLE.read_text(encoding="utf-8"), re.MULTILINE))
+def documented_variables(path: Path = ENV_EXAMPLE) -> set[str]:
+    return set(re.findall(r"^([A-Z_][A-Z0-9_]*)=", path.read_text(encoding="utf-8"), re.MULTILINE))
 
 
 def check_environment_documentation() -> None:
     used = used_variables()
+    alert_used = {name: variables for name, variables in used.items()
+                  if Path(name).name in ALERT_SCRIPTS}
+    deploy_used = {name: variables for name, variables in used.items()
+                   if name not in alert_used}
     documented = documented_variables()
-    read = set().union(*used.values()) if used else set()
+    alert_documented = documented_variables(ALERT_ENV_EXAMPLE)
+
+    read = set().union(*deploy_used.values()) if deploy_used else set()
     missing = sorted(read - documented)
     if missing:
         fail(f"environment variables are read but not documented in env/automation.env.example: {missing}")
@@ -188,9 +205,19 @@ def check_environment_documentation() -> None:
     if unused:
         fail(f"env/automation.env.example documents variables no script reads: {unused}")
 
-    # A unit that runs an environment-dependent script must load the env file.
+    alert_read = set().union(*alert_used.values()) if alert_used else set()
+    alert_missing = sorted(alert_read - alert_documented)
+    if alert_missing:
+        fail(f"environment variables are read but not documented in env/mihomo-alert.env.example: {alert_missing}")
+    alert_unused = sorted(alert_documented - alert_read)
+    if alert_unused:
+        fail(f"env/mihomo-alert.env.example documents variables no script reads: {alert_unused}")
+
+    # A unit that runs an environment-dependent script must load the env file the
+    # script expects: the deployment file, or the alert site file for the
+    # notifier and the watchdog. Drop-ins inherit their parent unit's directives.
     dependent = {
-        Path(name).name
+        Path(name).name: variables
         for name, variables in used.items()
         if variables and "sbin/" in name
     }
@@ -199,14 +226,25 @@ def check_environment_documentation() -> None:
         if not unit.is_file():
             continue
         text = read_source(unit)
+        if unit.parent.name.endswith(".d"):
+            parent = AUTOMATION / "systemd" / unit.parent.name[:-2]
+            if parent.is_file():
+                text += "\n" + read_source(parent)
         if not exec_directive.search(text):
             continue
-        invoked = {name for name in dependent if re.search(rf"\b{re.escape(name)}\b", text)}
-        if invoked and "EnvironmentFile=-/etc/mihomo-automation.env" not in text:
-            fail(
-                f"systemd/{unit.relative_to(AUTOMATION / 'systemd')} runs {sorted(invoked)} "
-                "without EnvironmentFile=-/etc/mihomo-automation.env"
-            )
+        without_unit_refs = re.sub(r"^OnFailure=.*$", "", text, flags=re.MULTILINE)
+        invoked = {name for name in dependent if re.search(rf"\b{re.escape(name)}\b", without_unit_refs)}
+        if not invoked:
+            continue
+        required = {ALERT_ENV_FILE if name in ALERT_SCRIPTS
+                    else "EnvironmentFile=-/etc/mihomo-automation.env"
+                    for name in invoked}
+        for directive in sorted(required):
+            if directive not in text:
+                fail(
+                    f"systemd/{unit.relative_to(AUTOMATION / 'systemd')} runs {sorted(invoked)} "
+                    f"without {directive}"
+                )
 
 
 def overlay_manifest_keys(source: str) -> set[str]:
@@ -247,6 +285,35 @@ def check_manifest() -> None:
             read_keys == set(overlay),
             f"overlay keys differ: script reads {sorted(read_keys)}, manifest declares {sorted(overlay)}",
         )
+    measurement = manifest.get("measurement", {})
+    check(isinstance(measurement, dict), "capabilities.yaml measurement must be a mapping")
+    if isinstance(measurement, dict):
+        check(measurement.get("enabled") is False, "native URLTests must ship paused")
+        check(measurement.get("native_budget") is True, "native URLTests must require budget admission")
+        check(measurement.get("accounts") == {}, "capabilities.yaml must not ship account identities")
+    for key in ("download_routes", "video_routes"):
+        check(key not in manifest,
+              f"capabilities.yaml must not duplicate the public {key} table")
+
+    defaults_path = AUTOMATION / "policy" / "route-defaults.yaml"
+    defaults = yaml.safe_load(defaults_path.read_text(encoding="utf-8"))
+    check(isinstance(defaults, dict), "route-defaults.yaml must be a mapping")
+    if not isinstance(defaults, dict):
+        return
+    for key, allowed in (("download_routes", {"GitHub Download", "GitHub Control", "Package Download"}),
+                         ("video_routes", {"Streaming", "Social"})):
+        routes = defaults.get(key)
+        check(isinstance(routes, dict) and bool(routes), f"route-defaults.yaml is missing {key}")
+        if isinstance(routes, dict):
+            for route, spec in routes.items():
+                check(isinstance(spec, dict), f"{key}.{route} must be a mapping")
+                if isinstance(spec, dict):
+                    check(spec.get("group") in allowed, f"{key}.{route} uses an unauthorized group")
+                    check(isinstance(spec.get("domains"), list) and bool(spec["domains"]),
+                          f"{key}.{route} must list exact domains")
+    check(defaults.get("retired_quality_profile_ids") == [
+        "github-release", "git-transport", "packages", "x-video"
+    ], "route-defaults.yaml must enumerate only generator-owned legacy profiles")
 
 
 def expected_install_map(root: Path) -> set[Path]:
@@ -268,6 +335,8 @@ def expected_install_map(root: Path) -> set[Path]:
         elif parts[0] == "env":
             if relative.name == "automation.env.example":
                 expected.add(Path("etc/mihomo-automation.env.example"))
+            elif relative.name == "mihomo-alert.env.example":
+                expected.add(Path("etc/mihomo-alert.env.example"))
             else:
                 expected.add(Path("etc/mihomo") / relative.name)
         else:
@@ -284,6 +353,22 @@ def check_installer() -> None:
     with tempfile.TemporaryDirectory() as raw:
         base = Path(raw)
         root = base / "root"
+        # Model an existing gateway whose private manifest predates the new
+        # route tables. The installer must preserve its bytes while seeding the
+        # public defaults as an independent 0644 file.
+        old_manifest = (
+            b"version: 1\n"
+            b"measurement:\n  enabled: false\n  accounts:\n"
+            b"    synthetic-account:\n      prefixes: ['Private AI | ']\n"
+            b"      native_probes_per_hour: 12\n      quality_attempts_per_hour: 24\n"
+            b"roles:\n  bulk_download:\n    stt_prefix: 'Private STT | '\n"
+            b"overlay:\n  ai_nodes: ['Private AI | 1']\n"
+            b"download_quality:\n  profiles:\n    packages:\n"
+            b"      group: Package Download\n      domains: [private.example]\n"
+        )
+        old_manifest_path = root / "etc/mihomo/adaptive/capabilities.yaml"
+        old_manifest_path.parent.mkdir(parents=True)
+        old_manifest_path.write_bytes(old_manifest)
         # A failing systemctl stub proves the sandbox run never touches systemd.
         stub_dir = base / "bin"
         stub_dir.mkdir()
@@ -333,10 +418,31 @@ def check_installer() -> None:
             conf.read_bytes() == (AUTOMATION / "etc" / "dnsmasq-upstreams.direct").read_bytes(),
             "the seeded dnsmasq upstream file is not the direct baseline",
         )
+        for retired in (root / "var/lib/mihomo-download-quality",
+                        root / "var/lib/mihomo-social-quality"):
+            check(not retired.exists(), f"installer created retired quality state: {retired.relative_to(root)}")
+
+        manifest = root / "etc/mihomo/adaptive/capabilities.yaml"
+        route_defaults = root / "etc/mihomo/adaptive/route-defaults.yaml"
+        check(manifest.read_bytes() == old_manifest,
+              "install.sh changed a pre-existing private capabilities.yaml")
+        check(route_defaults.is_file(), "install.sh did not seed independent route-defaults.yaml")
+        check(route_defaults.read_bytes() == (AUTOMATION / "policy" / "route-defaults.yaml").read_bytes(),
+              "installed route-defaults.yaml differs from the public source")
+        check(stat.S_IMODE(route_defaults.stat().st_mode) == 0o644,
+              "route-defaults.yaml must be installed with mode 0644")
+
+        installer_text = installer.read_text(encoding="utf-8")
+        enabled_timer_names = re.findall(r"^      ([a-z0-9-]+\.timer)", installer_text, re.MULTILINE)
+        check(len(enabled_timer_names) == 7, f"installer default timer set has {len(enabled_timer_names)} entries")
+        check("mihomo-watch.timer" in enabled_timer_names,
+              "installer does not enable the gateway anomaly watchdog")
+        check(not any("adaptive-score" in name or "quality" in name for name in enabled_timer_names),
+              "installer still enables a retired selection timer")
 
         # Deployment data the operator already edited must survive a re-install.
-        manifest = root / "etc/mihomo/adaptive/capabilities.yaml"
         manifest.write_text("# edited locally\n", encoding="utf-8")
+        route_defaults.write_text("# edited defaults locally\n", encoding="utf-8")
         rerun = subprocess.run(
             ["sh", str(installer)],
             capture_output=True,
@@ -349,6 +455,10 @@ def check_installer() -> None:
         check(
             manifest.read_text(encoding="utf-8") == "# edited locally\n",
             "install.sh overwrote the operator's capabilities.yaml",
+        )
+        check(
+            route_defaults.read_text(encoding="utf-8") == "# edited defaults locally\n",
+            "install.sh overwrote the operator's route-defaults.yaml",
         )
 
         # --dry-run must not create anything.
@@ -383,28 +493,19 @@ def check_runtime_parameters() -> None:
         MIHOMO_MIXED_PORT="17890",
         MIHOMO_CONTROLLER_PORT="19090",
         MIHOMO_CAPABILITIES="/tmp/example-capabilities.yaml",
+        MIHOMO_ROUTE_DEFAULTS="/tmp/example-route-defaults.yaml",
     )
     saved = dict(os.environ)
     os.environ.update(environment)
     try:
-        score = load_module(AUTOMATION / "sbin" / "mihomo-adaptive-score")
-        apply_module = load_module(AUTOMATION / "sbin" / "mihomo-adaptive-apply")
         overlay = load_module(AUTOMATION / "sbin" / "mihomo-policy-overlay")
-        check(
-            score.CONTROLLER == "http://10.66.0.9:19090",
-            f"mihomo-adaptive-score controller is not environment driven: {score.CONTROLLER}",
-        )
-        check(
-            apply_module.PROXY == "http://10.66.0.9:17890",
-            f"mihomo-adaptive-apply proxy is not environment driven: {apply_module.PROXY}",
-        )
         check(
             str(overlay.CAPABILITIES_PATH) == "/tmp/example-capabilities.yaml",
             f"mihomo-policy-overlay manifest path is not environment driven: {overlay.CAPABILITIES_PATH}",
         )
         check(
-            str(score.CAPABILITIES_PATH) == "/tmp/example-capabilities.yaml",
-            f"mihomo-adaptive-score manifest path is not environment driven: {score.CAPABILITIES_PATH}",
+            str(overlay.ROUTE_DEFAULTS_PATH) == "/tmp/example-route-defaults.yaml",
+            f"mihomo-policy-overlay route defaults path is not environment driven: {overlay.ROUTE_DEFAULTS_PATH}",
         )
     finally:
         os.environ.clear()
@@ -416,8 +517,8 @@ def check_subscription_environment() -> None:
     source = (AUTOMATION / "sbin/mihomo-update-subscription").read_text()
     parameters = source[source.index("# Deployment parameters."):source.index("proxy=http")]
     child = (
-        "import runpy, sys; "
-        "print(runpy.run_path(sys.argv[1])['CAPABILITIES_PATH'])"
+        "import runpy, sys; values = runpy.run_path(sys.argv[1]); "
+        "print(values['CAPABILITIES_PATH']); print(values['ROUTE_DEFAULTS_PATH'])"
     )
     with tempfile.TemporaryDirectory() as raw:
         env_file = Path(raw) / "automation.env"
@@ -427,29 +528,51 @@ def check_subscription_environment() -> None:
             + '\nexec "$@"\n'
         )
         environment = dict(os.environ)
-        environment.pop("MIHOMO_CAPABILITIES", None)
-        for label, configured, inherited, expected in (
-            ("default", None, None, "/etc/mihomo/adaptive/capabilities.yaml"),
+        for key, default in (
+            ("MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("MIHOMO_ROUTE_DEFAULTS", "/etc/mihomo/adaptive/route-defaults.yaml"),
+        ):
+            environment.pop(key, None)
+        cases = (
+            ("default", None, None, None),
             ("inherited", None, "/tmp/inherited.yaml", "/tmp/inherited.yaml"),
             ("sourced", "/tmp/custom manifest.yaml", None, "/tmp/custom manifest.yaml"),
             ("override", "/tmp/custom.yaml", "/tmp/inherited.yaml", "/tmp/custom.yaml"),
-            ("empty sourced", "", None, "/etc/mihomo/adaptive/capabilities.yaml"),
-            ("empty inherited", None, "", "/etc/mihomo/adaptive/capabilities.yaml"),
-            ("empty override", "", "/tmp/inherited.yaml", "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("empty sourced", "", None, None),
+            ("empty inherited", None, "", None),
+            ("empty override", "", "/tmp/inherited.yaml", None),
+        )
+        for key, default in (
+            ("MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml"),
+            ("MIHOMO_ROUTE_DEFAULTS", "/etc/mihomo/adaptive/route-defaults.yaml"),
         ):
-            if configured is not None:
-                env_file.write_text(f"MIHOMO_CAPABILITIES='{configured}'\n")
-            elif env_file.exists():
-                env_file.unlink()
-            case_env = dict(environment)
-            if inherited is not None:
-                case_env["MIHOMO_CAPABILITIES"] = inherited
-            result = subprocess.run(
-                ["sh", str(script), sys.executable, "-c", child,
-                 str(AUTOMATION / "sbin/mihomo-policy-overlay")],
-                env=case_env, capture_output=True, text=True, check=True,
+            other_key, other_default = next(
+                item for item in (("MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml"),
+                                  ("MIHOMO_ROUTE_DEFAULTS", "/etc/mihomo/adaptive/route-defaults.yaml"))
+                if item[0] != key
             )
-            check(result.stdout.strip() == expected, f"subscription environment failed: {label}")
+            for label, configured, inherited, expected in cases:
+                configured_values = []
+                if configured is not None:
+                    configured_values.append(f"{key}='{configured}'")
+                if env_file.exists():
+                    env_file.unlink()
+                env_file.write_text("\n".join(configured_values) + "\n", encoding="utf-8")
+                case_env = dict(environment)
+                if inherited is not None:
+                    case_env[key] = inherited
+                result = subprocess.run(
+                    ["sh", str(script), sys.executable, "-c", child,
+                     str(AUTOMATION / "sbin/mihomo-policy-overlay")],
+                    env=case_env, capture_output=True, text=True, check=True,
+                )
+                expected_value = expected if expected is not None else default
+                expected_paths = {key: expected_value, other_key: other_default}
+                check(result.stdout.splitlines() == [
+                    expected_paths["MIHOMO_CAPABILITIES"],
+                    expected_paths["MIHOMO_ROUTE_DEFAULTS"],
+                ],
+                      f"subscription environment failed: {key} {label}")
 
 
 def check_no_bytecode() -> None:

@@ -12,6 +12,7 @@
 <a href="#本次稳定性更新">稳定性更新</a> ·
 <a href="#选择部署路径">部署路径</a> ·
 <a href="#验证与边界">验证状态</a> ·
+<a href="docs/README.md">RepoWiki</a> ·
 <a href="#文档导航">完整文档</a>
 </p>
 
@@ -31,9 +32,9 @@
 | 使用目标 | 网关如何处理 |
 |---|---|
 | 国内网站与本地设备 | 使用直连规则；生产方案包含游戏直连策略 |
-| X、Telegram、YouTube | 独立业务组与对应网站探测；Telegram 同时覆盖官方 IP 网段 |
+| X、Telegram、YouTube、Instagram | X 和视频平台分别进入现有媒体池并按顺序稳定回退；Telegram 同时覆盖官方 IP 网段 |
 | ChatGPT 等 AI 服务 | 独立 AI 池；按部署能力选择供应商，生产参考使用 GLaDOS |
-| 外网文件与模型下载 | 使用明确允许下载的节点；不把普通受限节点混入下载池 |
+| 外网文件、模型与包下载 | 在明确允许大流量的叶节点间按原生延迟检测自动切换；普通受限节点不会混入下载池 |
 
 ## 快速开始
 
@@ -78,28 +79,11 @@ sudo sh setup.sh --dry-run  # 只检查环境与打印计划，不下载、不�
 
 </details>
 
-## 本次稳定性更新
+## 本次原生选路更新
 
-这次更新针对生产运维层的分钟级断连与恢复扰动。**一键入口不调用这套 overlay / 评分流程。**
+生产运维层移除吞吐采样、评分和动态 provider 重排，由 Mihomo 原生 `url-test` 在授权下载叶节点间检测和切换；YouTube/Instagram 的 Streaming、X 的 Social 与 AI Research 使用原生 fallback 保留既有顺序。Instagram 仅新增明确域名规则并复用已有 Streaming 池。检测默认关闭，显式开启时必须使用固定核心预算补丁和本地账户账本；一键入口仍有独立默认配置。
 
-| 之前的问题 | 当前策略 |
-|---|---|
-| 核心业务探测间隔为 2–5 分钟 | AI、X、Telegram、YouTube 组采用可配置的 45 秒主动探测 |
-| 某个请求卡住，后续业务检查跟着等待 | 每分钟并行检查各业务路径 |
-| 下载池隔离频繁热加载整个配置 | 默认只启用影子评分；隔离执行 timer 改为显式启用 |
-| 单业务异常触发全局 reload / restart | 在对应业务组内复测；仅进程未运行时请求重启 |
-| 有测速数字就认为节点健康 | 同时核对期望状态码对应的 per-URL 健康状态 |
-| API 正常，ChatGPT 网页 403 被混为同一种状态 | 分别记录 API 连通性、网页状态与网站拒绝访问 |
-| Telegram 只有域名分流 | 补充 [Telegram 官方网段](https://core.telegram.org/resources/cidr.txt) |
-
-45 秒是检测周期，**不是恢复时间承诺**。已有 TCP / WebSocket 连接不能无缝迁移到另一节点；
-网站验证、账号状态、上游线路和供应商故障仍需分别判断。
-
-配置在 [capabilities.yaml](automation/policy/capabilities.yaml) 的 `stability` 与 `services` 段；
-节点标签清单仍留在部署端。已存在的 manifest 不会被安装器覆盖，需要手动合并新的设置。
-仅安装脚本或编辑 manifest 不会更新正在运行的策略；下一次满足更新间隔、校验与健康门禁的成功订阅更新，
-才会重新应用 overlay 并加载配置。上线后核对运行配置的组检测周期与 Telegram 网段，再做分层业务验收。
-完整机制与边界见 [智能选节点设计](docs/adaptive-selection.zh-CN.md)。
+本轮只完成离线源码改动，不代表已部署或已恢复线上 timer。原生健康检测不能证明真实播放、供应商下载许可或持续吞吐；已有 TCP / WebSocket 连接不能随新连接选路迁移。完整路由、预算与验收边界见[原生延迟选路与检测预算](docs/adaptive-selection.zh-CN.md)。
 
 ## 选择部署路径
 
@@ -108,7 +92,6 @@ sudo sh setup.sh --dry-run  # 只检查环境与打印计划，不下载、不�
 | 一台新 Linux 主机 | [setup.sh](setup.sh) | `/etc/mihomo-gateway/` |
 | 自己规划网络、分阶段上线 | [tools/render.py](tools/render.py) | `site.local.json` → 9 个私有文件，随后手动部署 |
 | 维护已有 Mihomo / MosDNS 网关 | [automation/](automation/README.zh-CN.md) | `/etc/mihomo`、`/etc/mosdns` 与部署 manifest |
-| 保持 UCG 为客户端网关，按设备接入 Mihomo | [UCG / WireGuard 单设备试点](docs/ucg-wireguard-pilot.zh-CN.md) | UCG 原生策略与 Pi 私有 WireGuard 配置；手动整合 |
 | 从备用介质恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) | 独立预发布镜像；写盘会清空目标盘 |
 
 生产运维层的安装方式：
@@ -119,11 +102,7 @@ sudo automation/install.sh
 sudo automation/install.sh --enable-timers
 ```
 
-默认启用七个 timer，**不启用** `mihomo-adaptive-apply.timer`。升级已有部署时，若它已启用，安装器不会替你停用：
-
-```sh
-sudo systemctl disable --now mihomo-adaptive-apply.timer
-```
+`--enable-timers` 启用六个维护 timer。升级已有部署时，安装器只安装现行文件，不会替管理员停用或删除旧主机上的单元；旧安装文件的核对与人工退役说明见[自动化层说明](automation/README.zh-CN.md)。
 
 运维人员编辑过的能力清单、DNS 配置与参数文件保留。安装后的订阅、controller token、节点清单与网络参数仍需自行配置。
 详细步骤见 [部署指南](docs/deployment-current.zh-CN.md) 与 [自动化层说明](automation/README.zh-CN.md)。
@@ -136,7 +115,7 @@ sudo systemctl disable --now mihomo-adaptive-apply.timer
 | 核心解析 | 已核对的真实 Mihomo 核心与有效 / 无效订阅检查 | 平台解锁、账号可用或下载吞吐 |
 | Linux 网络 | [隔离命名空间 CI](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/runs/38201843668) 验证 nftables / dnsmasq | 目标机的真实 LAN、无线环境与重启恢复 |
 | 本次生产策略 | 2026-10-16 四轮共 16 次显式代理检查通过，使用者确认浏览器 / App 恢复正常 | 真实 LAN 全路径验收、长期零断连或固定恢复时间 |
-| 故障切换机制 | 隔离核心在 3 秒测试周期下约 2.93 秒切到备用出口 | 生产 45 秒周期具有相同切换时间 |
+| 故障切换机制 | 隔离核心在 3 秒测试周期下约 2.93 秒切到备用出口 | 新策略或生产检测周期具有相同切换时间 |
 
 一键安装的真实目标机与下游验收仍需完成；生产策略的验证不能替代它。
 模拟、核心解析、本机请求、显式代理与真实 LAN 客户端是不同层次的证据。
@@ -177,10 +156,10 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 | 现象 | 下一步 |
 |---|---|
 | 本机能上网，LAN 客户端不能 | 核对真实客户端路由与 auto-redirect 的动态端口；不要只测显式代理 |
-| ChatGPT 命令行 403，但浏览器正常 | 查看 `chatgpt_state`；网站拒绝该请求不等于节点断网 |
+| ChatGPT 命令行 403，但浏览器正常 | 用真实浏览器验收；网站拒绝该请求不等于节点断网 |
 | 订阅或规则更新失败 | 查看有效期、GitHub 配额与下载校验；失败时保留旧配置 |
 | 视频进入 AI 池 | 检查规则顺序，避免宽泛 Google 规则抢先匹配 googlevideo |
-| 大文件仍然慢 | 核对节点下载许可、线路吞吐与客户端分块；load-balance 不会聚合单条连接 |
+| 大文件仍然慢 | 核对节点下载许可、线路吞吐与客户端分块；原生健康选择不会聚合单条连接的带宽 |
 | ping 可达、SSH 超时 | 检查 INPUT、管理来源网段与 sshd；不要直接认定主机离线 |
 
 本方案以可信 LAN 为前提，LAN INPUT 整体放行以容纳动态透明代理端口；不是访客网络隔离方案。
@@ -191,14 +170,18 @@ sudo python3 /opt/mihomo-gateway/setup.py --rollback latest
 
 ## 文档导航
 
+**[进入 RepoWiki](docs/README.md)**：按入门、架构、源码配置、ADR、运维、安全和验收阅读；
+区分已实现机制、部署模板、历史记录与尚未实现的路线图。
+
 | 想做的事 | 继续阅读 |
 |---|---|
+| 查阅完整知识库与设计决策 | [RepoWiki 首页](docs/README.md) · [ADR 索引](docs/adr/README.md) |
 | 安装、订阅格式、指定网口与回滚 | [一键配置指南](docs/one-click-setup.zh-CN.md) |
 | 理解拓扑与 DNS 分层 | [当前架构](docs/current-architecture.zh-CN.md) · [拓扑图](assets/current-topology.svg) · [DNS 图](assets/current-dns-flow.svg) |
 | 手动配置与分阶段上线 | [部署指南](docs/deployment-current.zh-CN.md) · [站点参数模板](examples/site.example.json) |
-| 业务策略、定时任务与评分 | [自动化层](automation/README.zh-CN.md) · [智能选节点](docs/adaptive-selection.zh-CN.md) |
+| 业务路由、原生检测预算与定时任务 | [自动化层](automation/README.zh-CN.md) · [原生选路与预算](docs/adaptive-selection.zh-CN.md) |
+| GitHub、模型与包下载选路 | [下载分流](docs/wiki/download-routing.md) |
 | 故障定位与真实 LAN 验收 | [运维指南](docs/operations-current.zh-CN.md) |
-| 查看 UCG 设备分流的配置前后、验证与回退边界 | [2026-10-20 链路迭代记录](docs/ucg-wireguard-pilot.zh-CN.md) · [参数清单](examples/ucg-pilot.example.json) |
 | 校验、写盘与恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) |
 | 评估 Landscape 融合 | [可行性](docs/landscape-feasibility.zh-CN.md) · [能力报告](docs/landscape-capabilities.zh-CN.md) · [验收计划](docs/landscape-acceptance.zh-CN.md) |
 | 查看早期方案 | [2026-07 历史档案](docs/deployment-debugging-summary.zh-CN.md) · [历史拓扑](web/index.html) |

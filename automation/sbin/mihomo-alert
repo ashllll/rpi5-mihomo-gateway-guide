@@ -1,0 +1,93 @@
+#!/bin/sh
+# Send one alert line to ServerChan and Bark. Delivery is best effort: a broken
+# notifier must never take the gateway down, so every failure is logged, not
+# raised. Suppressed repeats are recorded too, so "no alert" is never silent.
+#
+#   mihomo-alert --test                     send a test message (bypasses the cooldown)
+#   mihomo-alert --unit-failed <unit>       report a systemd unit failure
+#   mihomo-alert --health <message> <key>   report a health transition
+#
+# Configuration lives in /etc/mihomo-alert.env (mode 0600):
+#   SERVERCHAN_SENDKEY=<sendkey>            https://sct.ftqq.com
+#   BARK_URL=https://api.day.app/<device-key>
+#   ALERT_COOLDOWN=600                      seconds between identical alerts
+set -u
+umask 077
+env_file=/etc/mihomo-alert.env
+state_file=/run/mihomo-alert.state
+# Source the site file first: it owns the keys and may override any default.
+[ -r "$env_file" ] && . "$env_file"
+cooldown=${ALERT_COOLDOWN:-600}
+title=${ALERT_TITLE:-树莓派网关}
+serverchan_base=${SERVERCHAN_BASE:-https://sctapi.ftqq.com}
+
+case "${1:-}" in
+  --test) key=test; message="通知链路自检 $(date -Is)" ;;
+  --unit-failed) key="unit:$2"; message="systemd 单元失败：$2" ;;
+  --health) key=${3:-health}; message=$2 ;;
+  *) echo 'usage: mihomo-alert --test | --unit-failed <unit> | --health <message> <key>' >&2; exit 2 ;;
+esac
+
+if [ "${1:-}" != --test ]; then
+  last=$(awk -F'\t' -v k="$key" '$1==k{print $2}' "$state_file" 2>/dev/null | tail -1 || true)
+  if [ -n "$last" ] && [ $(( $(date +%s) - last )) -lt "$cooldown" ]; then
+    logger -t mihomo-alert "suppressed duplicate: $message"
+    exit 0
+  fi
+fi
+{
+  printf '%s\t%s\n' "$key" "$(date +%s)"
+  tail -n 49 "$state_file" 2>/dev/null || true
+} >"$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+
+# ServerChan answers HTTP 200 even when the sendkey is wrong; only code==0 is a send.
+json_code() {
+  python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("code","-"))
+except Exception: print("-")' 2>/dev/null || echo -
+}
+json_detail() {
+  python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); print(((d.get("data") or {}).get("error") or d.get("message") or "").replace("\n"," "))
+except Exception: print("")' 2>/dev/null || echo ""
+}
+
+sc_title=$(printf %s "$title" | cut -c1-32)  # ServerChan caps title at 32 chars
+configured=0
+delivered=0
+if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
+  configured=$((configured + 1))
+  # SERVERCHAN_CHANNEL forces a delivery channel (Bark iOS = 8); unset means the
+  # channel picked on the sct.ftqq.com site.
+  channel_opt=
+  [ -n "${SERVERCHAN_CHANNEL:-}" ] && channel_opt="channel=$SERVERCHAN_CHANNEL"
+  resp=$(curl -sS -m 8 --data-urlencode "title=$sc_title" \
+    --data-urlencode "desp=$message" ${channel_opt:+--data-urlencode "$channel_opt"} \
+    "$serverchan_base/$SERVERCHAN_SENDKEY.send" 2>/dev/null || true)
+  code=$(printf %s "$resp" | json_code)
+  if [ "$code" = 0 ]; then delivered=$((delivered + 1)); sent_channels="${sent_channels:-}serverchan,";
+  else logger -t mihomo-alert "serverchan failed (code ${code}): $(printf %s "$resp" | json_detail) $message"; fi
+fi
+if [ -n "${BARK_URL:-}" ]; then
+  configured=$((configured + 1))
+  body=$(printf '{"title":"%s","body":"%s","group":"mihomo","level":"timeSensitive"}' \
+    "$title" "$message")
+  resp=$(curl -sS -m 8 -H 'Content-Type: application/json' -d "$body" "$BARK_URL" 2>/dev/null || true)
+  code=$(printf %s "$resp" | json_code)
+  if [ "$code" = 200 ]; then delivered=$((delivered + 1)); sent_channels="${sent_channels:-}bark,";
+  else logger -t mihomo-alert "bark failed (code ${code}): $(printf %s "$resp" | json_detail) $message"; fi
+fi
+
+if [ "$delivered" = 0 ]; then
+  logger -t mihomo-alert "no channel delivered: $message"
+  [ "${1:-}" = --test ] && exit 1
+else
+  # A delivered alert must leave a trace: without this, "no journal line" is
+  # indistinguishable from "sent successfully".
+  logger -t mihomo-alert "delivered ${sent_channels%,} ($delivered/$configured): $message"
+fi
+# --test must exercise every configured channel; a half-delivered self-check is a
+# silent outage waiting to happen.
+if [ "${1:-}" = --test ] && [ "$delivered" -lt "$configured" ]; then exit 1; fi
+exit 0

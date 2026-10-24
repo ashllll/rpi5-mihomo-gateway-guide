@@ -1,0 +1,1552 @@
+diff --git a/adapter/adapter.go b/adapter/adapter.go
+--- a/adapter/adapter.go
++++ b/adapter/adapter.go
+@@ -7,6 +7,7 @@
+ 	"net"
+ 	"net/url"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	"github.com/metacubex/mihomo/common/atomic"
+@@ -14,7 +15,9 @@
+ 	"github.com/metacubex/mihomo/common/utils"
+ 	"github.com/metacubex/mihomo/common/xsync"
+ 	"github.com/metacubex/mihomo/component/ca"
++	"github.com/metacubex/mihomo/component/measurementbudget"
+ 	C "github.com/metacubex/mihomo/constant"
++	P "github.com/metacubex/mihomo/constant/provider"
+ 	"github.com/metacubex/mihomo/log"
+ 
+ 	"github.com/metacubex/http"
+@@ -33,9 +36,69 @@
+ 
+ type Proxy struct {
+ 	C.ProxyAdapter
+-	alive   atomic.Bool
+-	history *queue.Queue[C.DelayHistory]
+-	extra   xsync.Map[string, *internalProxyState]
++	alive      atomic.Bool
++	history    *queue.Queue[C.DelayHistory]
++	extra      xsync.Map[string, *internalProxyState]
++	contractMu sync.Mutex
++	contracts  map[context.Context]map[string]utils.IntRanges[uint16]
++	providers  healthCheckProviders
++}
++
++type healthCheckProviders interface {
++	Providers() map[string]P.ProxyProvider
++}
++
++// SetHealthCheckContracts replaces only this health-check owner's current URL contracts.
++func (p *Proxy) SetHealthCheckContracts(owner context.Context, contracts map[string]utils.IntRanges[uint16]) {
++	p.contractMu.Lock()
++	defer p.contractMu.Unlock()
++	if len(contracts) == 0 || owner.Err() != nil {
++		delete(p.contracts, owner)
++		return
++	}
++	if p.contracts == nil {
++		p.contracts = make(map[context.Context]map[string]utils.IntRanges[uint16])
++	}
++	copy := make(map[string]utils.IntRanges[uint16], len(contracts))
++	for url, expected := range contracts {
++		copy[url] = append(utils.IntRanges[uint16](nil), expected...)
++	}
++	p.contracts[owner] = copy
++}
++
++// HealthCheckStatus checks only contracts directly registered on this proxy.
++func (p *Proxy) HealthCheckStatus(url string, status uint16) (owned, accepted bool) {
++	p.contractMu.Lock()
++	defer p.contractMu.Unlock()
++	accepted = true
++	for owner, contracts := range p.contracts {
++		if owner.Err() != nil {
++			delete(p.contracts, owner)
++			continue
++		}
++		if expected, ok := contracts[url]; ok {
++			owned = true
++			accepted = accepted && expected.Check(status)
++		}
++	}
++	return
++}
++
++func (p *Proxy) healthCheckStatus(url string, status uint16) (owned, accepted bool) {
++	owned, accepted = p.HealthCheckStatus(url, status)
++	if p.providers != nil {
++		// Parsed global and provider copies can represent the same native leaf.
++		for _, provider := range p.providers.Providers() {
++			if checker, ok := provider.(interface {
++				HealthCheckStatus(C.Proxy, string, uint16) (bool, bool)
++			}); ok {
++				aliasOwned, aliasAccepted := checker.HealthCheckStatus(p, url, status)
++				owned = owned || aliasOwned
++				accepted = accepted && aliasAccepted
++			}
++		}
++	}
++	return
+ }
+ 
+ // Adapter implements C.Proxy
+@@ -164,6 +227,17 @@
+ // URLTest get the delay for the specified URL
+ // implements C.Proxy
+ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (t uint16, err error) {
++	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++
++	proxyInfo := p.ProxyInfo()
++	if err := measurementbudget.Check(ctx, p.Name(), p.Addr(), proxyInfo.DialerProxy); err != nil {
++		return 0, err
++	}
++	if ctx.Err() != nil {
++		return 0, measurementbudget.ErrDenied
++	}
++
+ 	var satisfied bool
+ 
+ 	defer func() {
+@@ -274,7 +348,18 @@
+ 	}
+ 
+ 	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
++	if resp != nil {
++		owned, accepted := p.healthCheckStatus(url, uint16(resp.StatusCode))
++		satisfied = satisfied && accepted
++		if owned && !satisfied {
++			err = fmt.Errorf("health check returned unexpected status: %d", resp.StatusCode)
++		}
++	}
+ 	t = uint16(time.Since(start) / time.Millisecond)
++	if ctxErr := ctx.Err(); ctxErr != nil {
++		err = ctxErr
++		satisfied = false
++	}
+ 	return
+ }
+ 
+diff --git a/adapter/parser.go b/adapter/parser.go
+--- a/adapter/parser.go
++++ b/adapter/parser.go
+@@ -225,7 +225,9 @@
+ 	}
+ 
+ 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
+-	return NewProxy(proxy), nil
++	p := NewProxy(proxy)
++	p.providers, _ = opt.TunnelForAPI.(healthCheckProviders)
++	return p, nil
+ }
+ 
+ type proxyOption struct {
+diff --git a/adapter/provider/healthcheck.go b/adapter/provider/healthcheck.go
+--- a/adapter/provider/healthcheck.go
++++ b/adapter/provider/healthcheck.go
+@@ -62,7 +62,50 @@
+ }
+ 
+ func (hc *HealthCheck) setProxies(proxies []C.Proxy) {
++	hc.mu.Lock()
++	defer hc.mu.Unlock()
++	next := make(map[C.Proxy]struct{}, len(proxies))
++	for _, proxy := range proxies {
++		next[proxy] = struct{}{}
++	}
++	for _, proxy := range hc.proxies {
++		if _, retained := next[proxy]; retained {
++			continue
++		}
++		if p, ok := proxy.(healthCheckContractProxy); ok {
++			p.SetHealthCheckContracts(hc.ctx, nil)
++		}
++	}
+ 	hc.proxies = proxies
++	hc.syncContracts()
++}
++
++type healthCheckContractProxy interface {
++	SetHealthCheckContracts(context.Context, map[string]utils.IntRanges[uint16])
++}
++
++// Called with hc.mu held, before refreshed proxies can be exposed to retests.
++func (hc *HealthCheck) syncContracts() {
++	for _, proxy := range hc.proxies {
++		p, ok := proxy.(healthCheckContractProxy)
++		if !ok {
++			continue
++		}
++		contracts := make(map[string]utils.IntRanges[uint16], len(hc.extra)+1)
++		if url := strings.TrimSpace(hc.url); url != "" {
++			contracts[url] = hc.expectedStatus
++		}
++		for url, option := range hc.extra {
++			filter := healthCheckFilter(option)
++			if filter != nil {
++				if match, _ := filter.MatchString(proxy.Name()); !match {
++					continue
++				}
++			}
++			contracts[url] = option.expectedStatus
++		}
++		p.SetHealthCheckContracts(hc.ctx, contracts)
++	}
+ }
+ 
+ func (hc *HealthCheck) registerHealthCheckTask(url string, expectedStatus utils.IntRanges[uint16], filter string, interval uint) {
+@@ -92,12 +135,14 @@
+ 		}
+ 
+ 		log.Debugln("health check url: %s exists", url)
++		hc.syncContracts()
+ 		return
+ 	}
+ 
+ 	option := &extraOption{filters: map[string]struct{}{}, expectedStatus: expectedStatus}
+ 	splitAndAddFiltersToExtra(filter, option)
+ 	hc.extra[url] = option
++	hc.syncContracts()
+ }
+ 
+ func splitAndAddFiltersToExtra(filter string, option *extraOption) {
+@@ -121,11 +166,22 @@
+ }
+ 
+ func (hc *HealthCheck) check() {
+-	if len(hc.proxies) == 0 {
+-		return
+-	}
+-
+ 	_, _, _ = hc.singleDo.Do(func() (struct{}, error) {
++		hc.mu.Lock()
++		if len(hc.proxies) == 0 || hc.ctx.Err() != nil {
++			hc.mu.Unlock()
++			return struct{}{}, nil
++		}
++		proxies := append([]C.Proxy(nil), hc.proxies...)
++		extra := make(map[string]*extraOption, len(hc.extra))
++		for url, option := range hc.extra {
++			copy := &extraOption{expectedStatus: option.expectedStatus, filters: make(map[string]struct{}, len(option.filters))}
++			for filter := range option.filters {
++				copy.filters[filter] = struct{}{}
++			}
++			extra[url] = copy
++		}
++		hc.mu.Unlock()
+ 		id := utils.NewUUIDV4().String()
+ 		log.Debugln("Start New Health Checking {%s}", id)
+ 		b := new(errgroup.Group)
+@@ -133,12 +189,12 @@
+ 
+ 		// execute default health check
+ 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
+-		hc.execute(b, hc.url, id, option)
++		hc.execute(b, hc.url, id, option, proxies)
+ 
+ 		// execute extra health check
+-		if len(hc.extra) != 0 {
+-			for url, option := range hc.extra {
+-				hc.execute(b, url, id, option)
++		if len(extra) != 0 {
++			for url, option := range extra {
++				hc.execute(b, url, id, option, proxies)
+ 			}
+ 		}
+ 		_ = b.Wait()
+@@ -147,28 +203,31 @@
+ 	})
+ }
+ 
+-func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption) {
++func healthCheckFilter(option *extraOption) *regexp2.Regexp {
++	if option == nil || len(option.filters) == 0 {
++		return nil
++	}
++	filters := make([]string, 0, len(option.filters))
++	for filter := range option.filters {
++		filters = append(filters, filter)
++	}
++	return regexp2.MustCompile(strings.Join(filters, "|"), regexp2.None)
++}
++
++func (hc *HealthCheck) execute(b *errgroup.Group, url, uid string, option *extraOption, proxies []C.Proxy) {
+ 	url = strings.TrimSpace(url)
+ 	if len(url) == 0 {
+ 		log.Debugln("Health Check has been skipped due to testUrl is empty, {%s}", uid)
+ 		return
+ 	}
+ 
+-	var filterReg *regexp2.Regexp
++	filterReg := healthCheckFilter(option)
+ 	var expectedStatus utils.IntRanges[uint16]
+ 	if option != nil {
+ 		expectedStatus = option.expectedStatus
+-		if len(option.filters) != 0 {
+-			filters := make([]string, 0, len(option.filters))
+-			for filter := range option.filters {
+-				filters = append(filters, filter)
+-			}
+-
+-			filterReg = regexp2.MustCompile(strings.Join(filters, "|"), regexp2.None)
+-		}
+-	}
+-
+-	for _, proxy := range hc.proxies {
++	}
++
++	for _, proxy := range proxies {
+ 		// skip proxies that do not require health check
+ 		if filterReg != nil {
+ 			if match, _ := filterReg.MatchString(proxy.Name()); !match {
+@@ -190,9 +249,11 @@
+ 
+ func (hc *HealthCheck) close() {
+ 	hc.ctxCancel()
++	hc.setProxies(nil)
+ }
+ 
+ func NewHealthCheck(proxies []C.Proxy, url string, timeout uint, interval uint, lazy bool, expectedStatus utils.IntRanges[uint16]) *HealthCheck {
++	url = strings.TrimSpace(url)
+ 	if url == "" {
+ 		expectedStatus = nil
+ 		interval = 0
+@@ -202,10 +263,9 @@
+ 	}
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 
+-	return &HealthCheck{
++	hc := &HealthCheck{
+ 		ctx:            ctx,
+ 		ctxCancel:      cancel,
+-		proxies:        proxies,
+ 		url:            url,
+ 		timeout:        time.Duration(timeout) * time.Millisecond,
+ 		extra:          map[string]*extraOption{},
+@@ -214,4 +274,6 @@
+ 		expectedStatus: expectedStatus,
+ 		singleDo:       singledo.NewSingle[struct{}](time.Second),
+ 	}
+-}
++	hc.setProxies(proxies)
++	return hc
++}
+diff --git a/adapter/provider/provider.go b/adapter/provider/provider.go
+--- a/adapter/provider/provider.go
++++ b/adapter/provider/provider.go
+@@ -80,6 +80,30 @@
+ 	bp.mutex.RLock()
+ 	defer bp.mutex.RUnlock()
+ 	return bp.proxies
++}
++
++// HealthCheckStatus keeps alias matching and contract evaluation atomic with refresh.
++func (bp *baseProvider) HealthCheckStatus(proxy C.Proxy, url string, status uint16) (owned, accepted bool) {
++	bp.mutex.RLock()
++	defer bp.mutex.RUnlock()
++	accepted = true
++	info := proxy.ProxyInfo()
++	info.ProviderName = ""
++	for _, alias := range bp.proxies {
++		aliasInfo := alias.ProxyInfo()
++		aliasInfo.ProviderName = ""
++		if alias.Name() != proxy.Name() || alias.Type() != proxy.Type() || alias.Addr() != proxy.Addr() || aliasInfo != info {
++			continue
++		}
++		if checker, ok := alias.(interface {
++			HealthCheckStatus(string, uint16) (bool, bool)
++		}); ok {
++			aliasOwned, aliasAccepted := checker.HealthCheckStatus(url, status)
++			owned = owned || aliasOwned
++			accepted = accepted && aliasAccepted
++		}
++	}
++	return
+ }
+ 
+ func (bp *baseProvider) Count() int {
+diff --git a/hub/route/server.go b/hub/route/server.go
+--- a/hub/route/server.go
++++ b/hub/route/server.go
+@@ -17,6 +17,7 @@
+ 	"github.com/metacubex/mihomo/common/utils"
+ 	"github.com/metacubex/mihomo/component/ca"
+ 	"github.com/metacubex/mihomo/component/ech"
++	"github.com/metacubex/mihomo/component/measurementbudget"
+ 	C "github.com/metacubex/mihomo/constant"
+ 	"github.com/metacubex/mihomo/log"
+ 	"github.com/metacubex/mihomo/ntp"
+@@ -570,5 +571,10 @@
+ }
+ 
+ func version(w http.ResponseWriter, r *http.Request) {
+-	render.JSON(w, r, render.M{"meta": C.Meta, "version": C.Version})
+-}
++	render.JSON(w, r, render.M{
++		"meta":               C.Meta,
++		"version":            C.Version,
++		"measurement_budget": measurementbudget.Protocol,
++		"measurement_socket": measurementbudget.SocketPath(),
++	})
++}
+diff --git a/main.go b/main.go
+--- a/main.go
++++ b/main.go
+@@ -19,6 +19,7 @@
+ 	"github.com/metacubex/mihomo/component/age"
+ 	"github.com/metacubex/mihomo/component/generator"
+ 	"github.com/metacubex/mihomo/component/geodata"
++	"github.com/metacubex/mihomo/component/measurementbudget"
+ 	"github.com/metacubex/mihomo/component/updater"
+ 	"github.com/metacubex/mihomo/config"
+ 	C "github.com/metacubex/mihomo/constant"
+@@ -33,6 +34,7 @@
+ 
+ var (
+ 	version                       bool
++	measurementBudgetProtocol     bool
+ 	testConfig                    bool
+ 	geodataMode                   bool
+ 	homeDir                       string
+@@ -73,6 +75,7 @@
+ 	flag.StringVar(&postDown, "post-down", os.Getenv("CLASH_POST_DOWN"), "set post-down script")
+ 	flag.BoolVar(&geodataMode, "m", false, "set geodata mode")
+ 	flag.BoolVar(&version, "v", false, "show current version of mihomo")
++	flag.BoolVar(&measurementBudgetProtocol, "measurement-budget-protocol", false, "print measurement budget protocol and exit")
+ 	flag.BoolVar(&testConfig, "t", false, "test configuration and exit")
+ 	flag.Parse()
+ }
+@@ -97,6 +100,10 @@
+ 	}
+ 
+ 	_, _ = maxprocs.Set(maxprocs.Logger(func(string, ...any) {}))
++	if measurementBudgetProtocol {
++		fmt.Println(measurementbudget.Protocol)
++		return
++	}
+ 
+ 	if len(os.Args) > 1 && os.Args[1] == "convert-ruleset" {
+ 		provider.ConvertMain(os.Args[2:])
+diff --git a/tunnel/tunnel.go b/tunnel/tunnel.go
+--- a/tunnel/tunnel.go
++++ b/tunnel/tunnel.go
+@@ -121,6 +121,8 @@
+ }
+ 
+ func (t tunnel) Providers() map[string]P.ProxyProvider {
++	configMux.RLock()
++	defer configMux.RUnlock()
+ 	return providers
+ }
+ 
+diff --git a/adapter/adapter_budget_test.go b/adapter/adapter_budget_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/adapter_budget_test.go
+@@ -0,0 +1,414 @@
++package adapter
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	syncatomic "sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/metacubex/mihomo/adapter/outbound"
++	"github.com/metacubex/mihomo/common/atomic"
++	"github.com/metacubex/mihomo/common/queue"
++	"github.com/metacubex/mihomo/component/measurementbudget"
++	C "github.com/metacubex/mihomo/constant"
++)
++
++const budgetTestURL = "https://health.example/"
++
++type budgetTestAdapter struct {
++	C.ProxyAdapter
++	dialCount syncatomic.Int32
++	info      C.ProxyInfo
++}
++
++func (a *budgetTestAdapter) Name() string           { return "test-proxy" }
++func (a *budgetTestAdapter) Addr() string           { return "proxy.example:443" }
++func (a *budgetTestAdapter) ProxyInfo() C.ProxyInfo { return a.info }
++func (a *budgetTestAdapter) DialContext(context.Context, *C.Metadata) (C.Conn, error) {
++	a.dialCount.Add(1)
++	return nil, errors.New("dial failed")
++}
++
++func newBudgetTestProxy() (*Proxy, *budgetTestAdapter) {
++	adapter := &budgetTestAdapter{info: C.ProxyInfo{DialerProxy: "upstream"}}
++	return &Proxy{
++		ProxyAdapter: adapter,
++		alive:        atomic.NewBool(true),
++		history:      queue.New[C.DelayHistory](defaultHistoriesNum),
++	}, adapter
++}
++
++type budgetTestRequest struct {
++	Protocol   string `json:"protocol"`
++	Name       string `json:"name"`
++	Addr       string `json:"addr"`
++	Dialer     string `json:"dialer"`
++	DeadlineMS int64  `json:"deadline_ms"`
++}
++
++func startBudgetTestServer(t *testing.T, respond func(net.Conn)) (string, <-chan budgetTestRequest) {
++	t.Helper()
++
++	dir, err := os.MkdirTemp("/tmp", "mihomo-budget-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(dir) })
++
++	socketPath := filepath.Join(dir, "budget.sock")
++	listener, err := net.Listen("unix", socketPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = listener.Close() })
++
++	requests := make(chan budgetTestRequest, 1)
++	go func() {
++		conn, err := listener.Accept()
++		if err != nil {
++			return
++		}
++		defer conn.Close()
++
++		var request budgetTestRequest
++		if err := json.NewDecoder(conn).Decode(&request); err != nil {
++			return
++		}
++		requests <- request
++		respond(conn)
++	}()
++
++	t.Setenv(measurementbudget.SocketEnv, socketPath)
++	return socketPath, requests
++}
++
++func receiveBudgetTestRequest(t *testing.T, requests <-chan budgetTestRequest) budgetTestRequest {
++	t.Helper()
++	select {
++	case request := <-requests:
++		if request.Protocol != "mihomo-budget-v1" || request.Name != "test-proxy" || request.Addr != "proxy.example:443" || request.Dialer != "upstream" {
++			t.Fatalf("unexpected budget request: %+v", request)
++		}
++		return request
++	case <-time.After(time.Second):
++		t.Fatal("budget request was not received")
++		return budgetTestRequest{}
++	}
++}
++
++func seedBudgetTestHistory(p *Proxy, url string) ([]C.DelayHistory, []C.DelayHistory) {
++	record := C.DelayHistory{Time: time.Unix(123, 0), Delay: 7}
++	p.history.Put(record)
++	state := &internalProxyState{
++		alive:   atomic.NewBool(true),
++		history: queue.New[C.DelayHistory](defaultHistoriesNum),
++	}
++	state.history.Put(record)
++	p.extra.Store(url, state)
++	return p.DelayHistory(), p.DelayHistoryForTestUrl(url)
++}
++
++func TestURLTestBudgetDenialsPreserveHealthState(t *testing.T) {
++	tests := []struct {
++		name     string
++		response string
++		hold     bool
++		missing  bool
++	}{
++		{name: "missing socket", missing: true},
++		{name: "rejected", response: `{"protocol":"mihomo-budget-v1","allowed":false}`},
++		{name: "wrong protocol", response: `{"protocol":"other","allowed":true}`},
++		{name: "wrong field type", response: `{"protocol":1,"allowed":true}`},
++		{name: "oversized response", response: `{"protocol":"mihomo-budget-v1","allowed":true,"padding":"` + strings.Repeat("x", 4096) + `"}`},
++		{name: "deadline", hold: true},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			var requests <-chan budgetTestRequest
++			release := make(chan struct{})
++			if !tt.missing {
++				_, requests = startBudgetTestServer(t, func(conn net.Conn) {
++					if tt.hold {
++						<-release
++						return
++					}
++					_, _ = conn.Write([]byte(tt.response + "\n"))
++				})
++				t.Cleanup(func() { close(release) })
++			} else {
++				dir, err := os.MkdirTemp("/tmp", "mihomo-budget-missing-")
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { _ = os.RemoveAll(dir) })
++				t.Setenv(measurementbudget.SocketEnv, filepath.Join(dir, "missing.sock"))
++			}
++
++			p, adapter := newBudgetTestProxy()
++			baseHistory, urlHistory := seedBudgetTestHistory(p, budgetTestURL)
++			ctx := context.Background()
++			var cancel context.CancelFunc
++			if tt.hold {
++				ctx, cancel = context.WithTimeout(ctx, 35*time.Millisecond)
++				defer cancel()
++			}
++
++			started := time.Now()
++			_, err := p.URLTest(ctx, budgetTestURL, nil)
++			if !tt.missing {
++				request := receiveBudgetTestRequest(t, requests)
++				if tt.hold {
++					wantDeadline, _ := ctx.Deadline()
++					if request.DeadlineMS != wantDeadline.UnixMilli() {
++						t.Fatalf("deadline_ms = %d, want %d", request.DeadlineMS, wantDeadline.UnixMilli())
++					}
++				} else if request.DeadlineMS < started.Add(30*time.Second).UnixMilli() || request.DeadlineMS > started.Add(31*time.Second).UnixMilli() {
++					t.Fatalf("deadline_ms = %d, want deadline at the 30 second URLTest cap", request.DeadlineMS)
++				}
++			}
++			if !errors.Is(err, measurementbudget.ErrDenied) {
++				t.Fatalf("URLTest error = %v, want measurement budget denial", err)
++			}
++			if got := adapter.dialCount.Load(); got != 0 {
++				t.Fatalf("DialContext called %d times after budget denial", got)
++			}
++			if !p.alive.Load() || !p.AliveForTestUrl(budgetTestURL) {
++				t.Fatal("budget denial changed existing alive state")
++			}
++			if got := p.DelayHistory(); !reflect.DeepEqual(got, baseHistory) {
++				t.Fatalf("base health history changed: got %+v, want %+v", got, baseHistory)
++			}
++			if got := p.DelayHistoryForTestUrl(budgetTestURL); !reflect.DeepEqual(got, urlHistory) {
++				t.Fatalf("URL health history changed: got %+v, want %+v", got, urlHistory)
++			}
++		})
++	}
++}
++
++func TestURLTestBudgetCancellationDoesNotDial(t *testing.T) {
++	received := make(chan struct{})
++	release := make(chan struct{})
++	_, requests := startBudgetTestServer(t, func(net.Conn) {
++		close(received)
++		<-release
++	})
++	defer close(release)
++
++	p, adapter := newBudgetTestProxy()
++	baseHistory, urlHistory := seedBudgetTestHistory(p, budgetTestURL)
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan error, 1)
++	go func() {
++		_, err := p.URLTest(ctx, budgetTestURL, nil)
++		done <- err
++	}()
++
++	select {
++	case <-received:
++	case <-time.After(time.Second):
++		t.Fatal("budget request was not received")
++	}
++	cancel()
++	select {
++	case err := <-done:
++		if !errors.Is(err, measurementbudget.ErrDenied) {
++			t.Fatalf("URLTest error = %v, want measurement budget denial", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("URLTest did not stop after context cancellation")
++	}
++	if got := adapter.dialCount.Load(); got != 0 {
++		t.Fatalf("DialContext called %d times after cancellation", got)
++	}
++	if got := p.DelayHistory(); !reflect.DeepEqual(got, baseHistory) {
++		t.Fatalf("base health history changed: got %+v, want %+v", got, baseHistory)
++	}
++	if got := p.DelayHistoryForTestUrl(budgetTestURL); !reflect.DeepEqual(got, urlHistory) {
++		t.Fatalf("URL health history changed: got %+v, want %+v", got, urlHistory)
++	}
++	_ = receiveBudgetTestRequest(t, requests)
++}
++
++func TestURLTestAdmittedDialFailureMarksProxyDead(t *testing.T) {
++	parentDeadline := time.Now().Add(time.Minute)
++	_, requests := startBudgetTestServer(t, func(conn net.Conn) {
++		_, _ = fmt.Fprintln(conn, `{"protocol":"mihomo-budget-v1","allowed":true}`)
++	})
++	ctx, cancel := context.WithDeadline(context.Background(), parentDeadline)
++	defer cancel()
++
++	p, adapter := newBudgetTestProxy()
++	started := time.Now()
++	_, err := p.URLTest(ctx, budgetTestURL, nil)
++	if err == nil || err.Error() != "dial failed" {
++		t.Fatalf("URLTest error = %v, want underlying dial failure", err)
++	}
++	if got := adapter.dialCount.Load(); got != 1 {
++		t.Fatalf("DialContext called %d times, want 1", got)
++	}
++	if p.alive.Load() || p.AliveForTestUrl(budgetTestURL) {
++		t.Fatal("post-admission dial failure did not mark proxy dead")
++	}
++	if got := p.DelayHistory(); len(got) != 1 || got[0].Delay != 0 {
++		t.Fatalf("base history = %+v, want one dead record", got)
++	}
++	if got := p.DelayHistoryForTestUrl(budgetTestURL); len(got) != 1 || got[0].Delay != 0 {
++		t.Fatalf("URL history = %+v, want one dead record", got)
++	}
++	request := receiveBudgetTestRequest(t, requests)
++	if request.DeadlineMS < started.Add(30*time.Second).UnixMilli() || request.DeadlineMS > started.Add(31*time.Second).UnixMilli() {
++		t.Fatalf("deadline_ms = %d, want the capped 30 second deadline", request.DeadlineMS)
++	}
++}
++
++type budgetHTTPAdapter struct {
++	*budgetTestAdapter
++	dialAddr string
++}
++
++func (a *budgetHTTPAdapter) DialContext(ctx context.Context, _ *C.Metadata) (C.Conn, error) {
++	a.dialCount.Add(1)
++	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", a.dialAddr)
++	if err != nil {
++		return nil, err
++	}
++	return outbound.NewConn(conn, a), nil
++}
++
++func enableUnifiedDelayForBudgetTest(t *testing.T) {
++	t.Helper()
++	wasEnabled := UnifiedDelay.Load()
++	UnifiedDelay.Store(true)
++	t.Cleanup(func() { UnifiedDelay.Store(wasEnabled) })
++}
++
++func TestURLTestUnifiedDelayCancellationDoesNotRecordSuccess(t *testing.T) {
++	enableUnifiedDelayForBudgetTest(t)
++	for _, tt := range []struct {
++		name      string
++		timeout   time.Duration
++		cancelRun bool
++		wantErr   error
++	}{
++		{name: "deadline", timeout: 1500 * time.Millisecond, wantErr: context.DeadlineExceeded},
++		{name: "canceled", timeout: 5 * time.Second, cancelRun: true, wantErr: context.Canceled},
++	} {
++		t.Run(tt.name, func(t *testing.T) {
++			var requests syncatomic.Int32
++			secondRequest := make(chan struct{})
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				if r.Method != http.MethodHead {
++					t.Errorf("request method = %q, want HEAD", r.Method)
++				}
++				if requests.Add(1) == 1 {
++					w.WriteHeader(http.StatusNoContent)
++					return
++				}
++				if requests.Load() == 2 {
++					close(secondRequest)
++				}
++				<-r.Context().Done()
++			}))
++			defer server.Close()
++
++			_, budgetRequests := startBudgetTestServer(t, func(conn net.Conn) {
++				_, _ = fmt.Fprintln(conn, `{"protocol":"mihomo-budget-v1","allowed":true}`)
++			})
++
++			base := &budgetTestAdapter{info: C.ProxyInfo{DialerProxy: "upstream"}}
++			adapter := &budgetHTTPAdapter{budgetTestAdapter: base, dialAddr: strings.TrimPrefix(server.URL, "http://")}
++			p := NewProxy(adapter)
++			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
++			defer cancel()
++
++			done := make(chan error, 1)
++			go func() {
++				_, err := p.URLTest(ctx, "http://health.example/", nil)
++				done <- err
++			}()
++			_ = receiveBudgetTestRequest(t, budgetRequests)
++			select {
++			case <-secondRequest:
++			case <-time.After(time.Second):
++				t.Fatal("second HEAD request did not reach the local HTTP fixture")
++			}
++			if tt.cancelRun {
++				cancel()
++			}
++
++			var err error
++			select {
++			case err = <-done:
++			case <-time.After(2 * time.Second):
++				t.Fatal("URLTest did not return after cancellation or deadline")
++			}
++			if got := requests.Load(); got != 2 {
++				t.Fatalf("HTTP requests = %d, want two HEAD requests", got)
++			}
++			if !errors.Is(err, tt.wantErr) {
++				t.Fatalf("URLTest error = %v, want %v", err, tt.wantErr)
++			}
++			if p.AliveForTestUrl("http://health.example/") {
++				t.Fatal("canceled or expired unified delay check marked the proxy alive")
++			}
++			if got := p.DelayHistory(); len(got) != 1 || got[0].Delay != 0 {
++				t.Fatalf("base history = %+v, want one failed check", got)
++			}
++			if got := p.DelayHistoryForTestUrl("http://health.example/"); len(got) != 1 || got[0].Delay != 0 {
++				t.Fatalf("URL history = %+v, want one failed check", got)
++			}
++		})
++	}
++}
++
++func TestURLTestUnifiedDelayKeepsFirstResponseOnSecondRequestFailure(t *testing.T) {
++	enableUnifiedDelayForBudgetTest(t)
++	var requests syncatomic.Int32
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if requests.Add(1) == 1 {
++			w.WriteHeader(http.StatusNoContent)
++			return
++		}
++		time.Sleep(25 * time.Millisecond)
++		conn, _, err := w.(http.Hijacker).Hijack()
++		if err != nil {
++			t.Errorf("hijack second request: %v", err)
++			return
++		}
++		_ = conn.Close()
++	}))
++	defer server.Close()
++
++	_, budgetRequests := startBudgetTestServer(t, func(conn net.Conn) {
++		_, _ = fmt.Fprintln(conn, `{"protocol":"mihomo-budget-v1","allowed":true}`)
++	})
++
++	base := &budgetTestAdapter{info: C.ProxyInfo{DialerProxy: "upstream"}}
++	adapter := &budgetHTTPAdapter{budgetTestAdapter: base, dialAddr: strings.TrimPrefix(server.URL, "http://")}
++	p := NewProxy(adapter)
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++
++	_, err := p.URLTest(ctx, "http://health.example/", nil)
++	_ = receiveBudgetTestRequest(t, budgetRequests)
++	if err != nil {
++		t.Fatalf("URLTest error = %v, want first response success", err)
++	}
++	if !p.AliveForTestUrl("http://health.example/") {
++		t.Fatal("ordinary second request failure did not preserve first response success")
++	}
++	if got := p.DelayHistoryForTestUrl("http://health.example/"); len(got) != 1 || got[0].Delay == 0 {
++		t.Fatalf("URL history = %+v, want successful delay from first response", got)
++	}
++}
+diff --git a/adapter/provider/healthcheck_status_test.go b/adapter/provider/healthcheck_status_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/provider/healthcheck_status_test.go
+@@ -0,0 +1,337 @@
++package provider_test
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/metacubex/mihomo/adapter"
++	"github.com/metacubex/mihomo/adapter/outbound"
++	"github.com/metacubex/mihomo/adapter/outboundgroup"
++	"github.com/metacubex/mihomo/adapter/provider"
++	"github.com/metacubex/mihomo/common/utils"
++	"github.com/metacubex/mihomo/component/measurementbudget"
++	"github.com/metacubex/mihomo/component/resource"
++	C "github.com/metacubex/mihomo/constant"
++	P "github.com/metacubex/mihomo/constant/provider"
++)
++
++// Only the transport endpoint is substituted; health checks and group selection are real.
++type localStatusAdapter struct {
++	*outbound.Base
++	endpoint string
++}
++
++func (a *localStatusAdapter) DialContext(ctx context.Context, _ *C.Metadata) (C.Conn, error) {
++	c, err := (&net.Dialer{}).DialContext(ctx, "tcp", a.endpoint)
++	if err != nil {
++		return nil, err
++	}
++	return outbound.NewConn(c, a), nil
++}
++
++func statusProxy(t *testing.T, name string, status int) C.Proxy {
++	t.Helper()
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.Method != http.MethodHead {
++			t.Errorf("method = %s, want HEAD", r.Method)
++		}
++		time.Sleep(3 * time.Millisecond)
++		w.WriteHeader(status)
++	}))
++	t.Cleanup(s.Close)
++	return adapter.NewProxy(&localStatusAdapter{
++		Base:     outbound.NewBase(outbound.BaseOption{Name: name, Addr: "fixture.invalid:443", Type: C.Direct}),
++		endpoint: strings.TrimPrefix(s.URL, "http://"),
++	})
++}
++
++func statusRanges(t *testing.T, expected string) utils.IntRanges[uint16] {
++	t.Helper()
++	r, err := utils.NewUnsignedRanges[uint16](expected)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return r
++}
++
++func statusProvider(t *testing.T, proxies []C.Proxy, url, expected string) *provider.CompatibleProvider {
++	t.Helper()
++	hc := provider.NewHealthCheck(proxies, url, 1000, 0, false, statusRanges(t, expected))
++	p, err := provider.NewCompatibleProvider("owned", proxies, hc)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = p.Close() })
++	return p
++}
++
++func statusAdmission(t *testing.T) *atomic.Int32 {
++	t.Helper()
++	dir, err := os.MkdirTemp("/tmp", "mihomo-status-")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = os.RemoveAll(dir) })
++	socket := filepath.Join(dir, "budget.sock")
++	l, err := net.Listen("unix", socket)
++	if err != nil {
++		t.Fatal(err)
++	}
++	done := make(chan struct{})
++	t.Cleanup(func() { _ = l.Close(); <-done })
++	t.Setenv(measurementbudget.SocketEnv, socket)
++	count := new(atomic.Int32)
++	go func() {
++		defer close(done)
++		for {
++			c, err := l.Accept()
++			if err != nil {
++				return
++			}
++			_ = c.SetDeadline(time.Now().Add(time.Second))
++			var request struct {
++				Protocol   string `json:"protocol"`
++				DeadlineMS int64  `json:"deadline_ms"`
++			}
++			if err := json.NewDecoder(c).Decode(&request); err != nil || request.Protocol != measurementbudget.Protocol || request.DeadlineMS <= time.Now().UnixMilli() {
++				t.Errorf("invalid admission request: %+v, %v", request, err)
++			} else {
++				count.Add(1)
++				_, _ = fmt.Fprintln(c, `{"protocol":"mihomo-budget-v1","allowed":true}`)
++			}
++			_ = c.Close()
++		}
++	}()
++	return count
++}
++
++func TestConfiguredStatusCannotBeRelaxedByRetest(t *testing.T) {
++	admissions := statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a, b := statusProxy(t, "A", 503), statusProxy(t, "B", 204)
++	p := statusProvider(t, []C.Proxy{a, b}, url, "204")
++	p.HealthCheck()
++	f, err := outboundgroup.NewFallback(outboundgroup.GroupCommonOption{Name: "Download", URL: url, ExpectedStatus: "204"}, outboundgroup.FallbackOption{}, b, []P.ProxyProvider{p})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, expected := range []string{"", "*", "200-599", "503"} {
++		t.Run("group/"+expected, func(t *testing.T) {
++			delays, err := f.URLTest(context.Background(), url, statusRanges(t, expected))
++			if _, ok := delays["A"]; ok {
++				t.Fatalf("503 node returned as a successful group delay: %v (error %v)", delays, err)
++			}
++			if a.AliveForTestUrl(url) || (expected != "503" && f.Now() != "B") {
++				t.Fatalf("503 node revived by retest; alive=%t selected=%s", a.AliveForTestUrl(url), f.Now())
++			}
++		})
++		t.Run("leaf/"+expected, func(t *testing.T) {
++			_, err := a.URLTest(context.Background(), url, statusRanges(t, expected))
++			if err == nil || a.AliveForTestUrl(url) {
++				t.Fatalf("503 leaf retest succeeded: error=%v alive=%t", err, a.AliveForTestUrl(url))
++			}
++			history := a.DelayHistory()
++			if history[len(history)-1].Delay != 0 {
++				t.Fatalf("503 leaf stored successful base history: %v", history)
++			}
++		})
++	}
++	if _, err := a.URLTest(context.Background(), "http://health.invalid/ad-hoc", nil); err != nil {
++		t.Fatalf("distinct ad-hoc URL lost native wildcard semantics: %v", err)
++	}
++	if a.AliveForTestUrl(url) {
++		t.Fatal("ad-hoc test overwrote the owned URL health")
++	}
++	if got := admissions.Load(); got != 15 {
++		t.Fatalf("admissions = %d, want all 15 real leaf attempts charged", got)
++	}
++}
++
++func TestConfiguredStatusPaddedURLCannotBeRelaxed(t *testing.T) {
++	statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	for _, padding := range []string{"  ", "\t", "\u00a0"} {
++		t.Run(fmt.Sprintf("%q", padding), func(t *testing.T) {
++			a := statusProxy(t, "A", 503)
++			p := statusProvider(t, []C.Proxy{a}, padding+url+padding, "204")
++			p.RegisterHealthCheckTask(url, statusRanges(t, "*"), "", 0)
++			if _, err := a.URLTest(context.Background(), url, nil); err == nil || a.AliveForTestUrl(url) {
++				t.Fatalf("padded provider URL lost its status contract: err=%v alive=%t", err, a.AliveForTestUrl(url))
++			}
++			if p.HealthCheckURL() != url {
++				t.Fatalf("provider URL = %q, want %q", p.HealthCheckURL(), url)
++			}
++		})
++	}
++}
++
++func TestConfiguredStatusFollowsOwnerLifecycle(t *testing.T) {
++	statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a := statusProxy(t, "A", 503)
++	old := statusProvider(t, []C.Proxy{a}, url, "204")
++	if _, err := a.URLTest(context.Background(), url, nil); err == nil {
++		t.Fatal("configured contract was absent before the first provider check")
++	}
++	current := statusProvider(t, []C.Proxy{a}, url, "503")
++	if _, err := a.URLTest(context.Background(), url, nil); err == nil {
++		t.Fatal("second owner relaxed a still-active owner contract")
++	}
++	_ = old.Close()
++	if _, err := a.URLTest(context.Background(), url, nil); err != nil {
++		t.Fatalf("closed owner's 204 contract remained active: %v", err)
++	}
++	_ = old.Close()
++	if _, err := a.URLTest(context.Background(), url, statusRanges(t, "204")); err == nil {
++		t.Fatal("old provider close removed the current owner's contract")
++	}
++	_ = current.Close()
++	if _, err := a.URLTest(context.Background(), url, nil); err != nil {
++		t.Fatalf("contract survived all owners closing: %v", err)
++	}
++}
++
++func TestConfiguredStatusFollowsProviderRefresh(t *testing.T) {
++	statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a, b := statusProxy(t, "old", 503), statusProxy(t, "new", 503)
++	path := filepath.Join(t.TempDir(), "provider.yaml")
++	write := func(value string) {
++		t.Helper()
++		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
++			t.Fatal(err)
++		}
++	}
++	parser := func(buf []byte) ([]C.Proxy, error) {
++		if string(buf) == "old" {
++			return []C.Proxy{a}, nil
++		}
++		return []C.Proxy{b}, nil
++	}
++	hc := provider.NewHealthCheck(nil, url, 1000, 0, false, statusRanges(t, "204"))
++	p, err := provider.NewProxySetProvider("refresh", 0, nil, parser, resource.NewFileVehicle(path), hc)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = p.Close() })
++	write("old")
++	if err := p.Update(); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := a.URLTest(context.Background(), url, nil); err == nil {
++		t.Fatal("provider update did not install the configured contract")
++	}
++	write("new")
++	if err := p.Update(); err != nil {
++		t.Fatal(err)
++	}
++	if got := p.Proxies(); len(got) != 1 || got[0] != b {
++		t.Fatalf("refreshed proxies = %v, want new proxy", got)
++	}
++	if _, err := b.URLTest(context.Background(), url, nil); err == nil {
++		t.Fatal("refreshed proxy escaped the configured status contract")
++	}
++	if _, err := a.URLTest(context.Background(), url, nil); err != nil {
++		t.Fatalf("detached proxy retained its old provider's contract: %v", err)
++	}
++	_ = p.Close()
++	if _, err := b.URLTest(context.Background(), url, nil); err != nil {
++		t.Fatalf("refreshed proxy retained a closed owner's contract: %v", err)
++	}
++}
++
++func TestConfiguredExtraStatusRetainsFiltersAndPriority(t *testing.T) {
++	statusAdmission(t)
++	const mainURL, extraURL = "http://health.invalid/main", "http://health.invalid/extra"
++	a, b := statusProxy(t, "A", 503), statusProxy(t, "B", 503)
++	p := statusProvider(t, []C.Proxy{a, b}, mainURL, "*")
++	p.RegisterHealthCheckTask(extraURL, statusRanges(t, "204"), "^A$", 0)
++	if _, err := a.URLTest(context.Background(), extraURL, nil); err == nil {
++		t.Fatal("filtered extra check contract was absent before execution")
++	}
++	if _, err := b.URLTest(context.Background(), extraURL, nil); err != nil {
++		t.Fatalf("extra check contract leaked to a non-matching proxy: %v", err)
++	}
++	p.RegisterHealthCheckTask(extraURL, statusRanges(t, "503"), "^B$", 0)
++	if _, err := b.URLTest(context.Background(), extraURL, nil); err == nil {
++		t.Fatal("later registration weakened the first extra check's status contract")
++	}
++	p.HealthCheck()
++	if !a.AliveForTestUrl(mainURL) || !b.AliveForTestUrl(mainURL) || a.AliveForTestUrl(extraURL) || b.AliveForTestUrl(extraURL) {
++		t.Fatal("provider main/extra checks did not retain independent URL status contracts")
++	}
++}
++
++func TestConfiguredStatusConcurrentRetestsAndRegistration(t *testing.T) {
++	statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a := statusProxy(t, "A", 503)
++	p := statusProvider(t, []C.Proxy{a}, url, "204")
++	var wg sync.WaitGroup
++	wg.Add(2)
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 20; i++ {
++			if _, err := a.URLTest(context.Background(), url, nil); err == nil {
++				t.Error("concurrent retest relaxed the configured contract")
++			}
++		}
++	}()
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 20; i++ {
++			p.RegisterHealthCheckTask("http://health.invalid/extra", statusRanges(t, "204"), "^A$", 0)
++			p.HealthCheck()
++		}
++	}()
++	wg.Wait()
++}
++
++func TestConfiguredStatusBudgetDenialPreservesHealth(t *testing.T) {
++	statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a := statusProxy(t, "A", 204)
++	statusProvider(t, []C.Proxy{a}, url, "204")
++	if _, err := a.URLTest(context.Background(), url, nil); err != nil {
++		t.Fatal(err)
++	}
++	before, extraBefore := a.DelayHistory(), a.ExtraDelayHistories()
++	t.Setenv(measurementbudget.SocketEnv, filepath.Join(t.TempDir(), "absent.sock"))
++	if _, err := a.URLTest(context.Background(), url, statusRanges(t, "503")); !errors.Is(err, measurementbudget.ErrDenied) {
++		t.Fatalf("budget denial = %v", err)
++	}
++	if !a.AliveForTestUrl(url) || !reflect.DeepEqual(a.DelayHistory(), before) || !reflect.DeepEqual(a.ExtraDelayHistories(), extraBefore) {
++		t.Fatal("denied retest modified configured URL health/history")
++	}
++}
++
++func TestConfiguredStatusFallbackSetRetest(t *testing.T) {
++	admissions := statusAdmission(t)
++	const url = "http://health.invalid/owned"
++	a, b := statusProxy(t, "A", 503), statusProxy(t, "B", 204)
++	p := statusProvider(t, []C.Proxy{a, b}, url, "204")
++	p.HealthCheck()
++	f, err := outboundgroup.NewFallback(outboundgroup.GroupCommonOption{Name: "Download", URL: url, ExpectedStatus: "*"}, outboundgroup.FallbackOption{}, b, []P.ProxyProvider{p})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := f.Set("A"); err != nil {
++		t.Fatal(err)
++	}
++	if a.AliveForTestUrl(url) || f.Now() != "B" || admissions.Load() != 3 {
++		t.Fatalf("fallback Set relaxed owner status or skipped admission: alive=%t selected=%s admissions=%d", a.AliveForTestUrl(url), f.Now(), admissions.Load())
++	}
++}
+diff --git a/adapter/provider/healthcheck_alias_test.go b/adapter/provider/healthcheck_alias_test.go
+new file mode 100644
+--- /dev/null
++++ b/adapter/provider/healthcheck_alias_test.go
+@@ -0,0 +1,224 @@
++package provider_test
++
++import (
++	"context"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++
++	"github.com/metacubex/mihomo/adapter"
++	"github.com/metacubex/mihomo/adapter/provider"
++	"github.com/metacubex/mihomo/component/resource"
++	C "github.com/metacubex/mihomo/constant"
++	P "github.com/metacubex/mihomo/constant/provider"
++	T "github.com/metacubex/mihomo/tunnel"
++)
++
++type statusAliasTunnel struct {
++	C.Tunnel
++	providers map[string]P.ProxyProvider
++}
++
++func (t *statusAliasTunnel) Providers() map[string]P.ProxyProvider { return t.providers }
++
++func aliasStatusServer(t *testing.T) *httptest.Server {
++	t.Helper()
++	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.WriteHeader(503)
++	}))
++	t.Cleanup(s.Close)
++	return s
++}
++
++func TestConfiguredStatusAppliesToParsedGlobalAlias(t *testing.T) {
++	statusAdmission(t)
++	s := aliasStatusServer(t)
++	tunnel := &statusAliasTunnel{providers: make(map[string]P.ProxyProvider)}
++	node := map[string]any{"name": "Synthetic A", "type": "direct"}
++	global, err := adapter.ParseProxy(node, adapter.WithTunnelForAPI(tunnel))
++	if err != nil {
++		t.Fatal(err)
++	}
++	p, err := provider.ParseProxyProvider("owned", map[string]any{
++		"type": "inline", "payload": []map[string]any{node},
++		"health-check": map[string]any{"enable": false, "url": s.URL, "expected-status": "204"},
++	}, tunnel)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = p.(*provider.InlineProvider).Close() })
++	tunnel.providers["owned"] = p
++	managed := p.Proxies()[0]
++	if global == managed {
++		t.Fatal("fixture must reproduce distinct global and inline-provider proxy objects")
++	}
++	p.HealthCheck()
++	for _, expected := range []string{"", "*", "200-599", "503"} {
++		if _, err := global.URLTest(context.Background(), s.URL, statusRanges(t, expected)); err == nil || global.AliveForTestUrl(s.URL) {
++			t.Fatalf("parsed global alias relaxed configured status with expected=%q: %v", expected, err)
++		}
++		if managed.AliveForTestUrl(s.URL) {
++			t.Fatal("global alias retest revived managed provider health")
++		}
++	}
++	if _, err := global.URLTest(context.Background(), s.URL+"/ad-hoc", nil); err != nil {
++		t.Fatalf("distinct ad-hoc URL inherited alias contract: %v", err)
++	}
++	_ = p.(*provider.InlineProvider).Close()
++	if _, err := global.URLTest(context.Background(), s.URL, nil); err != nil {
++		t.Fatalf("closed provider contract remained attached to global alias: %v", err)
++	}
++}
++
++func TestConfiguredStatusGlobalAliasConcurrentProviderRefresh(t *testing.T) {
++	statusAdmission(t)
++	s := aliasStatusServer(t)
++	tunnel := &statusAliasTunnel{providers: make(map[string]P.ProxyProvider)}
++	node := map[string]any{"name": "Synthetic A", "type": "direct"}
++	global, err := adapter.ParseProxy(node, adapter.WithTunnelForAPI(tunnel))
++	if err != nil {
++		t.Fatal(err)
++	}
++	path := filepath.Join(t.TempDir(), "provider.yaml")
++	parser := func(_ []byte) ([]C.Proxy, error) {
++		var proxies []C.Proxy
++		for i := 0; i < 15; i++ {
++			name := "Synthetic A"
++			if i != 0 {
++				name = fmt.Sprintf("Synthetic B%02d", i)
++			}
++			p, err := adapter.ParseProxy(map[string]any{"name": name, "type": "direct"}, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName("owned"))
++			if err != nil {
++				return nil, err
++			}
++			proxies = append(proxies, p)
++		}
++		return proxies, nil
++	}
++	hc := provider.NewHealthCheck(nil, s.URL, 1000, 0, false, statusRanges(t, "204"))
++	p, err := provider.NewProxySetProvider("owned", 0, nil, parser, resource.NewFileVehicle(path), hc)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = p.Close() })
++	tunnel.providers["owned"] = p
++	update := func(i int) {
++		t.Helper()
++		if err := os.WriteFile(path, []byte(fmt.Sprint(i)), 0600); err != nil {
++			t.Fatal(err)
++		}
++		if err := p.Update(); err != nil {
++			t.Fatal(err)
++		}
++	}
++	update(-1)
++	var wg sync.WaitGroup
++	wg.Add(3)
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 30; i++ {
++			update(i)
++		}
++	}()
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 30; i++ {
++			if _, err := global.URLTest(context.Background(), s.URL, nil); err == nil {
++				t.Error("global alias escaped active configured status during provider refresh")
++			}
++		}
++	}()
++	go func() {
++		defer wg.Done()
++		p.HealthCheck()
++	}()
++	wg.Wait()
++}
++
++type aliasIdentityAdapter struct {
++	C.ProxyAdapter
++	name string
++	addr string
++	tp   C.AdapterType
++	info C.ProxyInfo
++}
++
++func (a *aliasIdentityAdapter) Name() string           { return a.name }
++func (a *aliasIdentityAdapter) Addr() string           { return a.addr }
++func (a *aliasIdentityAdapter) Type() C.AdapterType    { return a.tp }
++func (a *aliasIdentityAdapter) ProxyInfo() C.ProxyInfo { return a.info }
++
++func TestConfiguredStatusAliasRequiresMatchingIdentity(t *testing.T) {
++	statusAdmission(t)
++	s := aliasStatusServer(t)
++	tunnel := &statusAliasTunnel{providers: make(map[string]P.ProxyProvider)}
++	global, err := adapter.ParseProxy(map[string]any{"name": "Synthetic A", "type": "direct"}, adapter.WithTunnelForAPI(tunnel))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, field := range []string{"name", "type", "address", "dialer", "interface"} {
++		t.Run(field, func(t *testing.T) {
++			identity := &aliasIdentityAdapter{ProxyAdapter: global.Adapter(), name: global.Name(), addr: global.Addr(), tp: global.Type(), info: global.ProxyInfo()}
++			switch field {
++			case "name":
++				identity.name = "Unrelated"
++			case "type":
++				identity.tp = C.Http
++			case "address":
++				identity.addr = "different.invalid:443"
++			case "dialer":
++				identity.info.DialerProxy = "Different"
++			case "interface":
++				identity.info.Interface = "Different"
++			}
++			other := adapter.NewProxy(identity)
++			p := statusProvider(t, []C.Proxy{other}, s.URL, "204")
++			tunnel.providers["candidate"] = p
++			if _, err := global.URLTest(context.Background(), s.URL, nil); err != nil {
++				t.Fatalf("different %s inherited an unrelated contract: %v", field, err)
++			}
++		})
++	}
++}
++
++func TestConfiguredStatusAliasConcurrentTunnelReload(t *testing.T) {
++	statusAdmission(t)
++	s := aliasStatusServer(t)
++	oldProxies, oldProviders := T.Proxies(), T.Providers()
++	t.Cleanup(func() { T.UpdateProxies(oldProxies, oldProviders) })
++	node := map[string]any{"name": "Synthetic A", "type": "direct"}
++	parse := func() C.Proxy {
++		t.Helper()
++		p, err := adapter.ParseProxy(node, adapter.WithTunnelForAPI(T.Tunnel))
++		if err != nil {
++			t.Fatal(err)
++		}
++		return p
++	}
++	global := parse()
++	first := statusProvider(t, []C.Proxy{parse()}, s.URL, "204")
++	second := statusProvider(t, []C.Proxy{parse()}, s.URL, "204")
++	maps := []map[string]P.ProxyProvider{{"first": first}, {"second": second}}
++	T.UpdateProxies(nil, maps[0])
++	var wg sync.WaitGroup
++	wg.Add(2)
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 100; i++ {
++			T.UpdateProxies(nil, maps[i%2])
++		}
++	}()
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 30; i++ {
++			if _, err := global.URLTest(context.Background(), s.URL, nil); err == nil {
++				t.Error("alias escaped configured status during tunnel reload")
++			}
++		}
++	}()
++	wg.Wait()
++}
+diff --git a/component/measurementbudget/measurementbudget.go b/component/measurementbudget/measurementbudget.go
+new file mode 100644
+--- /dev/null
++++ b/component/measurementbudget/measurementbudget.go
+@@ -0,0 +1,114 @@
++package measurementbudget
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"os"
++	"time"
++)
++
++const (
++	Protocol        = "mihomo-budget-v1"
++	SocketEnv       = "MIHOMO_MEASUREMENT_SOCKET"
++	DefaultSocket   = "/run/mihomo-measurements/budget.sock"
++	ioTimeout       = time.Second
++	maxResponseSize = 4 * 1024
++)
++
++var ErrDenied = errors.New("measurement budget denied")
++
++type request struct {
++	Protocol   string `json:"protocol"`
++	Name       string `json:"name"`
++	Addr       string `json:"addr"`
++	Dialer     string `json:"dialer"`
++	DeadlineMS int64  `json:"deadline_ms"`
++}
++
++type response struct {
++	Protocol string `json:"protocol"`
++	Allowed  *bool  `json:"allowed"`
++}
++
++func SocketPath() string {
++	if path := os.Getenv(SocketEnv); path != "" {
++		return path
++	}
++	return DefaultSocket
++}
++
++// Check requires an explicit admission response before a URL health check can dial.
++func Check(ctx context.Context, name, addr, dialer string) error {
++	if ctx.Err() != nil {
++		return ErrDenied
++	}
++
++	deadline := time.Now().Add(ioTimeout)
++	if ctxDeadline, ok := ctx.Deadline(); ok {
++		if !ctxDeadline.After(time.Now()) {
++			return ErrDenied
++		}
++		if ctxDeadline.Before(deadline) {
++			deadline = ctxDeadline
++		}
++	}
++
++	requestDeadlineMS := int64(0)
++	if ctxDeadline, ok := ctx.Deadline(); ok {
++		requestDeadlineMS = ctxDeadline.UnixMilli()
++	}
++	req := request{
++		Protocol:   Protocol,
++		Name:       name,
++		Addr:       addr,
++		Dialer:     dialer,
++		DeadlineMS: requestDeadlineMS,
++	}
++
++	ioCtx, cancel := context.WithDeadline(ctx, deadline)
++	defer cancel()
++	conn, err := (&net.Dialer{}).DialContext(ioCtx, "unix", SocketPath())
++	if err != nil {
++		return ErrDenied
++	}
++	defer conn.Close()
++	if err := conn.SetDeadline(deadline); err != nil {
++		return ErrDenied
++	}
++
++	watchStop := make(chan struct{})
++	watchDone := make(chan struct{})
++	go func() {
++		defer close(watchDone)
++		select {
++		case <-ctx.Done():
++			_ = conn.SetDeadline(time.Now())
++		case <-watchStop:
++		}
++	}()
++	defer func() {
++		close(watchStop)
++		<-watchDone
++	}()
++
++	if err := json.NewEncoder(conn).Encode(req); err != nil {
++		return ErrDenied
++	}
++	reader := bufio.NewReader(io.LimitReader(conn, maxResponseSize+1))
++	body, err := reader.ReadBytes('\n')
++	if err != nil || len(body) > maxResponseSize || reader.Buffered() != 0 {
++		return ErrDenied
++	}
++	var reply response
++	if json.Unmarshal(body, &reply) != nil || reply.Protocol != Protocol || reply.Allowed == nil || !*reply.Allowed {
++		return ErrDenied
++	}
++	if ctx.Err() != nil {
++		return ErrDenied
++	}
++	return nil
++}
