@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img">
+  <title>上线依次判定</title>
+  <desc>四步判定链：启动门禁、部署门禁、常态观测、换核回滚；任一步失败都沿下方支路退回并复验。</desc>
+  <rect width="1200" height="400" fill="#0F1311"/>
+  <rect x="0.5" y="0.5" width="1199" height="399" fill="none" stroke="#242C26"/>
+  <text x="64" y="58" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#93A293">上线依次判定，任一道失败就带着证据退回</text>
+  <rect x="64" y="92" width="200" height="132" fill="#151A17" stroke="#2A332B"/>
+  <text x="84" y="126" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#CBF16D">1</text>
+  <text x="84" y="162" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="21" fill="#E6EDE3">单元门禁</text>
+  <text x="84" y="190" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">TUN + 两张 nft 表</text>
+  <text x="84" y="216" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">规则 9000</text>
+  <rect x="360" y="92" width="200" height="132" fill="#151A17" stroke="#2A332B"/>
+  <text x="380" y="126" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#CBF16D">2</text>
+  <text x="380" y="162" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="21" fill="#E6EDE3">部署门禁</text>
+  <text x="380" y="190" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">候选内核浸泡 45 秒</text>
+  <text x="380" y="216" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">再读一次连接表</text>
+  <rect x="656" y="92" width="200" height="132" fill="#151A17" stroke="#2A332B"/>
+  <text x="676" y="126" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#CBF16D">3</text>
+  <text x="676" y="162" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="21" fill="#E6EDE3">常态观测</text>
+  <text x="676" y="190" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">每分钟只读状态</text>
+  <text x="676" y="216" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">出口抽样 5 分钟</text>
+  <rect x="952" y="92" width="200" height="132" fill="#151A17" stroke="#2A332B"/>
+  <text x="972" y="126" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#CBF16D">4</text>
+  <text x="972" y="162" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="21" fill="#E6EDE3">换核回滚</text>
+  <text x="972" y="190" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">renameat2 双槽</text>
+  <text x="972" y="216" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="16" fill="#8FA395">恢复后复验一次</text>
+  <path d="M272 158 l16 0 m-6 -5 l6 5 l-6 5" fill="none" stroke="#CBF16D" stroke-width="2"/>
+  <path d="M568 158 l16 0 m-6 -5 l6 5 l-6 5" fill="none" stroke="#CBF16D" stroke-width="2"/>
+  <path d="M864 158 l16 0 m-6 -5 l6 5 l-6 5" fill="none" stroke="#CBF16D" stroke-width="2"/>
+  <line x1="460" y1="224" x2="460" y2="292" stroke="#A93B1C" stroke-width="2" stroke-dasharray="6 5"/>
+  <line x1="460" y1="292" x2="364" y2="292" stroke="#A93B1C" stroke-width="2"/>
+  <path d="M364 292 l14 -7 l0 14 z" fill="#A93B1C"/>
+  <rect x="64" y="266" width="300" height="44" fill="none" stroke="#A93B1C" stroke-width="2"/>
+  <text x="88" y="296" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="19" fill="#A93B1C">回退并复验，再验一次</text>
+  <text x="64" y="356" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="18" fill="#7C8B7F">2026-10-25 负向演练：写坏 tun.device → ROLLED_BACK，退出码 1。</text>
+</svg>
