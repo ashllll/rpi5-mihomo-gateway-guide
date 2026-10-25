@@ -27,7 +27,8 @@ def socket_path() -> str:
     return os.environ.get("MIHOMO_MEASUREMENT_SOCKET") or SOCKET_DEFAULT
 
 
-def authorize(request: dict, config: dict, measurement: dict, budget: Path, *, policy_check=None) -> bool:
+def authorize(request: dict, config: dict, measurement: dict, budget: Path, *, policy_check=None,
+              nodes: dict | None = None) -> bool:
     if not isinstance(request, dict) or request.get('protocol') != PROTOCOL:
         return False
     if any(not isinstance(request.get(k), str) for k in ('name', 'addr', 'dialer')):
@@ -39,7 +40,7 @@ def authorize(request: dict, config: dict, measurement: dict, budget: Path, *, p
     deadline = deadline_ms / 1000
     if not 0 < deadline - now <= 31:
         return False
-    node = POLICY['definitions'](config).get(request['name'])
+    node = (nodes if nodes is not None else POLICY['definitions'](config)).get(request['name'])
     # Native ownership currently admits explicit leaves only, never a dynamic group/dialer.
     if not node or node.get('dialer-proxy') or request['dialer']:
         return False
@@ -52,6 +53,37 @@ def authorize(request: dict, config: dict, measurement: dict, budget: Path, *, p
     return POLICY['reserve_native'](budget, measurement, [node], 2,
         hold_seconds=deadline - now + 2, deadline=deadline,
         policy_check=policy_check, monotonic_deadline=time.monotonic()+deadline-now) and time.time() < deadline
+
+
+class Inputs:
+    """Parsed policy inputs, refreshed only when a file actually changes.
+
+    A health-check wave asks once per candidate node; re-parsing a 5000-line
+    config per request serialised the wave into the admission deadline.
+    """
+
+    def __init__(self, config_path: Path, manifest_path: Path, budget_path: Path):
+        self.config_path, self.manifest_path = config_path, manifest_path
+        self.budget_path = budget_path
+        self._key = None
+        self._state = None
+        self._lock = threading.Lock()
+
+    def _stamp(self):
+        return tuple(os.stat(p).st_mtime_ns for p in (self.config_path, self.manifest_path))
+
+    def get(self):
+        stamp = self._stamp()
+        with self._lock:
+            if stamp != self._key:
+                config, measurement = read_inputs(self.config_path, self.manifest_path)
+                self._key = stamp
+                self._state = (config, measurement, POLICY['definitions'](config),
+                               status(config, measurement, self.budget_path))
+            return self._state
+
+    def unchanged(self, stamp) -> bool:
+        return self._stamp() == stamp
 
 
 def read_inputs(config_path: Path, manifest_path: Path) -> tuple[dict, dict]:
@@ -99,14 +131,14 @@ class Handler(socketserver.StreamRequestHandler):
             request = json.loads(raw)
             if not isinstance(request, dict) or request.get('protocol') != PROTOCOL:
                 raise ValueError('invalid request protocol')
-            config, measurement = read_inputs(self.server.config_path, self.server.manifest_path)
+            config, measurement, nodes, cached_status = self.server.inputs.get()
+            stamp = self.server.inputs._stamp()
             if request.get('op') == 'status':
-                response = status(config, measurement, self.server.budget_path)
+                response = dict(cached_status)
             else:
-                expected = POLICY['fingerprint']((config, measurement))
-                response['allowed'] = authorize(request, config, measurement, self.server.budget_path,
-                    policy_check=lambda: POLICY['fingerprint'](read_inputs(
-                        self.server.config_path, self.server.manifest_path)) == expected)
+                response['allowed'] = authorize(
+                    request, config, measurement, self.server.budget_path, nodes=nodes,
+                    policy_check=lambda: self.server.inputs.unchanged(stamp))
         except (OSError, ValueError, TypeError, KeyError, OverflowError, yaml.YAMLError):
             pass
         try:
@@ -117,14 +149,22 @@ class Handler(socketserver.StreamRequestHandler):
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
+    # A health-check wave asks for every candidate at once (one socket each).
+    # The stock backlog of 5 and a 32-slot gate turned such a wave into silent
+    # denials, which is how groups ended up pinned to dead nodes.
+    request_queue_size = 512
 
     def __init__(self, path: str, config: Path, manifest: Path, budget: Path):
         self.config_path, self.manifest_path, self.budget_path = config, manifest, budget
-        self.slots = threading.BoundedSemaphore(32)
+        self.inputs = Inputs(config, manifest, budget)
+        self.slots = threading.BoundedSemaphore(256)
         super().__init__(path, Handler)
 
     def process_request(self, request, address):
-        if not self.slots.acquire(blocking=False):
+        # Brief wait so a burst queues instead of being dropped; a request
+        # still cannot outlive its admission deadline because the deadline
+        # check runs after this point.
+        if not self.slots.acquire(timeout=2.0):
             request.close()
             return
         try:

@@ -5,7 +5,9 @@ measurement:
   enabled: false
   # Native URLTests require the pinned patched core and local admission service.
   native_budget: true
-  native_interval_seconds: 900
+  # Detection latency of the shared native URLTest providers; this is
+  # what actually decides how fast a dead node leaves a group.
+  native_interval_seconds: 250
   accounts: {}
   # Account IDs must be non-empty strings; quote numeric IDs, e.g. "12345".
   # Each account uses positive prefixes/names, native_probes_per_hour (planned
@@ -17,74 +19,57 @@ measurement:
 # separately installed route-defaults.yaml by route ID. Missing, null or empty
 # tables inherit defaults; explicit route entries must contain domains.
 stability:
+  # Detection ceiling applied by mihomo-policy-overlay to every
+  # generated group: a dead node can never pin traffic past this.
+  max_interval: 250
   groups:
     Research + AI:
       url: https://api.openai.com/v1/models
       expected-status: 401
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Streaming:
       url: https://www.youtube.com/generate_204
       expected-status: 204
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Social:
       url: https://api.x.com/2/users/me
       # Native fallback checks transport only; the shell diagnoses X paths.
       expected-status: 200-499
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Telegram:
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Auto:
-      interval: 900
-      lazy: true
       timeout: 5000
-      max-failed-times: 3
+      max-failed-times: 2
     Download:
       url: https://www.gstatic.com/generate_204
       expected-status: 204
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     GitHub Download:
       url: https://www.gstatic.com/generate_204
       expected-status: 204
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Model Download:
       url: https://www.gstatic.com/generate_204
       expected-status: 204
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     Package Download:
       url: https://www.gstatic.com/generate_204
       expected-status: 204
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
     GitHub Control:
       url: https://github.com/robots.txt
       expected-status: 200
-      interval: 900
       timeout: 5000
-      lazy: true
-      max-failed-times: 3
+      max-failed-times: 2
   telegram_cidrs:
   - 91.108.56.0/22
   - 91.108.4.0/22

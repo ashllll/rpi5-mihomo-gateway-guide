@@ -38,6 +38,7 @@
 | 常态探针 | 上述四项 + 转发计数 | 每 1 分钟 | 连续 3 分钟红 → 重启核心（每小时至多一次） |
 | 出口抽样 | `curl --socks5-hostname` 走 mixed-port 取 204 | 每 5 分钟 | 计入门禁，触发同上 |
 | 解析自愈 | 本机 `:53` 两种域名解析；失败时升级到 `:5335` 与公共 DoH 对比 | 每 30 秒 | 判定 dnsmasq 静默才重启；冷却 + 15 分钟预算，单次事故只推一条 |
+| 节点探测 | 组内每个节点穿节点取一次状态码（`204` / `200-499` / `401`），结果决定组内排序 | 每 250 秒 | `url-test` 自动换最快可用，`fallback` 顺序降级 |
 | 告警 | 单元失败、门禁迁移、解析重启、MosDNS 兜底、巡检五类 | 事件驱动 | `mihomo-alert` 推送（Server酱 / Bark），同 key 去重 |
 
 ## 一次连接怎么走
@@ -155,6 +156,7 @@ sudo cat /run/mihomo-healthcheck/status
 python3 tools/validate_public.py
 python3 tools/check_automation.py        # 脚本/单元/env 示例与安装器的一致性
 python3 tools/check_dnsmasq_guard.py     # 解析自愈的分层判定、预算与告警去重
+python3 tools/check_mihomo_policy.py     # 生成的每个组都带健康探测，间隔不超上限
 python3 tools/check_publication_privacy.py
 ```
 

@@ -21,7 +21,7 @@
   <rect x="64" y="450" width="9" height="9" fill="#CBF16D"/>
   <text x="86" y="460" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#C7D2C6">30 秒解析自愈 · 连红 3 分钟重启 · 每小时至多一次</text>
 
-  <text x="64" y="516" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">12 个常驻单元 / 4 个休眠 / 12 个仓库检查器</text>
+  <text x="64" y="516" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">12 个常驻单元 / 4 个休眠 / 13 个仓库检查器</text>
 
   <rect x="704" y="64" width="432" height="432" fill="#151A17" stroke="#2A332B"/>
   <text x="730" y="112" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#93A293">rp5 · 当前状态</text>

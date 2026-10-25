@@ -107,15 +107,32 @@ cat /run/mihomo-healthcheck/status
 ### 4.3 订阅与策略
 
 ```sh
-sudo /usr/local/sbin/mihomo-update-subscription --force   # 生成候选并校验
+sudo /usr/local/sbin/mihomo-update-subscription --force   # 生成候选并校验（内部会调覆盖层）
 sudo /usr/local/sbin/mihomo-reconcile-policy              # 按 reconcile-targets 对齐
-sudo /usr/local/sbin/mihomo-policy-overlay                # 叠加本地覆盖段
+
+# 覆盖层不是手工命令：它总要 (输入, 输出) 两个参数，订阅路径已自动调用。
+# 手工验证时写临时文件，别覆盖线上 config：
+sudo /usr/local/sbin/mihomo-policy-overlay /etc/mihomo/config.yaml /tmp/config.overlay.yaml
+sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 ```
 
 订阅数据与节点标签只存在部署端：`/etc/mihomo/secrets/subscription.url`（0600）、
 `/etc/mihomo/secrets/dashboard.secret`、`/etc/mihomo/adaptive/capabilities.yaml`。
 更新后必须 `mihomo -t -d /etc/mihomo` 通过再 reload；`kill -HUP` 只重载不重启，
 预算 broker 与 TUN 状态不受影响。
+
+**组健康检查是硬不变量**：每个自动组都必须被某个探测所有者覆盖，否则它永远不重选——这就是
+2026-10-25「节点超时后一直不切换」的根因。生产模式（`measurement.enabled: true`）下，
+所有 `url-test`/`fallback` 组的节点被折进共享的 `measurement-<16hex>` provider 以归属计量，
+但**组自己仍保留 `url`/`expected-status`/`interval`**：探测由组内调度器逐节点执行，内联 provider
+的 `health-check` 没有自己的探测循环（真机实测从不触发）。组的间隔取
+`measurement.native_interval_seconds`（真机 250s）与 `stability.max_interval` 的较小者，
+改它就是改全网的故障发现时间。每次探测都要先过预算侧准入，因此
+`mihomo-measurement-budget` 必须接得住一次全量扫描：它缓存已解析的输入（config/manifest 变更才重读），
+监听 backlog 512、并发上限 256——按请求重解析 5000 行 config 会把一整波扫描挤到准入超时。
+未开原生计量时自动组会降级成 `select`，不自动切换。
+仓库侧由 `tools/check_mihomo_policy.py` 用合成订阅跑两种模式断言这条不变量（CI 每次执行），
+改 `automation/policy/capabilities.yaml` 后先跑它再上线。
 
 ## 5. 账本、状态与备份位置
 
