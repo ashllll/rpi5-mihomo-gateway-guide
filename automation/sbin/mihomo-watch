@@ -11,6 +11,13 @@
 # Delivery reuses mihomo-alert (ServerChan + Bark, /etc/mihomo-alert.env), so a
 # broken notifier is logged and never takes the gateway down. Thresholds:
 #   WATCH_TEMP_C=80  WATCH_DISK_PCT=90  WATCH_MEM_MB=512  WATCH_WAN_IF=wan0
+#   WATCH_DNS_BYPASS_IF=proxy20  WATCH_DNS_BYPASS_TARGET=<upstream resolver>
+#
+# The DNS-bypass probe rides on a kernel-log rule (table inet dns_bypass, hook
+# priority -151) that only logs and never drops: a client that asks the upstream
+# router for names gets answers this gateway cannot correct, and the proxied
+# connection then dies on TLS. We cannot repair that per packet, so we report the
+# device (address, DHCP name, MAC) the moment it happens.
 set -u
 umask 077
 env_file=/etc/mihomo-alert.env
@@ -24,6 +31,8 @@ temp_c=${WATCH_TEMP_C:-80}
 disk_pct=${WATCH_DISK_PCT:-90}
 mem_mb=${WATCH_MEM_MB:-512}
 wan_if=${WATCH_WAN_IF:-wan0}
+bypass_if=${WATCH_DNS_BYPASS_IF:-proxy20}
+bypass_target=${WATCH_DNS_BYPASS_TARGET:-192.0.2.1}
 
 mkdir -p "$state_dir"
 
@@ -114,6 +123,38 @@ check_wan() {
   fi
 }
 
+check_dns_bypass() {
+  # Observation only: the rule logs dport 53 aimed at the upstream resolver and
+  # carries no verdict, so a client that bypasses this gateway still browses --
+  # it just gets poisoned answers, which is what the alert is for.
+  command -v nft >/dev/null 2>&1 || return 0
+  command -v journalctl >/dev/null 2>&1 || return 0
+  nft list table inet dns_bypass >/dev/null 2>&1 || nft -f - <<EOF
+table inet dns_bypass {
+  chain prerouting {
+    type filter hook prerouting priority -151; policy accept;
+    iifname != "$bypass_if" return
+    ip daddr $bypass_target meta l4proto { tcp, udp } th dport 53 log prefix "dns-bypass " level info limit rate 6/minute
+  }
+}
+EOF
+  now=$(date +%s)
+  since=$(cat "$state_dir/dns-bypass-last" 2>/dev/null || echo $((now - 600)))
+  [ "$since" -ge "$now" ] && since=$((now - 600))
+  seen=$(journalctl -k --since "@$since" -o cat 2>/dev/null \
+    | grep 'dns-bypass ' | sed -n 's/.*SRC=\([0-9.]*\).*/\1/p' | sort -u)
+  printf '%s' "$now" >"$state_dir/dns-bypass-last"
+  [ -n "$seen" ] || return 0
+  for ip in $seen; do
+    name=$(awk -v ip="$ip" '$3==ip {print $4}' /run/dnsmasq-vlan-pilot/leases 2>/dev/null | head -1)
+    [ "$name" = '*' ] && name=
+    mac=$(ip neigh show "$ip" 2>/dev/null | sed -n 's/.*lladdr \([0-9a-f:]*\).*/\1/p' | head -1)
+    who=${name:-未知主机名}${mac:+, $mac}
+    logger -t mihomo-watch "dns-bypass: $ip $who -> $bypass_target"
+    push "dns-bypass:$ip" "$title | 设备绕过网关 DNS：$ip（$who）正在向 $bypass_target 查询，会拿到污染答案"
+  done
+}
+
 self_test() {
   # One message per type so the operator can confirm every push class lands.
   push self-test:unit "$title | 自检：systemd 单元失败类"
@@ -126,6 +167,6 @@ self_test() {
 
 case "${1:-}" in
   --self-test) self_test ;;
-  '') check_units; check_temp; check_disk; check_mem; check_wan ;;
+  '') check_units; check_temp; check_disk; check_mem; check_wan; check_dns_bypass ;;
   *) echo 'usage: mihomo-watch [--self-test]' >&2; exit 2 ;;
 esac
