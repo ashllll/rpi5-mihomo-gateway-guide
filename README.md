@@ -56,6 +56,7 @@
 | `mihomo.service` | 代理核心，`ExecStart` 被 drop-in 覆盖为预算 broker 的 `--run-core` | 常驻 |
 | `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
+| `mihomo-dnsmasq-guard.timer` | 分层解析探针：LAN 侧 DNS 迟滞/无答案时升级到 `:5335` 与公共 DoH 判定；只有 dnsmasq 静默才重启，重启后有冷却与 15 分钟预算，单次事故只推一条 | 每 30 秒 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
 | `mosdns-healthcheck.timer` | 校验 5335 分流与 metrics | 开机 30s 后每 1 分钟 |
@@ -112,7 +113,7 @@ sudo ip -br addr                      # 四个接口都要有地址
 sudo nft -c -f /etc/nftables.conf
 # 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
 sudo automation/install.sh --dry-run
-sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 真机那 11 个单元
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 真机那 12 个单元
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 sudo cat /run/mihomo-healthcheck/status
@@ -139,7 +140,7 @@ sudo cat /run/mihomo-healthcheck/status
 | 有证据 | 不能由此推断 |
 |---|---|
 | 2026-10-25 对真机 rp5 的只读取证（`ssh rp5`，86 个文件快照）、服务状态、端口、单元表 | 所有硬件组合、断电恢复与长期稳定性都已验收 |
-| 启动门禁 + 每分钟探针 + 5 分钟出口抽样 + 连红 3 分钟自愈重启 | 检测周期不等于瞬时可用；重启只治黑障，救不了节点或上游故障；连接切换会迁移已有 TCP/WebSocket 会话 |
+| 启动门禁 + 30 秒解析自愈 + 每分钟四要素探针 + 5 分钟出口抽样 + 连红 3 分钟自愈重启 | 检测周期不等于瞬时可用；重启只治黑障，救不了节点或上游故障；连接切换会迁移已有 TCP/WebSocket 会话 |
 | 预算服务校验协议、账本与预扣 | 平台解锁、账号可用、节点吞吐或供应商允许下载 |
 | `nft -c -f` 通过 | 目标机之外的环境可用；本机 nftables 表是部署端文件，不是通用模板 |
 
@@ -151,6 +152,8 @@ sudo cat /run/mihomo-healthcheck/status
 
 ```sh
 python3 tools/validate_public.py
+python3 tools/check_automation.py        # 脚本/单元/env 示例与安装器的一致性
+python3 tools/check_dnsmasq_guard.py     # 解析自愈的分层判定、预算与告警去重
 python3 tools/check_publication_privacy.py
 ```
 
