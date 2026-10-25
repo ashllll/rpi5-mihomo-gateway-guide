@@ -230,14 +230,19 @@ def configure_measurement(config: dict, capabilities: dict) -> None:
         contracts[url] = expected
         key = fingerprint([url, expected, interval])[:16]
         owner = 'measurement-' + key
+        # The group's own scheduler is what probes members: inline providers
+        # never get a provider health-check loop, so stripping url/interval
+        # here silently disabled every scheduled probe and left groups pinned
+        # to whatever they had selected.
         spec = owners.setdefault(owner, {'type': 'inline', 'payload': [], 'health-check': {
             'enable': True, 'url': url, 'expected-status': expected,
-            'interval': interval, 'lazy': True}})
+            'interval': interval, 'lazy': False}})
         known = {n['name'] for n in spec['payload']}
         spec['payload'].extend(copy.deepcopy(nodes[n]) for n in names if n not in known)
+        group['url'] = url
         group['expected-status'] = expected
-        for field in ('url', 'interval', 'lazy'):
-            group.pop(field, None)
+        group['interval'] = min(int(group.get('interval', interval)), int(interval))
+        group['lazy'] = False
         group.pop('proxies', None)
         group['use'] = [owner]
         if any('`' in n for n in names):
@@ -261,7 +266,9 @@ def configure_measurement(config: dict, capabilities: dict) -> None:
         if not isinstance(url, str) or not url:
             raise ValueError('native provider requires an explicit check URL')
         health['interval'] = max(interval, int(health.get('interval', interval)))
-        health['lazy'] = True
+        # Keep scheduled probing.  lazy skips idle members, so a dead node is
+        # only noticed after a client already got stuck on it.
+        health.setdefault('lazy', False)
         payload = spec.get('payload', [])
         if not payload:
             raise ValueError('native budget requires resolved provider payload')

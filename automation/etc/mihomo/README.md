@@ -3,9 +3,24 @@
 这里只放 `/etc/mihomo/config.yaml` 的**本地覆盖段**，以及它怎么被订阅管线保留的说明。
 节点、策略组、规则、内联 provider、管理密钥全部属于部署数据，不入库。
 
-`capabilities.yaml` 的 `stability.groups` 是覆盖层唯一接受的组调参入口（`type/url/interval/timeout/lazy/tolerance/max-failed-times/expected-status`），
-每次配置重新生成都会重新套用：真机对 `Auto` 用 `interval: 120`（默认 300s），让死节点被发现的时间从 5 分钟缩到 2 分钟；
-`Streaming`/`Social`/`Research + AI` 仍是 900s，因为它们切换会断当前连接。
+探测参数有唯一的生效位置，取决于是否打开原生计量：
+
+- **生产模式（`measurement.enabled: true` + 预编译核心）**：`mihomo-measurement-policy` 的
+  `configure_measurement()` 把所有 `url-test`/`fallback` 组的节点折进共享的 `measurement-<16hex>`
+  内联 provider，但**组自己保留 `url`/`expected-status`/`interval`**——探测由组内调度器逐节点执行，
+  内联 provider 的 `health-check` 只留作计量归属（它没有 provider 级探测循环，真机实测从不触发）。
+  组的 `interval` 由 `measurement.native_interval_seconds`（真机 250s）与 `stability.max_interval`
+  取小，**这就是全网的故障发现时间**。所有探测都要过预算侧准入，因此
+  `mihomo-measurement-budget` 必须能接住一次全量扫描（见其缓存与监听容量注释）。
+- **未开原生计量**：同一条代码路径把所有自动组降级成 `select`（不自动切换），并清掉组级健康字段。
+  所以「想要全自动切换」必须开原生计量并给每个节点族配 account，否则会失败关闭
+  （`native budget requires an unambiguous account`）。
+
+`stability.max_interval`（默认 250）是覆盖层对**仍保留组级探测**的配置的夹取上限，防止退回
+「钉在死节点上十几分钟」。不论哪种模式，`tools/check_mihomo_policy.py` 都会用合成订阅跑一遍覆盖层，
+断言每个自动组都被某个探测所有者覆盖、且间隔不超过上限（CI 每次执行）。
+`Research + AI` 始终保留 `https://api.openai.com/v1/models` + `expected-status: 401`，
+只把能过 OpenAI 的专用节点判为健康。
 
 ## 真机上的 config.yaml 从哪来
 

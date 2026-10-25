@@ -22,6 +22,7 @@ jobs:
         run: |
           python3 tools/validate_public.py
           python3 tools/check_overlay.py
+          python3 tools/check_mihomo_policy.py
           python3 tools/check_subscription_candidate.py
           python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
