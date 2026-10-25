@@ -1,201 +1,157 @@
-<img src="assets/readme/hero.svg" width="100%" alt="深色仪表盘：左侧标题「一个会自证的网关」与一次事故说明，右侧列出 TUN、nft、策略路由、出口四项真实状态与转发计数">
+<img src="assets/readme/hero.svg" width="100%" alt="深色仪表盘：左侧标题「一个会自证的网关」，右侧列出 TUN、nft、策略路由、出口四项真机状态与转发计数">
 
-双网口透明网关：上游路由器 → Raspberry Pi 5 → 交换机 / 桥接 AP → 下游设备。
-电脑和手机不装代理客户端；国内直连，海外流量由 TUN 接管，DNS 分层收口，显式节点拨号按账号计量预算。
+一台 Raspberry Pi 5 双/多网口透明网关的**部署镜像**：上游路由器 → rp5 → 主 LAN / VLAN20 试点 / WireGuard 对端。
+下游设备不装代理客户端；国内直连，海外与指定业务流量经 TUN 与 nftables 收口，DNS 三层分流，
+显式节点拨号先过本地预算准入；启动与常态门禁只认内核状态，不认进程存活。
+
+本仓库描述**这一台机器**（Debian 13 / arm64）的现状。换机器要改网段、接口名、VLAN 与订阅数据，
+它不是开箱即用的一键安装器。
 
 <p align="center">
-<a href="#一分钟读懂">一分钟读懂</a> ·
-<a href="#架构">架构</a> ·
-<a href="#安全网">安全网</a> ·
-<a href="#快速开始">快速开始</a> ·
-<a href="#验证与边界">验证状态</a> ·
-<a href="docs/README.md">RepoWiki</a>
+<a href="#30-秒看懂">30 秒看懂</a> ·
+<a href="#五层栈">五层栈</a> ·
+<a href="#单元表">单元表</a> ·
+<a href="#安装顺序">安装</a> ·
+<a href="#被删除的旧结构">旧结构</a> ·
+<a href="#边界">边界</a> ·
+<a href="docs/README.md">文档索引</a>
 </p>
 
-## 一分钟读懂
+## 30 秒看懂
 
-| 你关心的事 | 网关怎么处理 |
+| 你关心的事 | 这台机器的做法 |
 |---|---|
-| 国内站点与本地设备 | 直连规则，不经过代理，也不进预算 |
-| 海外站点 | TUN + `auto-redirect` 把流量送进 Mihomo，按业务分组选出口 |
-| DNS | dnsmasq → mosdns 分层：国内域名直连解析，其余返回 fake-IP，由代理内部再解析 |
-| 额度与限流 | 自编核心把每次显式节点拨号记进本地账本，按账号预算放行 |
-| 上线安全 | 启动门禁 + 浸泡 + 自动换回旧内核；异常推送到手机 |
-| 出事之后 | 一条命令看门禁状态、内核槽位与最近一次部署结果 |
+| 四个网段 | `wan0` 192.168.0.117/24（上游 DHCP）→ `lan0` 192.168.1.1/24（主 LAN）→ `proxy20` 192.168.20.1/24（`wan0` 上的 802.1Q VLAN 20，单台 PC 试点）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点） |
+| 三层 DNS | `dnsmasq`（`lan0`/`proxy20` 各一实例，:53）→ `mosdns`（127.0.0.1:5335，国内/海外分流）→ Mihomo DNS（127.0.0.1:1053，fake-IP 198.18.0.0/16） |
+| 自编译预算版核心 | `/usr/local/bin/mihomo` = `v1.19.28-budget-status-contract-v3`，`go1.27.2`，tags `no_tailscale, with_gvisor`；补丁与构建说明在 [`core/`](core/README.md) |
+| 预算外壳 | `mihomo-measurement-budget.service` 常驻并建 `/run/mihomo-measurements/budget.sock`；drop-in 用 `--run-core` 校验协议与状态后拉起核心。账本 `/var/lib/mihomo-measurements/quality-budget.json` 首次预扣时创建，协议 `mihomo-budget-v1`，每次显式节点检测预扣 2 次尝试 |
+| 门禁 | 启动前 `mihomo -t`；启动后 `mihomo-healthcheck --startup-check 20` 验 TUN、两张 nft 表、`redirect to` 规则、9000 规则并取一次 204；之后每分钟只读探针 + 每 5 分钟 204 出口抽样；连续 3 分钟红就自动重启核心（每小时至多一次）；状态写 `/run/mihomo-healthcheck/status`，只在迁移时告警 |
 
-> **2026-10-25 的真实事故**：内核漏编 `with_gvisor` 后，`mihomo -t` 通过、进程常驻，但 TUN 设备
-> 从未建立——国内直连照常工作，所有需要代理的流量静默黑洞约 7 分钟。当时的健康检查只判进程存活，
-> 因此没有留下任何告警。现在的部署路径不再相信"进程还活着"，只相信内核状态。
+2026-10-25 真实事故：换核漏编 `with_gvisor`，`mihomo -t` 通过、进程常驻，但 TUN 从未建立，
+国内直连照常、所有代理流量静默黑洞。当时的探针判定 nft 只看表是否存在，唯一的出口抽样是
+`curl --socks5-hostname` 走 mixed-port（`--socks5` 绕开 TUN/redirect 链路），所以 TUN 没起来时
+它照样返回 204、门禁照样绿。现在的门禁只相信内核状态。
 
-## 架构
+## 五层栈
 
-<img src="assets/readme/path.svg" width="100%" alt="一次连接的路径：客户端 → TUN 接管 → nftables → 规则与预算 → 出口；下方标出国内直连与网关自身两条旁路">
+| 层 | 组件 / 单元 | 端口与接口 | 真机证据 | 仓库文件 → 安装位置 |
+|---|---|---|---|---|
+| 入口 | `dnsmasq.service`、`dnsmasq-vlan-pilot.service` | `192.168.1.1:53`、`192.168.20.1:53`；DHCP 池 `.100–.199` | `ss -lntup` 两个 dnsmasq；`dnsmasq --test` 通过 | [`automation/etc/dnsmasq/`](automation/etc/dnsmasq/) → `/etc/dnsmasq.d/lan.conf`、`/etc/dnsmasq-vlan-pilot.conf`（`upstreams.conf` 仅在缺失时 seed） |
+| 分流解析 | `mosdns.service` | `127.0.0.1:5335`（API `127.0.0.1:9091`） | `mosdns` v5.3.4；规则集 `/etc/mosdns/rules/current/{proxy-list,direct-list,apple-cn,google-cn,geoip-cn}.txt` | [`automation/etc/mosdns/config.yaml`](automation/etc/mosdns/config.yaml) → `/etc/mosdns/config.yaml` |
+| 代理核心 | `mihomo.service`（`--run-core` 校验后拉起） | `192.168.1.1:7890` mixed、`192.168.1.1:9090` controller、`127.0.0.1:1053` DNS、`0.0.0.0:46225` redirect、TUN `198.18.0.1/30` | `mihomo -v` 版本串；`ip link` 有 `Mihomo`；`ip rule` 有 9000 | [`automation/systemd/mihomo.service`](automation/systemd/mihomo.service) + 6 个 drop-in；二进制来自 [`core/`](core/README.md) |
+| 数据面 | `nftables.service` 载入 `/etc/nftables.conf`；Mihomo 自建 `inet mihomo` | `ip rule` 9000–9010 → table 2022；`inet mihomo` prerouting；`inet rp_filter` + `ip rp_nat` | `nft list tables`、`ip rule show`；状态文件 `tun/redirect/filter/route` 四项 | 部署端文件 `/etc/nftables.conf`、`/etc/nftables.d/*.nft`（**不随仓库发布**）；结构见[架构文档](docs/architecture.zh-CN.md) |
+| 门禁告警 | `mihomo-healthcheck.timer`、`mihomo-watch.timer`、`mihomo-alert@.service`、`mihomo-measurement-budget.service` | — | `/run/mihomo-healthcheck/status`；`journalctl -u mihomo-healthcheck` | [`automation/sbin/`](automation/sbin/) → `/usr/local/sbin/`；[`automation/systemd/`](automation/systemd/) → `/etc/systemd/system/` |
 
-**DNS 分层**
+数据面一句话：`ip rule 9000` 把 `lan0`/`proxy20`/`wg-ucg-pilot` 的流量送进表 `2022`，
+`inet mihomo` 在 prerouting 先做白名单（核心自身、非内网、私网段直接 return），
+再把 DNS 查询 `dnat` 到 `198.18.0.2:53`、TCP 重定向到 `:46225`、UDP 交给 TUN。
+过滤由 `inet rp_filter`（input/forward 默认 drop）与 `ip rp_nat`（`192.168.1.0/24` 出 `wan0` 做 masquerade）完成。
 
-1. 客户端只认下联地址，`dnsmasq` 负责 DHCP 下发的 DNS 与少量静态主机名。
-2. `mosdns` 按域名分流：国内域名走 AliDNS / doh.pub 直连解析，其余转给 Mihomo 的 DNS。
-3. Mihomo 用 fake-IP `198.18.0.0/16` 返回占位地址；标为 real-IP 的域名（视频、游戏、以及
-   `localdomain` 这类本地后缀）返回真实地址，避免本地服务被卷进代理。
-4. 客户端拿着 fake-IP 发起连接，`auto-redirect` 把 TCP 重定向进核心，核心按规则选择出口后
-   在代理内部用真实域名重新解析。
+## 单元表
 
-生产部署里还有两条独立链路：一条专用下联给 NAS（自己的 dnsmasq 实例），一条 WireGuard 接口
-供控制端点对点接入；两者都通过 `tun.include-interface` 单独纳入透明代理，不混入主 LAN。
+**12 个 enabled（发布层）**
 
-**组件**
-
-| 层 | 组件 | 职责 |
+| 单元 | 作用 | 周期 |
 |---|---|---|
-| 入口 | `dnsmasq` | DHCP、下联 DNS、静态主机名；专用下联有独立实例 |
-| 解析 | `mosdns` | 国内/国外域名分流，双上游 |
-| 代理 | Mihomo（自编核心 + 预算补丁） | TUN 接管、规则选路、fake-IP、`mixed-port` 与控制器 |
-| 预算 | `mihomo-measurement-budget` | Unix socket 账本代理：请求校验、按账号扣积分、记录超额 |
-| 内核 | [`core/`](core/README.md) | 固定上游提交 + 预算补丁 + 可复现构建说明 |
-| 网络 | nftables + iproute2 | 转发白名单、NAT、策略路由、核心自建的重定向表 |
-| 安全网 | `mihomo-core-swap` · `deploy-v3.py` · `mihomo-healthcheck` | 双槽换核、部署门禁、只读内核探针 |
-| 告警 | `mihomo-alert` · `mihomo-watch` | ServerChan / Bark 推送、五类异常边沿触发 |
-| 观测 | `rp5-agent` | 汇总门禁状态、TUN 速率与账本余量，`/api/v1/status` 暴露 `gate` |
+| `mihomo.service` | 代理核心，`ExecStart` 被 drop-in 覆盖为预算 broker 的 `--run-core` | 常驻 |
+| `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
+| `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
+| `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
+| `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
+| `mosdns-healthcheck.timer` | 校验 5335 分流与 metrics | 开机 30s 后每 1 分钟 |
+| `mosdns-rules-update.timer` | 原子更新 MosDNS 规则数据 | 每天 04:20（抖动 30 分钟） |
+| `mosdns-binary-update.timer` | 官方稳定版 MosDNS 换核 | 每周日 05:10（抖动 1 小时） |
+| `dnsmasq.service` | `lan0` DHCP + DNS；启动前写入直连上游基线 | 常驻 |
+| `dnsmasq-vlan-pilot.service` | `proxy20` 试点 DHCP + DNS（租约 10 分钟） | 常驻 |
+| `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，Home Assistant UI 只对下游 LAN 开放 | 开机一次（oneshot） |
 
-## 安全网
+本机另有 2 个非发布层单元处于 enabled：`ikuai-wan-watch.service`（只读记录上游 WAN 抖动）、
+`rp5-agent.service`（`0.0.0.0:8799` 只读状态，供 T-Display-S3 监视器）。它们属于这台机器的
+本地附加物，不在上面的安装脚本里。
 
-<img src="assets/readme/gates.svg" width="100%" alt="上线依次判定：单元门禁、部署门禁、常态观测、换核回滚四步串联；任一步失败都沿下方支路回退并复验">
+其余 worker（`mihomo-healthcheck.service`、`mihomo-watch.service`、`mihomo-alert@.service`、
+`mihomo-download-quality.service` 等）是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，
+既不算 enabled 也不应 disable。
 
-| 关卡 | 检查什么 | 失败之后 |
-|---|---|---|
-| 单元门禁 | `ExecStartPost` 运行 `mihomo-healthcheck --startup-check`，确认 TUN 设备、两张 nft 表与策略路由都存在 | 这次启动直接判失败，不再被 systemd 的 `-` 前缀吞掉 |
-| 部署门禁 | 候选内核先浸泡 45 秒，再跑同一检查并读控制器连接表 | 恢复配置与单元，`mihomo-core-swap rollback` 换回旧内核，然后**再验一次** |
-| 常态观测 | 每分钟只读内核状态：设备、两张表、9000 规则、计数器；每 5 分钟一次经代理端口的 204 出口抽样 | 写 `/run/mihomo-healthcheck/status`，只在状态迁移时发一条告警 |
-| 进程/主机 | 单元失败、温度/降频、磁盘、内存、上联异常 | `OnFailure` 与 `mihomo-watch` 边沿触发推送，同一条消息有冷却去重 |
+**4 个休眠 disabled**（随仓库安装、保持关闭；2026-10-25 已清掉本机 2 个退役评分单元，真机与仓库一致）
+
+| 单元 | 原因 |
+|---|---|
+| `mihomo-download-quality.timer` | 质量采样脚本会写 `./providers/quality-*.yaml`，但配置没声明对应的 file provider，产物无人读取；开 timer 只烧采样带宽、不改选路 |
+| `mihomo-social-quality.timer` | 同上，仅 X 视频场景，`*:0/2` 每 2 分钟一轮 |
+| `mihomo-rules-update.timer` | 规则更新改由核心 `rule-providers`（file 型）与 MosDNS 更新承担 |
+| `mihomo-subscription-update.timer` | 订阅更新暂走手动/离线管线，避免无人值守换配置 |
+
+休眠不等于卸载：文件仍在 `/etc/systemd/system/`，`systemctl start` 可手动跑一次。
+
+## 仓库与真机的一致范围
+
+2026-10-25 对真机做了一次逐文件 `sha256sum` 对照，结论写在这里，免得以后靠猜：
+
+| 范围 | 文件 | 状态 |
+| --- | --- | --- |
+| 机制实现 | `automation/sbin/*`（22 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
+| 单元与 drop-in | `automation/systemd/**`（32 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
+| 数据与解析 | `automation/etc/mosdns/{config.yaml,rules/*}`、`automation/etc/dnsmasq-upstreams.{direct,mihomo,mosdns}`、`automation/policy/route-defaults.yaml`、`automation/etc/NetworkManager/dispatcher.d/90-wifi-management-routing` | **逐字节一致** |
+| 脱敏模板 | `automation/etc/dnsmasq/{lan.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实 `192.168.x` 地址、MAC 与主机名，**按设计不同** |
+| 站点态 | `automation/policy/capabilities.yaml` | 账号、`enabled` 开关与私有覆写只存在于真机 `/etc/mihomo/adaptive/`，仓库是脱敏模板 |
+| 站点态 | `automation/etc/mihomo/config.local.yaml` | 只是片段；真机 `/etc/mihomo/config.yaml` 是合并后的完整配置 |
+| 凭据 | `secrets/*`、`/etc/mihomo-alert.env`、`/etc/mihomo/reconcile-targets.conf` | 不发布、不入库 |
+
+`/etc/dnsmasq.d/README` 是 Debian 自带的说明文件，不属于本仓库。
+
+## 安装顺序
+
+仓库只发布“装成这台机器”的运行层，不含网络事务、订阅内容与凭据。从裸 Debian 13 起：
 
 ```sh
-sudo /usr/local/sbin/mihomo-healthcheck            # 现在的门禁结论（exit 1 = 代理链路不可用）
-sudo /usr/local/sbin/mihomo-healthcheck --egress   # 立即做一次出口抽样，不花预算积分
-sudo /usr/local/sbin/mihomo-core-swap status       # 内核槽位、运行中组件与校验和
-sudo cat /var/backups/mihomo-rollout-*/deploy-result.json   # 最近部署：post_start / post_soak / rollback_exercised
-sudo /usr/local/sbin/mihomo-alert --test           # 验证手机通道
-```
-
-内核换槽用 `mihomo-core-swap install <binary> <sha256>` 预置、`activate` 单次 `renameat2` 换入、
-`rollback` 换回；运行中的进程保持旧 inode，重启才真正切换，所以任何一步失败都不会留下半个内核。
-内核必须带 `with_gvisor`：安装器会拒绝 `-v` 不含该驱动的二进制，CI 也会在固定提交上实跑一次构建。
-
-## 快速开始
-
-**三条部署路径，按起点选一条：**
-
-| 你的起点 | 入口 | 私有配置位置 |
-|---|---|---|
-| 一台新 Linux 主机 | [`setup.sh`](setup.sh) | `/etc/mihomo-gateway/` |
-| 自己规划网络、分阶段上线 | [`tools/render.py`](tools/render.py) | `site.local.json` → 9 个私有文件 |
-| 维护已有的 Mihomo / MosDNS 网关 | [`automation/`](automation/README.zh-CN.md) | `/etc/mihomo`、`/etc/mosdns` 与部署 manifest |
-
-```sh
-# 一键入口：检测网口、规划网段、生成配置，切换前保存恢复点
-git clone https://github.com/ashllll/rpi5-mihomo-gateway-guide.git
-cd rpi5-mihomo-gateway-guide
-sudo sh setup.sh --dry-run    # 只打印计划，不下载、不安装、不切网络
-sudo sh setup.sh
-
-# 已有网关：只装运维层，再按需打开维护 timer
+# 1. 网络身份（手工一次性）：wan0 DHCP、lan0 静态 /24、proxy20 = wan0 上的 VLAN 20、
+#    wg-quick@wg-ucg-pilot，及 /etc/sysctl.d/99-router.conf
+sudo ip -br addr                      # 四个接口都要有地址
+# 2. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
+sudo nft -c -f /etc/nftables.conf
+# 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
 sudo automation/install.sh --dry-run
-sudo automation/install.sh
-sudo automation/install.sh --enable-timers
-
-# 自编内核（带预算补丁）走同一套能力门禁
-sudo python3 gateway/setup.py --core /path/to/mihomo --core-sha256 <sha256>
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 真机那 11 个单元
+# 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
+sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
+sudo cat /run/mihomo-healthcheck/status
 ```
 
-`gateway/setup.py` 会按架构校验发布资产的 SHA256，并拒绝 `-v` 不含 `with_gvisor` 的内核；
-本机若存在预算 drop-in，还会要求内核声明 `mihomo-budget-v1`，避免"装了预算、内核却不说协议"。
+细节与判定顺序见[部署文档](docs/deployment.zh-CN.md)；日常操作见[运维文档](docs/operations.zh-CN.md)。
 
-<details>
-<summary>系统要求与不自动处理的环境</summary>
+## 被删除的旧结构
 
-| 项目 | 支持范围 |
+这个仓库曾经同时维护“一键安装器 + 手动渲染器 + 运维层”三条产品线。它们与这台机器的现状不符，已删除：
+
+- `setup.sh`、`gateway/`：旧的一键安装器与默认值；网络事务由部署端手工完成，不再随仓库发布。
+- `web/`、`design-demos/`、根目录 `dir-*-hero.svg`：旧发布页与设计演示。
+- 旧的影子评分与自动应用脚本，以及 4 个 unit（2 个 service、2 个 timer）：已被原生 URL 检测 + 预算准入取代。
+- `assets/current-*.{mmd,svg}`：旧网段与旧 DNS 流程的 8 个过期生成物。
+
+保留 `assets/historical-automation-2026-10-11.*` 作为历史快照；现状以
+[`assets/network-topology.svg`](assets/network-topology.svg) 为准。旧调试档案保留在
+[docs/deployment-debugging-summary.zh-CN.md](docs/deployment-debugging-summary.zh-CN.md)，
+外部项目研究移到 [docs/research/](docs/research/)。
+
+## 边界
+
+| 有证据 | 不能由此推断 |
 |---|---|
-| 系统 | Linux、运行中的 systemd、Python 3.9+ |
-| 架构 | ARM64、ARMv7、x86-64；Mihomo 固定提交并校验 SHA256 |
-| 软件包管理 | apt-get、dnf、pacman、zypper |
-| 网口 | 按默认路由识别上联；唯一剩余独立以太网口作为下联；可用已连接 Wi-Fi 上联 |
-| 网络管理 | NetworkManager 或 systemd-networkd；只配置下联 |
-| 订阅 | Clash / Mihomo 节点 YAML、URI 列表、base64 URI 列表 |
-| 下游 | IPv4；dnsmasq → Mihomo DNS，TUN / auto-redirect 与 nftables NAT |
+| 2026-10-25 对真机 rp5 的只读取证（`ssh rp5`，86 个文件快照）、服务状态、端口、单元表 | 所有硬件组合、断电恢复与长期稳定性都已验收 |
+| 启动门禁 + 每分钟探针 + 5 分钟出口抽样 + 连红 3 分钟自愈重启 | 检测周期不等于瞬时可用；重启只治黑障，救不了节点或上游故障；连接切换会迁移已有 TCP/WebSocket 会话 |
+| 预算服务校验协议、账本与预扣 | 平台解锁、账号可用、节点吞吐或供应商允许下载 |
+| `nft -c -f` 通过 | 目标机之外的环境可用；本机 nftables 表是部署端文件，不是通用模板 |
 
-单网口旁路由、OpenWrt、容器、bridge/bond/VLAN、已有 VPN/TUN 与复杂防火墙需要手动整合。
-多默认路由时用 `--wan` / `--lan` 指定；检测到已有生产代理服务时先迁移。
-默认参数见 [`gateway/defaults.json`](gateway/defaults.json)，可用 `--defaults` 指定自己的文件。
-</details>
+可信 LAN 模型：`lan0` 入站整体放行是为了容纳动态透明代理端口，不做访客隔离。
+公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`，详见 [SECURITY.md](SECURITY.md)。
+本仓库不发布订阅地址、节点标签、controller secret、WireGuard 私钥与真实 MAC。
 
-## 验证与边界
-
-| 验证层 | 已有证据 | 不能由此推断 |
-|---|---|---|
-| 一键安装逻辑 | 34 项模拟、故障注入、重复安装与回滚检查 | 所有真实网卡与网络管理器组合都可用 |
-| 内核构建 | CI 在固定提交 + 补丁上实跑 `go build -tags "with_gvisor no_tailscale"`，并断言 `-v` 与预算协议 | 平台解锁、账号可用或节点吞吐 |
-| Linux 网络 | 隔离命名空间 e2e 验证 nftables / dnsmasq | 目标机真实 LAN、无线环境与重启恢复 |
-| 部署安全网 | 2026-10-25 负向演练：故意写坏 TUN 设备名 → `ROLLED_BACK`、`rollback_verified=true`、退出码 1 | 所有硬件故障都能被软件回滚覆盖 |
-| 真实客户端 | 需要关闭客户端本地 VPN/TUN 后按三层验收（本机 → 显式代理 → 真实 LAN） | 一次通过不等于长期零断连 |
+发布前自查：
 
 ```sh
 python3 tools/validate_public.py
-python3 tools/check_automation.py      # 需要 PyYAML
-python3 tools/check_stability.py
-python3 tools/check_setup.py
+python3 tools/check_publication_privacy.py
 ```
-
-[GitHub Actions](https://github.com/ashllll/rpi5-mihomo-gateway-guide/actions/workflows/validate.yml)
-在 push / PR 时运行完整回归，其中 `core-build` 任务负责证明"带 gVisor 的内核可以自动构建"。
-
-## 目录结构
-
-```text
-gateway/        一键安装器（检测、生成、快照、回滚、主机端看门狗）
-automation/     运维层：sbin 脚本、systemd 单元、env 模板、可选 drop-in、安装器
-core/           自编内核：固定提交、预算补丁、可复现构建说明
-tools/          离线校验器与渲染器（隐私、安装、稳定性、订阅、预算策略）
-docs/           RepoWiki：架构、部署、运维、ADR、验收与恢复
-assets/         拓扑、DNS、数据面与门禁图
-examples/       站点参数与清理后的示例配置
-```
-
-## 检查与恢复
-
-<details>
-<summary>先区分是哪一层故障</summary>
-
-| 现象 | 下一步 |
-|---|---|
-| 本机能上网，LAN 客户端不能 | 跑 `mihomo-healthcheck`；再看真实客户端路由与 `auto-redirect` 动态端口，别只测显式代理 |
-| `mihomo-healthcheck` 退出 1 | 读 `/run/mihomo-healthcheck/status`：`tun` / `redirect` / `filter` / `route` 哪个为 0 |
-| 进程活着但全断 | 查 `journalctl -u mihomo` 是否有 `gVisor is not included` 或 `Start TUN listening error` |
-| 订阅或规则更新失败 | 查有效期、GitHub 配额与下载校验；失败时应保留旧配置 |
-| 大文件仍然慢 | 核对节点下载许可与客户端分块；健康选择不会聚合单条连接的带宽 |
-| 手机没收到告警 | `mihomo-alert --test`；密钥只从 `/etc/mihomo-alert.env` 读取 |
-
-本方案以可信 LAN 为前提，LAN INPUT 整体放行以容纳动态透明代理端口；不是访客网络隔离方案。
-</details>
-
-## 文档导航
-
-**[进入 RepoWiki](docs/README.md)**：按入门、架构、源码配置、ADR、运维、安全与验收阅读。
-
-| 想做的事 | 继续阅读 |
-|---|---|
-| 完整知识库与设计决策 | [RepoWiki 首页](docs/README.md) · [ADR 索引](docs/adr/README.md) |
-| 安装、订阅格式、指定网口与回滚 | [一键配置指南](docs/one-click-setup.zh-CN.md) |
-| 拓扑、DNS 分层与当前状态 | [当前架构](docs/current-architecture.zh-CN.md) · [拓扑图](assets/current-topology.svg) · [DNS 图](assets/current-dns-flow.svg) |
-| 启动门禁、换核、告警与出口抽样 | [运维指南](docs/operations-current.zh-CN.md) |
-| 业务路由、预算与定时任务 | [自动化层](automation/README.zh-CN.md) · [原生选路与预算](docs/adaptive-selection.zh-CN.md) |
-| 手动配置与分阶段上线 | [部署指南](docs/deployment-current.zh-CN.md) · [站点参数模板](examples/site.example.json) |
-| 故障定位与真实 LAN 验收 | [运维指南](docs/operations-current.zh-CN.md) |
-| 内核补丁与构建 | [core/README](core/README.md) |
-| 校验、写盘与恢复系统 | [无节点恢复镜像](docs/recovery-image.zh-CN.md) |
-
-## 隐私与安全
-
-仓库只发布机制代码与示例参数，**不发布订阅地址、节点标签与凭据、controller token、
-Wi-Fi 密码或真实网络配置**。`site.local.json`、`rendered/`、运行配置、日志与备份必须留在部署端。
-提交前跑发布检查与 Gitleaks；误发布凭据先吊销，再走私密修复流程，见 [SECURITY.md](SECURITY.md)。
 
 [CC0 1.0 Universal](LICENSE) · 第三方产品名与商标归各自权利人所有。

@@ -1,0 +1,135 @@
+#!/bin/sh
+# Keep the LAN resolver answerable.
+#
+# The mihomo gate proves the proxied egress; it cannot see DNS death, and the
+# Debian dnsmasq unit used to have no restart policy at all.  This guard probes
+# the client-facing path (127.0.0.1:53) and the resolver behind it
+# (127.0.0.1:5335) so a hang is caught in about a minute, and it restarts only
+# the process that is actually silent:
+#
+#   dnsmasq silent, mosdns answering  -> restart dnsmasq
+#   both silent                       -> leave restarts to mosdns-healthcheck and
+#                                        say so, instead of restarting the wrong unit
+#   one of two domains missing        -> treat as degraded; restart after two
+#                                        consecutive rounds (~60s at 30s cadence)
+#
+# Restart policy: 20s between restarts, at most 3 inside 15 minutes.  When the
+# budget is spent the guard stops restarting, alerts once, and records
+# action=throttled instead of flapping the resolver every cycle.
+set -eu
+umask 027
+
+exec 8>/run/lock/mihomo-dnsmasq-guard.lock
+flock -n 8 || exit 0
+
+state_dir=/run/mihomo-dnsmasq-guard
+status_file=$state_dir/status
+install -d -m 755 "$state_dir"
+
+checks=2
+partial_limit=2
+restart_gap=20
+restart_budget=3
+restart_window=900
+alert=/usr/local/sbin/mihomo-alert
+domains="www.baidu.com www.qq.com"
+
+now=$(date +%s)
+
+answers() {
+  # $1 = port on 127.0.0.1; prints how many of the probe domains answered.
+  port=$1
+  got=0
+  for domain in $domains; do
+    if [ "$port" = 53 ]; then
+      out=$(dig +short +time=1 +tries=1 @127.0.0.1 "$domain" 2>/dev/null | head -n 1 || true)
+    else
+      out=$(dig +short +time=1 +tries=1 @127.0.0.1 -p "$port" "$domain" 2>/dev/null | head -n 1 || true)
+    fi
+    [ -n "$out" ] && got=$((got + 1))
+  done
+  printf '%s' "$got"
+}
+
+lan_answers=$(answers 53)
+resolver_answers=$(answers 5335)
+
+partial=0
+[ -f "$state_dir/partial" ] && partial=$(cat "$state_dir/partial" 2>/dev/null || echo 0)
+case "$partial" in *[!0-9]*|'') partial=0 ;; esac
+
+action=none
+reason=healthy
+
+if [ "$lan_answers" -eq "$checks" ] && [ "$resolver_answers" -eq "$checks" ]; then
+  printf '0\n' > "$state_dir/partial"
+elif [ "$lan_answers" -eq 0 ] && [ "$resolver_answers" -eq 0 ]; then
+  reason=resolver-chain-down
+  action=chain-down
+elif [ "$lan_answers" -eq 0 ]; then
+  reason=dnsmasq-silent
+  action=restart
+elif [ "$resolver_answers" -eq 0 ]; then
+  # dnsmasq answers but the resolver behind it does not: not dnsmasq's fault.
+  reason=resolver-silent
+  action=escalate-resolver
+else
+  reason=degraded
+  partial=$((partial + 1))
+  printf '%s\n' "$partial" > "$state_dir/partial"
+  if [ "$partial" -ge "$partial_limit" ]; then
+    action=restart
+  else
+    action=degraded-watch
+  fi
+fi
+
+prune_restarts() {
+  [ -f "$state_dir/restarts" ] || return 0
+  cutoff=$((now - restart_window))
+  awk -v cutoff="$cutoff" '$1 >= cutoff' "$state_dir/restarts" > "$state_dir/restarts.tmp" || true
+  mv "$state_dir/restarts.tmp" "$state_dir/restarts"
+}
+
+notify() {  # $1 = key, $2 = message
+  [ -x "$alert" ] && "$alert" --health "$2" "$1" >/dev/null 2>&1 || true
+}
+
+if [ "$action" = restart ]; then
+  prune_restarts
+  used=0
+  [ -f "$state_dir/restarts" ] && used=$(wc -l < "$state_dir/restarts" | tr -d ' ')
+  last=0
+  [ -f "$state_dir/last-restart" ] && last=$(cat "$state_dir/last-restart" 2>/dev/null || echo 0)
+  case "$last" in *[!0-9]*|'') last=0 ;; esac
+  if [ "$used" -ge "$restart_budget" ]; then
+    action=throttled
+    notify dnsmasq-guard-exhausted \
+      "dnsmasq guard: $used restarts in ${restart_window}s did not fix DNS (lan=$lan_answers/$checks resolver=$resolver_answers/$checks); no more restarts, needs a look"
+  elif [ $((now - last)) -lt "$restart_gap" ]; then
+    action=restart-gap
+  else
+    printf '%s\n' "$now" >> "$state_dir/restarts"
+    printf '%s\n' "$now" > "$state_dir/last-restart"
+    printf '0\n' > "$state_dir/partial"
+    if systemctl restart dnsmasq; then
+      notify dnsmasq-restart \
+        "dnsmasq restarted: $reason (lan=$lan_answers/$checks resolver=$resolver_answers/$checks, restart $((used + 1)) in ${restart_window}s)"
+    else
+      action=restart-failed
+      notify dnsmasq-guard-exhausted "dnsmasq guard: systemctl restart dnsmasq failed"
+    fi
+  fi
+elif [ "$action" = chain-down ]; then
+  notify dns-path-down \
+    "dnsmasq and mosdns both silent (0/$checks answers); mosdns-healthcheck owns the restart, guard is not touching dnsmasq"
+elif [ "$action" = escalate-resolver ]; then
+  notify resolver-silent \
+    "dnsmasq answers but mosdns:5335 does not (lan=$lan_answers/$checks resolver=0/$checks); not restarting dnsmasq"
+fi
+
+mode=stopped
+systemctl is-active --quiet dnsmasq && mode=running
+printf '%s mode=%s reason=%s lan=%s/%s resolver=%s/%s partial=%s action=%s\n' \
+  "$(date -Is)" "$mode" "$reason" "$lan_answers" "$checks" "$resolver_answers" "$checks" "$partial" "$action" > "$status_file"
+exit 0

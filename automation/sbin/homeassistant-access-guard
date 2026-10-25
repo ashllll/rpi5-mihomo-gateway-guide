@@ -1,8 +1,8 @@
 #!/bin/sh
 #
 # Reject upstream access to the Home Assistant UI (tcp/8123).  The guarded
-# interfaces default to the WAN port and the optional management radio; keep
-# them in sync with the interface names used in site.local.json.
+# interfaces default to the WAN port and the optional management radio;
+# WAN_INTERFACE and WLAN_INTERFACE in /etc/mihomo-automation.env override them.
 set -eu
 
 # Deployment parameters.  See automation/env/automation.env.example; copy it to

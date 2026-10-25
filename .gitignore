@@ -30,3 +30,10 @@ image-output/
 # files, and the CI archive check allows exactly one binary file).
 .codegraph/
 .lingshu/
+.ruff_cache/
+
+# Live box forensics: raw snapshot from the running rp5 (real LAN/ISP/
+# subscription data) and the design contract derived from it. Scratch inputs
+# only, never published.
+_live/
+_scratch/

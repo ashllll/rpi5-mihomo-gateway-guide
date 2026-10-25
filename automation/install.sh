@@ -2,18 +2,20 @@
 #
 # Install the published gateway automation layer.
 #
-# The layer is the executable half of this guide: systemd units for the Mihomo
-# and MosDNS stack plus the health-check, subscription-update and policy
-# scripts they run.  Deployment data (node labels, subscription links,
-# secrets, addresses) is never part of this repository; it stays in
-# /etc/mihomo-automation.env, /etc/mihomo/secrets and
-# /etc/mihomo/adaptive/capabilities.yaml.
+# The layer mirrors one gateway that is actually running: the scripts, units,
+# dnsmasq scopes and MosDNS config are the files from that box with site data
+# stripped out.  Twelve units are enabled - the state of the recorded gateway -
+# and everything else is installed but left off, so the tree and the runbook
+# describe a single system instead of two alternatives.
+#
+# Deployment data (node labels, subscription links, secrets, addresses) is never
+# part of this repository; it stays in /etc/mihomo-automation.env,
+# /etc/mihomo/secrets and /etc/mihomo/adaptive/capabilities.yaml.
 #
 # Usage:
-#   sudo automation/install.sh [--dry-run] [--enable-timers]
+#   sudo automation/install.sh [--dry-run]
 #
-#   --dry-run        print every action without touching the filesystem
-#   --enable-timers  also enable the seven default automation timers via systemctl
+#   --dry-run     print every action without touching the filesystem
 #
 # GATEWAY_ROOT prefixes every destination path and exists so the installer can
 # be exercised in a sandbox (`GATEWAY_ROOT=/tmp/root automation/install.sh`);
@@ -24,22 +26,20 @@
 set -eu
 
 GATEWAY_ROOT=${GATEWAY_ROOT:-/}
+root=${GATEWAY_ROOT%/}
 dry_run=false
-enable_timers=false
 
 usage() {
   cat <<'EOF'
-usage: install.sh [--dry-run] [--enable-timers]
+usage: install.sh [--dry-run]
 
-  --dry-run        print planned actions without changing the filesystem
-  --enable-timers  enable the seven supported maintenance timers
+  --dry-run  print planned actions without changing the filesystem
 EOF
 }
 
 for argument in "$@"; do
   case "$argument" in
     --dry-run) dry_run=true ;;
-    --enable-timers) enable_timers=true ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown option: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -65,7 +65,7 @@ install_file() {
   source=$1
   target=$2
   mode=$3
-  destination="${GATEWAY_ROOT%/}$target"
+  destination="$root$target"
   say "install -m $mode $(basename "$source") -> $target"
   if [ "$dry_run" = true ]; then
     return 0
@@ -80,7 +80,7 @@ install_default() {
   source=$1
   target=$2
   mode=$3
-  destination="${GATEWAY_ROOT%/}$target"
+  destination="$root$target"
   if [ -e "$destination" ]; then
     say "keep existing $target"
     return 0
@@ -94,10 +94,9 @@ if [ "$dry_run" = false ]; then
     /etc/mihomo/adaptive \
     /etc/mihomo/providers \
     /var/lib/mihomo-measurements \
-    /var/lib/mihomo-adaptive \
     /var/lib/mihomo-extra-subscriptions \
     /var/lib/mihomo-subscription-backups; do
-    install -d -m 0700 "${GATEWAY_ROOT%/}$directory"
+    install -d -m 0700 "$root$directory"
   done
 fi
 
@@ -110,9 +109,23 @@ find "$here/systemd" -type f -print | while IFS= read -r unit; do
   install_file "$unit" "/etc/systemd/system/$relative" 0644
 done
 
+# NetworkManager moves the management Wi-Fi source route.  0700 is what the
+# dispatcher API requires: root-owned and executable, no group/other write.
+if [ -d "$root/etc/NetworkManager" ]; then
+  install_file "$here/etc/NetworkManager/dispatcher.d/90-wifi-management-routing" \
+    /etc/NetworkManager/dispatcher.d/90-wifi-management-routing 0700
+else
+  say "skip etc/NetworkManager/dispatcher.d (NetworkManager is not installed)"
+fi
+
+# dnsmasq runs two independent scopes. lan.conf belongs in dnsmasq.d, the pilot
+# on its own config path, so the two DHCP servers cannot read each other's file.
 for baseline in "$here"/etc/dnsmasq-upstreams.*; do
   install_default "$baseline" "/etc/mihomo/$(basename "$baseline")" 0644
 done
+install_default "$here/etc/dnsmasq/lan.conf" /etc/dnsmasq.d/lan.conf 0644
+install_default "$here/etc/dnsmasq/vlan-pilot.conf" /etc/dnsmasq-vlan-pilot.conf 0644
+
 install_default "$here/etc/mosdns/config.yaml" /etc/mosdns/config.yaml 0644
 for rule in "$here"/etc/mosdns/rules/*; do
   install_default "$rule" "/etc/mosdns/rules/$(basename "$rule")" 0644
@@ -120,37 +133,49 @@ done
 
 install_default "$here/policy/capabilities.yaml" /etc/mihomo/adaptive/capabilities.yaml 0644
 install_default "$here/policy/route-defaults.yaml" /etc/mihomo/adaptive/route-defaults.yaml 0644
+install_default "$here/etc/mihomo/config.local.yaml" /etc/mihomo/config.local.yaml 0644
 
 install_default "$here/env/automation.env.example" /etc/mihomo-automation.env.example 0600
 install_default "$here/env/mihomo-alert.env.example" /etc/mihomo-alert.env.example 0600
 install_default "$here/env/reconcile-targets.conf.example" /etc/mihomo/reconcile-targets.conf.example 0644
 
 # dnsmasq reads /etc/dnsmasq-upstreams.conf, which mihomo-dns-mode rewrites on
-# every switch.  Seed it from the fail-safe direct baseline so a first boot has
-# working DNS even before the proxy stack starts.
-if [ ! -e "${GATEWAY_ROOT%/}/etc/dnsmasq-upstreams.conf" ]; then
-  say "seed /etc/dnsmasq-upstreams.conf from the direct baseline"
+# every switch.  Seed it only when none exists: the shipped file is the resolver
+# the recorded gateway serves (mosdns on :5335), and dnsmasq-safe-start puts the
+# direct baseline back at every boot before the proxy stack comes up.
+if [ ! -e "$root/etc/dnsmasq-upstreams.conf" ]; then
+  say "seed /etc/dnsmasq-upstreams.conf from etc/dnsmasq/upstreams.conf"
   if [ "$dry_run" = false ]; then
-    mkdir -p -- "${GATEWAY_ROOT%/}/etc"
-    install -m 0644 -- "$here/etc/dnsmasq-upstreams.direct" \
-      "${GATEWAY_ROOT%/}/etc/dnsmasq-upstreams.conf"
+    mkdir -p -- "$root/etc"
+    install -m 0644 -- "$here/etc/dnsmasq/upstreams.conf" "$root/etc/dnsmasq-upstreams.conf"
   fi
 fi
 
 if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]; then
   systemctl daemon-reload
-  if [ "$enable_timers" = true ]; then
-    for timer in \
+  # The twelve units the recorded gateway runs.  Enabling a timer does not start
+  # it, so a fresh host needs one explicit start after the private env files exist.
+  for unit in \
+      mihomo.service \
+      mihomo-measurement-budget.service \
       mihomo-healthcheck.timer \
       mihomo-watch.timer \
-      mihomo-subscription-update.timer \
-      mihomo-rules-update.timer \
+      mihomo-dnsmasq-guard.timer \
+      mosdns.service \
       mosdns-healthcheck.timer \
       mosdns-rules-update.timer \
-      mosdns-binary-update.timer; do
-      systemctl enable --now "$timer"
-    done
-  fi
+      mosdns-binary-update.timer \
+      dnsmasq-vlan-pilot.service \
+      dnsmasq.service \
+      homeassistant-access-guard.service; do
+    systemctl enable "$unit"
+  done
+  # These four ship for completeness but stay off: on the recorded gateway the
+  # rule, subscription and quality timers were disabled.  Disabling them is what
+  # makes an upgrade from the previous release idempotent.
+  for retired in mihomo-rules-update.timer mihomo-subscription-update.timer mihomo-download-quality.timer mihomo-social-quality.timer; do
+    systemctl disable "$retired" 2>/dev/null || true
+  done
 fi
 
 cat <<EOF
@@ -158,19 +183,21 @@ cat <<EOF
 Installed the automation layer from $here.
 
 Still required before the gateway is fully functional:
-  1. Generate the private runtime files and matching mihomo-automation.env
-     with tools/render.py and site.local.json.
-  2. Review the generated env's automation-only settings, then install it as
-     /etc/mihomo-automation.env (0600). For an existing env, merge shared site
-     parameters while preserving operator-specific settings.
-  3. Store the subscription link in /etc/mihomo/secrets/subscription.url and the
+  1. Copy the two env examples to their private paths and fill in the real
+     addresses, ports and interface names (the shipped values are placeholders):
+       install -m 0600 $here/env/automation.env.example /etc/mihomo-automation.env
+       install -m 0600 $here/env/mihomo-alert.env.example /etc/mihomo-alert.env
+  2. Store the subscription link in /etc/mihomo/secrets/subscription.url and the
      dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).
-  4. Fill the curated-pool node labels in the overlay section of
+  3. Fill the curated-pool node labels in the overlay section of
      /etc/mihomo/adaptive/capabilities.yaml, and write
      /etc/mihomo/reconcile-targets.conf for mihomo-reconcile-policy.
-  5. Review automation/optional/ separately; it is not installed automatically.
-EOF
+  4. Check the interface and address in /etc/dnsmasq.d/lan.conf: the shipped
+     file is a documentation placeholder that assumes lan0 and 192.0.2.1.
+  5. The NetworkManager dispatcher in etc/NetworkManager/dispatcher.d/ is
+     installed only where NetworkManager exists; it takes MANAGEMENT_INTERFACE
+     and MIHOMO_MANAGEMENT_CONNECTION_UUID from /etc/mihomo-automation.env.
 
-if [ "$enable_timers" = false ]; then
-  echo "  6. Enable the automation timers with: sudo automation/install.sh --enable-timers"
-fi
+Start the enabled units with: sudo systemctl start mihomo.service mosdns.service
+dnsmasq-vlan-pilot.service mihomo-measurement-budget.service
+EOF

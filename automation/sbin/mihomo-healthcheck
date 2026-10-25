@@ -5,14 +5,25 @@
 #
 #   (no args)          timer mode: restart a dead process, then observe
 #   --observe-only     same probe, no lock and no restart; exit 1 when failed
-#   --startup-check N  wait up to N seconds for TUN + hooks (default: 20, or 75
-#                      during the first 5 minutes after boot)
+#   --startup-check N  wait up to N seconds for TUN + hooks + egress through the
+#                      proxy (default: 20, or 75 in the first 5 minutes of boot)
 #   --egress           run the egress probe now and print the result
+#   --state            print the last recorded status line (exit 1 when it is red)
 #
 # The startup-check mode exists because `mihomo -t` validates the config but
 # cannot prove the TUN device or its nftables hooks exist: on 2026-10-25 a core
 # built without gVisor started cleanly, passed `-t`, and black-holed every
 # proxied connection while domestic traffic kept working.
+#
+# The redirect check looks for the rule, not just the table. `nft list table`
+# still succeeds when the chains are empty, and a partial reload leaves exactly
+# that: a green probe over a kernel that redirects nothing. The live
+# implementation only asked for the table, which is the blind spot fixed here.
+#
+# Startup mode also proves egress. The 2026-10-25 core had TUN, redirect and
+# route all in place and still black-holed every proxied connection, so kernel
+# state alone would have passed a gateway that routes nothing. One proxied
+# request inside the same window is the cheapest proof the whole chain works.
 set -eu
 umask 077
 state_dir=/run/mihomo-healthcheck
@@ -23,11 +34,12 @@ egress_every=${EGRESS_EVERY:-300}
 egress_url=${EGRESS_URL:-https://www.gstatic.com/generate_204}
 alert=/usr/local/sbin/mihomo-alert
 
-usage='usage: mihomo-healthcheck [--observe-only|--startup-check [seconds]|--egress]'
+usage='usage: mihomo-healthcheck [--observe-only|--startup-check [seconds]|--egress|--state]'
 case "${1:-}" in
   '') mode=timer; wait_s=0 ;;
   --observe-only) mode=observe; wait_s=0 ;;
   --egress) mode=egress; wait_s=0 ;;
+  --state) mode=state; wait_s=0 ;;
   --startup-check)
     mode=startup
     if [ "${2:-}" = '' ]; then
@@ -41,6 +53,15 @@ case "${1:-}" in
   *) echo "$usage" >&2; exit 2 ;;
 esac
 
+if [ "$mode" = state ]; then
+  # Read-only view of the last sample, for callers with no journal access. A red
+  # sample must not exit 0.
+  [ -s "$state_dir/status" ] || { echo 'no status recorded'; exit 1; }
+  cat "$state_dir/status"
+  case "$(cat "$state_dir/status")" in *business=failed*) exit 1 ;; esac
+  exit 0
+fi
+
 if [ "$mode" = timer ]; then
   # The subscription updater holds the same lock while it rewrites config and
   # restarts the core, so skipping one tick is correct.
@@ -53,7 +74,8 @@ started=$(systemctl show mihomo -p ActiveEnterTimestamp --value 2>/dev/null || t
 probe() {
   tun_ok=0; redirect_ok=0; filter_ok=0; route_ok=0
   ip link show Mihomo >/dev/null 2>&1 && tun_ok=1
-  nft list table inet mihomo >/dev/null 2>&1 && redirect_ok=1
+  # Require the redirect rule itself; the table outlives a partial reload.
+  nft list table inet mihomo 2>/dev/null | grep -q 'redirect to :' && redirect_ok=1
   nft list table inet rp_filter >/dev/null 2>&1 && filter_ok=1
   ip rule show 2>/dev/null | grep -q '^9000:' && route_ok=1
   cur=$(nft list table inet mihomo 2>/dev/null \
@@ -70,7 +92,16 @@ egress_probe() {
   [ "$code" = 204 ] && echo ok || echo fail
 }
 
+# mosdns owns :5335 (its config's listen address). mihomo has no ordering on it,
+# so right after a cold boot the resolver can still be binding; scanning the
+# listen table is the cheap way to tell "not up yet" from "up and broken".
+dns_ready() {
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -ltn 2>/dev/null | grep -qE '[:.]5335([[:space:]]|$)'
+}
+
 probe
+gate_fail=0
 if [ "$mode" = startup ]; then
   deadline=$(( $(date +%s) + wait_s ))
   while ! ok; do
@@ -78,6 +109,13 @@ if [ "$mode" = startup ]; then
     sleep 1
     probe
   done
+  if ok; then
+    while [ "$(date +%s)" -lt "$deadline" ] && ! dns_ready; do sleep 1; done
+    egress=$(egress_probe)
+    printf '%s\n' "$egress" >"$state_dir/egress"
+    printf '%s\n' "$(date +%s)" >"$state_dir/egress_at"
+    [ "$egress" = ok ] || gate_fail=1
+  fi
 fi
 
 if [ "$mode" = egress ]; then
@@ -123,6 +161,9 @@ elif ok; then
 else
   business=failed
 fi
+# Hooks in place are not a route: a startup probe that cannot fetch through the
+# proxy means the gateway is down, whatever the kernel tables say.
+[ "$gate_fail" = 1 ] && business=failed
 
 # Timer mode owns the egress sample; it costs one proxied request, no budget.
 egress=$(cat "$state_dir/egress" 2>/dev/null || echo unknown)
@@ -136,6 +177,28 @@ if [ "$mode" = timer ] && [ "$business" != failed ]; then
 fi
 # A failed egress sample after a healthy one is a gateway fault, not a slow probe.
 if [ "$business" = verified ] && [ "$egress" = fail ]; then business=degraded; fi
+
+# Self-heal a black-holed core: the process can stay up and the kernel tables can
+# exist while every proxied connection is dropped (the 2026-10-25 incident). Three
+# consecutive `failed` samples from the timer restart it, at most once an hour, so
+# a genuinely broken upstream cannot become a restart loop; the alert still fires.
+# Deliberately not `degraded`: one failed egress sample is cached for five minutes,
+# so restarting on it would turn a transient probe hiccup into dropped connections.
+if [ "$mode" = timer ] && [ "$mode_name" != process-inactive ]; then
+  case "$business" in
+    failed) streak=$(( $(cat "$state_dir/fail_streak" 2>/dev/null || echo 0) + 1 )) ;;
+    *) streak=0 ;;
+  esac
+  printf '%s\n' "$streak" >"$state_dir/fail_streak"
+  restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
+  if [ "$streak" -ge 3 ] && [ $(( $(date +%s) - restarted_at )) -ge 3600 ]; then
+    logger -t mihomo-healthcheck "gateway evidence red for ${streak} samples; restarting mihomo"
+    printf '%s\n' "$(date +%s)" >"$state_dir/restarted_at"
+    printf '0\n' >"$state_dir/fail_streak"
+    systemctl restart mihomo
+    action=restart
+  fi
+fi
 
 printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s fatal=%s\n' \
   "$(date -Is)" "$mode_name" "$action" "$business" "$tun_ok" "$redirect_ok" "$filter_ok" "$route_ok" \

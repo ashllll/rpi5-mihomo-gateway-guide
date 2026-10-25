@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodically probe the LAN resolver behind dnsmasq
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+RandomizedDelaySec=5s
+AccuracySec=5s
+Unit=mihomo-dnsmasq-guard.service
+
+[Install]
+WantedBy=timers.target

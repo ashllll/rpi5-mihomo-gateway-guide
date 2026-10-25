@@ -18,27 +18,20 @@ jobs:
         # The published policy scripts import yaml, so the checks need it too.
         run: python3 -c "import yaml" || python3 -m pip install --quiet --break-system-packages pyyaml
 
-      - name: Validate publication files, renderer, overlay and automation layer
+      - name: Validate publication files, overlay and automation layer
         run: |
           python3 tools/validate_public.py
-          python3 tools/check_render.py
           python3 tools/check_overlay.py
           python3 tools/check_subscription_candidate.py
           python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
           python3 tools/check_stability.py
+          python3 tools/check_dnsmasq_guard.py
           python3 tools/check_measurement_policy.py
           python3 tools/check_native_budget.py
           python3 tools/check_update_rules.py
           python3 tools/check_publication_privacy.py
           python3 tools/check_image.py
-          python3 tools/check_setup.py
-
-      - name: Validate one-click networking in an isolated Linux namespace
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y iproute2 nftables dnsmasq-base
-          sudo python3 tools/check_setup_linux.py
 
   core-build:
     # The shipped core must be built with the gVisor graph driver: a core without
@@ -65,8 +58,13 @@ jobs:
           test "$(git -C src rev-parse HEAD)" = "$commit"
           git -C src apply "$GITHUB_WORKSPACE/core/mihomo-v1.19.28-budget.patch"
           cd src
-          go build -trimpath -tags "with_gvisor no_tailscale" -o "$RUNNER_TEMP/core-host" .
+          go build -trimpath -tags "with_gvisor no_tailscale" \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
+            -o "$RUNNER_TEMP/core-host" .
           "$RUNNER_TEMP/core-host" -v | grep -q with_gvisor
+          "$RUNNER_TEMP/core-host" -v | grep -q 'v1.19.28-budget-status-contract-v3'
           test "$("$RUNNER_TEMP/core-host" -measurement-budget-protocol)" = mihomo-budget-v1
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-            go build -trimpath -tags "with_gvisor no_tailscale" -o "$RUNNER_TEMP/core-arm64" .
+            go build -trimpath -tags "with_gvisor no_tailscale" \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
+            -o "$RUNNER_TEMP/core-arm64" .

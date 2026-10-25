@@ -4,8 +4,6 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
-EnvironmentFile=-/etc/mihomo-automation.env
 Type=oneshot
 ExecStart=/usr/local/sbin/homeassistant-access-guard
 RemainAfterExit=yes

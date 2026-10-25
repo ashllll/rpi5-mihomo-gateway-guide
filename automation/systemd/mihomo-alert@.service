@@ -2,6 +2,6 @@
 Description=Send a Mihomo gateway failure alert
 
 [Service]
-Type=oneshot
 EnvironmentFile=-/etc/mihomo-alert.env
+Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-alert --unit-failed %i

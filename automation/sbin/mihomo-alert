@@ -28,6 +28,12 @@ case "${1:-}" in
   *) echo 'usage: mihomo-alert --test | --unit-failed <unit> | --health <message> <key>' >&2; exit 2 ;;
 esac
 
+# Health transitions can oscillate; ServerChan's free tier is a handful of
+# messages a day, so the generic health key gets its own, larger cooldown.
+case "$key" in
+  health) cooldown=${ALERT_COOLDOWN_HEALTH:-1800} ;;
+esac
+
 if [ "${1:-}" != --test ]; then
   last=$(awk -F'\t' -v k="$key" '$1==k{print $2}' "$state_file" 2>/dev/null | tail -1 || true)
   if [ -n "$last" ] && [ $(( $(date +%s) - last )) -lt "$cooldown" ]; then

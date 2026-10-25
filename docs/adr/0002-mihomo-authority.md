@@ -24,7 +24,9 @@ recorded: 2026-10-16
 
 ## 依据与验收
 
-[生成器](../../tools/render.py)、[一键 make_config](../../gateway/setup.py)、
-[MosDNS 配置](../../automation/etc/mosdns/config.yaml)、[架构参考](../current-architecture.zh-CN.md)、
-[Landscape 验收设计](../landscape-acceptance.zh-CN.md)。
+[MosDNS 配置](../../automation/etc/mosdns/config.yaml)、[架构](../architecture.zh-CN.md)、
+[Landscape 验收设计（外部研究）](../research/landscape-acceptance.zh-CN.md)、
+[真机部署记录](../deployment.zh-CN.md)。
 验收覆盖 DNS 映射、规则命中、动态入口及真实 TCP/UDP，而不是只检查进程 active。
+2026-10-25 复核：旧一键生成器与其默认值已删除，本 ADR 的“手动生成基线”改为
+本机实际状态机（`mihomo-dns-mode` 在 mosdns/mihomo/direct 间切换）。

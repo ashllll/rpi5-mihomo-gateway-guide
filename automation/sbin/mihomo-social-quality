@@ -1,0 +1,70 @@
+#!/usr/bin/python3
+"""X-only adapter for the bounded quality collector and file-provider refresh."""
+from __future__ import annotations
+
+import copy
+import os
+from pathlib import Path
+import runpy
+import sys
+import tempfile
+
+import yaml
+
+HELPER = Path(__file__).with_name("mihomo-download-quality")
+STATE = Path("/var/lib/mihomo-social-quality/scores.json")
+
+
+def quality_capabilities(manifest: dict) -> dict:
+    policy = copy.deepcopy(manifest.get("social_quality", {"enabled": False}))
+    if not isinstance(policy, dict):
+        raise ValueError("invalid social quality policy")
+    if policy.get("enabled") is True:
+        profiles = policy.get("profiles", {})
+        if policy.get("candidate_groups") != ["Social"] or set(profiles) != {"x-video"}:
+            raise ValueError("social quality must be scoped to Social")
+        if profiles["x-video"].get("group") != "Social" or profiles["x-video"].get("domains", []):
+            raise ValueError("social quality cannot rewrite other routing")
+    return {"roles": copy.deepcopy(manifest.get("roles", {})), "download_quality": policy}
+
+
+def configure(config: dict, manifest: dict) -> None:
+    adapted = quality_capabilities(manifest)
+    if adapted["download_quality"].get("enabled") is not True:
+        return
+    original = next((g for g in config.get("proxy-groups", []) if g.get("name") == "Social"), None)
+    if original is None:
+        raise ValueError("Social group is missing")
+    native = {key: original[key] for key in ("interval", "timeout", "max-failed-times", "lazy") if key in original}
+    helper = runpy.run_path(str(HELPER))
+    eligible, _ = helper["load_eligible"](config, adapted)
+    if not eligible:
+        raise ValueError("Social has no authorized quality candidates")
+    eligible = helper["unique"]([n for n in original.get("proxies", []) if n in eligible] + eligible)
+    helper["configure"](config, adapted, eligible)
+    next(g for g in config["proxy-groups"] if g["name"] == "Social").update(native)
+
+
+def main(argv: list[str] | None = None) -> int:
+    os.umask(0o077)
+    helper = runpy.run_path(str(HELPER))
+    args = helper["parse_args"](["--state", str(STATE), *(sys.argv[1:] if argv is None else argv)])
+    adapted = quality_capabilities(helper["load_yaml"](args.manifest))
+    # A private per-run adapter keeps roles/policy current after subscription
+    # updates without persisting a second, potentially stale capability file.
+    with tempfile.TemporaryDirectory(prefix="mihomo-social-quality-") as raw:
+        manifest = Path(raw) / "capabilities.yaml"
+        manifest.write_text(yaml.safe_dump(adapted, allow_unicode=True, sort_keys=False))
+        command = ["--config", str(args.config), "--manifest", str(manifest),
+                   "--state", str(args.state), "--mihomo", str(args.mihomo), "--lock-dir", str(args.lock_dir)]
+        if args.observe:
+            command.append("--observe")
+        return helper["main"](command)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        print(f"social quality: {type(error).__name__}", file=sys.stderr)
+        raise SystemExit(1)

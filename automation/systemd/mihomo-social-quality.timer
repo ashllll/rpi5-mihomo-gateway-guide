@@ -1,0 +1,11 @@
+[Unit]
+Description=Bounded X video quality rotation (opt-in)
+
+[Timer]
+OnCalendar=*:0/2
+RandomizedDelaySec=10s
+AccuracySec=5s
+Unit=mihomo-social-quality.service
+
+[Install]
+WantedBy=timers.target

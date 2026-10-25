@@ -1,0 +1,12 @@
+[Unit]
+Description=Bounded download quality rotation (opt-in)
+
+[Timer]
+OnCalendar=*:0/30
+RandomizedDelaySec=60s
+AccuracySec=10s
+Unit=mihomo-download-quality.service
+
+[Install]
+WantedBy=timers.target
+

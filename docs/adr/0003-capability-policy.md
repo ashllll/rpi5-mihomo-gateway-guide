@@ -21,12 +21,11 @@ recorded: 2026-10-16
 - 下载池仅包含本部署确认可下载的来源及明确授权的专用节点；标签匹配仍须人工核验。
 - AI 池的供应商限制靠部署清单和来源确认，不是自动商业能力发现。
 - overlay 会重定义受管组、把本地规则置前并过滤 `PROCESS-` 规则；“源订阅保留”不等于“运行规则完全不变”。迁移时须另核对进程级例外。
-- 一键入口只导入节点，另用 defaults 生成规则；它与本记录中的生产策略不是同一条实现链。
 - 同主机承载多种内容时，域名分流无法可靠识别全部下载，必须接受限制或明确客户端入口。
 
 ## 依据与验收
 
 [能力模板](../../automation/policy/capabilities.yaml)、[overlay](../../automation/sbin/mihomo-policy-overlay)、
-[候选生成](../../automation/sbin/mihomo-subscription-candidate)、[一键策略](../../gateway/defaults.json)、
+[候选生成](../../automation/sbin/mihomo-subscription-candidate)、
 [overlay 回归](../../tools/check_overlay.py)。
 验收检查候选池资格、规则顺序、源引用完整性及空池拒绝，不把合成测试当作供应商授权证明。

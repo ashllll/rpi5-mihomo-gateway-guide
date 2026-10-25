@@ -4,10 +4,12 @@
     "sha256": "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
   },
   "mihomo": {
-    "version": "v1.19.28",
-    "binary_sha256": "6c08572c7115549ea51cb0f94b0d9ff08073a901bf2347d908c7209c4621e96a",
+    "version": "v1.19.28-budget-status-contract-v3",
+    "binary_sha256": "34e79a49e181446a5665012a6e7135b9a90c5ba20d819daa2f7de3267620ccf5",
     "source_url": "https://codeload.github.com/MetaCubeX/mihomo/tar.gz/cbd11db1e13a75d8e680e0fe7742c95be4cba2be",
-    "license_url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.28/LICENSE"
+    "license_url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.28/LICENSE",
+    "protocol": "mihomo-budget-v1",
+    "patch": "core/mihomo-v1.19.28-budget.patch"
   },
   "mosdns": {
     "version": "v5.3.4",

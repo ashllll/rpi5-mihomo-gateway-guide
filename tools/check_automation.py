@@ -12,10 +12,18 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
+* the unit tree is the recorded gateway's tree: exactly the twelve units that
+  box enabled, four timers installed but left off, the startup evidence gate and
+  the budget wrapper drop-in, and none of the retired adaptive units,
+* the scripts and units are the recorded set (no adaptive selector), every
+  `/usr/local/sbin/...` a unit runs is shipped, and `mihomo -t` /
+  `--startup-check` / `--run-core` stay wired,
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, and changes nothing in --dry-run mode,
+  operator-edited deployment data, enables exactly the twelve recorded units and
+  disables exactly the four dormant timers, and changes nothing in --dry-run
+  mode,
 * the gateway address and ports really come from the environment at runtime.
 """
 
@@ -57,6 +65,60 @@ CJK_ALLOWED = {
     "sbin/mihomo-healthcheck",
     "sbin/mihomo-watch",
 }
+
+# The recorded gateway's installed set. Twelve units are enabled; four maintenance
+# timers ship for completeness but stay off. Keeping both lists literal is the
+# point: a unit silently moving between them is exactly the drift this checker
+# exists to catch.
+ENABLED_UNITS = (
+    "mihomo.service",
+    "mihomo-measurement-budget.service",
+    "mihomo-healthcheck.timer",
+    "mihomo-watch.timer",
+    "mihomo-dnsmasq-guard.timer",
+    "mosdns.service",
+    "mosdns-healthcheck.timer",
+    "mosdns-rules-update.timer",
+    "mosdns-binary-update.timer",
+    "dnsmasq-vlan-pilot.service",
+    "dnsmasq.service",
+    "homeassistant-access-guard.service",
+)
+DORMANT_TIMERS = (
+    "mihomo-rules-update.timer",
+    "mihomo-subscription-update.timer",
+    "mihomo-download-quality.timer",
+    "mihomo-social-quality.timer",
+)
+SBIN_SCRIPTS = (
+    "dnsmasq-safe-start",
+    "homeassistant-access-guard",
+    "mihomo-alert",
+    "mihomo-core-swap",
+    "mihomo-dns-mode",
+    "mihomo-download-quality",
+    "mihomo-dnsmasq-guard",
+    "mihomo-healthcheck",
+    "mihomo-measurement-budget",
+    "mihomo-measurement-policy",
+    "mihomo-policy-overlay",
+    "mihomo-reconcile-policy",
+    "mihomo-social-quality",
+    "mihomo-subscription-candidate",
+    "mihomo-update-rules",
+    "mihomo-update-subscription",
+    "mihomo-watch",
+    "mosdns-emergency-direct",
+    "mosdns-healthcheck",
+    "mosdns-resume-auto",
+    "mosdns-rollout-rollback",
+    "mosdns-update-binary",
+    "mosdns-update-rules",
+)
+# Retired by the recorded gateway: the adaptive selector, its timers and the
+# Home Assistant unit. The guard script itself survives because the operator
+# still runs it by hand.
+RETIRED_UNIT_MARKERS = ("mihomo-adaptive",)
 
 FAILURES: list[str] = []
 
@@ -236,9 +298,17 @@ def check_environment_documentation() -> None:
         invoked = {name for name in dependent if re.search(rf"\b{re.escape(name)}\b", without_unit_refs)}
         if not invoked:
             continue
-        required = {ALERT_ENV_FILE if name in ALERT_SCRIPTS
-                    else "EnvironmentFile=-/etc/mihomo-automation.env"
-                    for name in invoked}
+        required = set()
+        for name in invoked:
+            if name in ALERT_SCRIPTS:
+                required.add(ALERT_ENV_FILE)
+                continue
+            # Self-sourcing scripts (the guard and dnsmasq helpers) already load
+            # the deployment file, so the unit does not need to duplicate it.
+            script = AUTOMATION / "sbin" / name
+            if script.is_file() and "/etc/mihomo-automation.env" in read_source(script):
+                continue
+            required.add("EnvironmentFile=-/etc/mihomo-automation.env")
         for directive in sorted(required):
             if directive not in text:
                 fail(
@@ -262,6 +332,78 @@ def overlay_manifest_keys(source: str) -> set[str]:
             raise ValueError("overlay_labels requires a literal manifest key for coverage checks")
         keys.add(key.value)
     return keys
+
+
+def check_unit_layout() -> None:
+    """The shipped units and wiring must be the recorded gateway's."""
+    units = AUTOMATION / "systemd"
+    # dnsmasq.service comes from the distribution package; the repo ships its
+    # drop-in only. Everything else in the enabled set must be a shipped file.
+    for unit in ENABLED_UNITS + DORMANT_TIMERS:
+        if unit == "dnsmasq.service":
+            continue
+        check((units / unit).is_file(), f"automation/systemd is missing {unit}")
+
+    scripts = {
+        path.name
+        for path in (AUTOMATION / "sbin").iterdir()
+        if path.is_file() and not path.name.startswith(".")
+    }
+    check(
+        scripts == set(SBIN_SCRIPTS),
+        "automation/sbin differs from the recorded script set: "
+        f"missing={sorted(set(SBIN_SCRIPTS) - scripts)} extra={sorted(scripts - set(SBIN_SCRIPTS))}",
+    )
+
+    for path in sorted(units.rglob("*")):
+        if any(marker in path.name for marker in RETIRED_UNIT_MARKERS):
+            fail(f"systemd/{path.relative_to(units)} is retired and must not ship")
+
+    # Reverse assertion: no publishable file may reintroduce the retired
+    # selector or the Home Assistant unit. Ignored forensics trees stay out of
+    # the file list, so only what would be published is considered.
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=REPO, stdout=subprocess.PIPE, check=True,
+    ).stdout.decode()
+    for name in filter(None, listed.split("\0")):
+        if not (REPO / name).is_file():
+            continue
+        if any(marker in name for marker in RETIRED_UNIT_MARKERS):
+            fail(f"{name} is retired and must not be published")
+
+    # A unit that calls /usr/local/sbin/<name> must ship <name>: the installer
+    # copies sbin/, so a typo would otherwise enable a unit that cannot start.
+    for unit in sorted(units.rglob("*")):
+        if not unit.is_file():
+            continue
+        for name in re.findall(r"/usr/local/sbin/([A-Za-z0-9._-]+)", read_source(unit)):
+            check(
+                (AUTOMATION / "sbin" / name).is_file(),
+                f"systemd/{unit.relative_to(units)} runs sbin/{name}, which is not shipped",
+            )
+
+    service = read_source(units / "mihomo.service")
+    check(
+        "ExecStartPre=/usr/local/bin/mihomo -t -d /etc/mihomo" in service,
+        "mihomo.service lost the `mihomo -t` config gate",
+    )
+    probe = read_source(units / "mihomo.service.d" / "zz-startup-probe.conf")
+    check(
+        "--startup-check" in probe,
+        "mihomo.service no longer runs mihomo-healthcheck --startup-check",
+    )
+
+    budget = read_source(units / "mihomo.service.d" / "measurement-budget.conf")
+    check(
+        "ExecStart=/usr/local/sbin/mihomo-measurement-budget --run-core /usr/local/bin/mihomo"
+        in budget,
+        "measurement-budget.conf does not wrap the core with --run-core",
+    )
+    check(
+        re.search(r"^ExecStart=$", budget, re.MULTILINE) is not None,
+        "measurement-budget.conf must clear the parent ExecStart before replacing it",
+    )
 
 
 def check_manifest() -> None:
@@ -328,6 +470,12 @@ def expected_install_map(root: Path) -> set[Path]:
         elif parts[0] == "etc":
             if relative.name.startswith("dnsmasq-upstreams."):
                 expected.add(Path("etc/mihomo") / relative.name)
+            elif relative.as_posix() == "etc/dnsmasq/lan.conf":
+                expected.add(Path("etc/dnsmasq.d/lan.conf"))
+            elif relative.as_posix() == "etc/dnsmasq/vlan-pilot.conf":
+                expected.add(Path("etc/dnsmasq-vlan-pilot.conf"))
+            elif relative.as_posix() == "etc/dnsmasq/upstreams.conf":
+                expected.add(Path("etc/dnsmasq-upstreams.conf"))
             else:
                 expected.add(Path("etc") / Path(*parts[1:]))
         elif parts[0] == "policy":
@@ -343,6 +491,12 @@ def expected_install_map(root: Path) -> set[Path]:
             fail(f"install.sh has no destination rule for {relative}")
     expected.add(Path("etc/dnsmasq-upstreams.conf"))
     return expected
+
+
+def _loop_body(text: str, marker: str) -> str:
+    """Return the body of a `for ... in` unit list, one line or continued."""
+    match = re.search(re.escape(marker) + r"(.*?);\s*do", text, re.DOTALL)
+    return match.group(1) if match else ""
 
 
 def check_installer() -> None:
@@ -369,6 +523,9 @@ def check_installer() -> None:
         old_manifest_path = root / "etc/mihomo/adaptive/capabilities.yaml"
         old_manifest_path.parent.mkdir(parents=True)
         old_manifest_path.write_bytes(old_manifest)
+        # The NetworkManager dispatcher is installed only where NetworkManager
+        # exists; pre-build that directory so the sandbox exercises the install.
+        (root / "etc/NetworkManager").mkdir(parents=True, exist_ok=True)
         # A failing systemctl stub proves the sandbox run never touches systemd.
         stub_dir = base / "bin"
         stub_dir.mkdir()
@@ -412,10 +569,17 @@ def check_installer() -> None:
                     not path.stat().st_mode & stat.S_IXUSR,
                     f"{path.relative_to(root)} must not be executable",
                 )
+        dispatcher = root / "etc/NetworkManager/dispatcher.d/90-wifi-management-routing"
+        check(dispatcher.is_file(), "install.sh did not install the NetworkManager dispatcher")
+        if dispatcher.is_file():
+            check(
+                dispatcher.stat().st_mode & 0o777 == 0o700,
+                "the NetworkManager dispatcher must be 0700",
+            )
         conf = root / "etc/dnsmasq-upstreams.conf"
         check(conf.is_file(), "install.sh did not seed /etc/dnsmasq-upstreams.conf")
         check(
-            conf.read_bytes() == (AUTOMATION / "etc" / "dnsmasq-upstreams.direct").read_bytes(),
+            conf.read_bytes() == (AUTOMATION / "etc" / "dnsmasq" / "upstreams.conf").read_bytes(),
             "the seeded dnsmasq upstream file is not the direct baseline",
         )
         for retired in (root / "var/lib/mihomo-download-quality",
@@ -433,12 +597,37 @@ def check_installer() -> None:
               "route-defaults.yaml must be installed with mode 0644")
 
         installer_text = installer.read_text(encoding="utf-8")
-        enabled_timer_names = re.findall(r"^      ([a-z0-9-]+\.timer)", installer_text, re.MULTILINE)
-        check(len(enabled_timer_names) == 7, f"installer default timer set has {len(enabled_timer_names)} entries")
-        check("mihomo-watch.timer" in enabled_timer_names,
-              "installer does not enable the gateway anomaly watchdog")
-        check(not any("adaptive-score" in name or "quality" in name for name in enabled_timer_names),
-              "installer still enables a retired selection timer")
+        enabled = set(
+            re.findall(
+                r"([a-z0-9@._-]+\.(?:service|timer))",
+                _loop_body(installer_text, "for unit in"),
+            )
+        )
+        check(
+            enabled == set(ENABLED_UNITS),
+            f"installer enables {sorted(enabled)}, expected the recorded twelve {sorted(ENABLED_UNITS)}",
+        )
+        dormant = set(
+            re.findall(
+                r"([a-z0-9@._-]+\.timer)",
+                _loop_body(installer_text, "for retired in"),
+            )
+        )
+        check(
+            dormant == set(DORMANT_TIMERS),
+            f"installer disables {sorted(dormant)}, expected the dormant four {sorted(DORMANT_TIMERS)}",
+        )
+        for unit in ENABLED_UNITS + DORMANT_TIMERS:
+            if unit == "dnsmasq.service":
+                continue
+            check(
+                (root / "etc/systemd/system" / unit).is_file(),
+                f"installer did not install {unit}",
+            )
+        check(
+            not any("adaptive" in unit for unit in enabled | dormant),
+            "installer still manages a retired adaptive unit",
+        )
 
         # Deployment data the operator already edited must survive a re-install.
         manifest.write_text("# edited locally\n", encoding="utf-8")
@@ -587,6 +776,7 @@ def main() -> int:
     check_node_labels()
     check_forbidden()
     check_environment_documentation()
+    check_unit_layout()
     check_manifest()
     check_installer()
     check_runtime_parameters()

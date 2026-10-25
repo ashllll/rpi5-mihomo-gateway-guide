@@ -8,7 +8,8 @@ recorded: 2026-10-16
 [ADR 索引](README.md) · [Wiki 首页](../README.md)
 
 生产参考曾出现固定端口白名单漏掉 auto-redirect 动态监听的故障：本机和显式代理可用，LAN 仍断网。
-手动生成器因此采用可信 LAN INPUT 放行，并只替换自有表，保留 Mihomo 自动管理的规则。
+部署端防火墙因此采用可信 LAN INPUT 放行，并只替换自有表（`destroy table` 而非 `flush ruleset`），
+保留 Mihomo 自动管理的规则。
 这是对可信内网的取舍，不是通用安全加固模板。
 
 ## 替代方案
@@ -19,13 +20,13 @@ recorded: 2026-10-16
 ## 后果
 
 - LAN 可访问监听在 LAN 或通配地址上的服务，controller secret 和服务绑定仍然重要。
-- 手动模板的 WAN 侧按配置的管理网段允许 SSH；一键入口不是同一套 WAN 过滤策略，须另核对。
+- WAN 侧按管理网段（192.168.0.0/24）允许 SSH 与 8799；不开放公网管理。
 - 不自动建立公网映射或单客户端地址白名单。
 - 生成器不修改 sshd；密码登录是部署选择，本部署要求保留可用性。
 - IPv6、容器链和主机服务暴露仍需现场审查；此 ADR 不宣称它们全部被隔离。
 
 ## 依据与验收
 
-[render 防火墙](../../tools/render.py)、[动态端口事件](../operations-current.zh-CN.md)、
-[安全政策](../../SECURITY.md)、[生成器回归](../../tools/check_render.py)。
+[部署端防火墙记录](../deployment.zh-CN.md)、[暴露面与红线](../../SECURITY.md)、
+[运维：故障对照](../operations.zh-CN.md)。
 验收必须包含真实 LAN、核心动态端口重建及上游管理访问；不把静态语法检查当作隔离测试。

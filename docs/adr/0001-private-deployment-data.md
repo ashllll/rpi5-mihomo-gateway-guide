@@ -18,14 +18,15 @@ recorded: 2026-10-16
 
 ## 后果
 
-- renderer 生成新 secret，拒绝覆盖已有输出；候选本身仍是私密数据。
+- 部署端生成器生成新 secret 时拒绝覆盖已有输出；候选本身仍是私密数据。
+  （生成器于 2026-10-25 移出仓库，订阅与凭据只存在部署端。）
 - automation 安装器覆盖机制脚本/单元，已有部署数据保留；配置升级需要人工合并。
 - `.gitignore` 不是秘密扫描，也不能移除已经进入历史的凭据。
 - 不发布个人备份、日志、镜像和包含凭据的产物；提交前扫描工作区及历史。
 
 ## 依据与验收
 
-[renderer](../../tools/render.py)、[安装器](../../automation/install.sh)、
-[忽略规则](../../.gitignore)、[安全政策](../../SECURITY.md)、
-[发布验证](../../tools/validate_public.py)、[隐私回归](../../tools/check_publication_privacy.py)。
+[安装器](../../automation/install.sh)、[忽略规则](../../.gitignore)、
+[安全政策](../../SECURITY.md)、[发布验证](../../tools/validate_public.py)、
+[隐私回归](../../tools/check_publication_privacy.py)。
 验收应证明生成隔离、既有部署数据不被覆盖、公开树及历史通过脱敏扫描；不推断所有二进制已安全。
