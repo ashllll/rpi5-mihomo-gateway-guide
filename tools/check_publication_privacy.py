@@ -40,7 +40,7 @@ def main():
     assert matching_labels(common['private user path'], ARCHIVE_PATTERNS)
     assert set(ARCHIVE_PATHS) == {
         'README.md', 'SECURITY.md', 'docs/deployment-debugging-summary.zh-CN.md',
-        'assets/network-topology.svg', 'web/index.html',
+        'assets/network-topology.svg',
     }
     for patterns in (PUBLIC_PATTERNS, AUTOMATION_PATTERNS, NODE_PATTERNS, ARCHIVE_PATTERNS):
         assert not matching_labels('https://example.invalid/template\n10.77.0.1', patterns)

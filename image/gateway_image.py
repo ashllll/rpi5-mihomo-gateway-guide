@@ -42,6 +42,18 @@ def digest(path):
     return checksum.hexdigest()
 
 
+def verify_core(path, expected):
+    """Accept only the pinned budget core: version string, tags and protocol."""
+    version = subprocess.run([str(path), "-v"], capture_output=True, text=True, check=False)
+    if (version.returncode or expected["version"] not in version.stdout
+            or "with_gvisor" not in version.stdout or "no_tailscale" not in version.stdout):
+        raise ValueError("mihomo: unexpected build version or missing build tags")
+    protocol = subprocess.run([str(path), "-measurement-budget-protocol"],
+                              capture_output=True, text=True, check=False)
+    if protocol.returncode or protocol.stdout.strip() != expected["protocol"]:
+        raise ValueError("mihomo: measurement budget protocol missing")
+
+
 def write(path, content, mode=0o644):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +135,8 @@ def install_packages(root):
             stack.enter_context(mounted("proc", root / "proc", "-t", "proc", "-o", "ro,nosuid,nodev,noexec"))
             chroot(root, "apt-get", "-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=30", "update")
             chroot(root, "apt-get", "-y", "--no-install-recommends", "install",
-                   "python3-yaml", "nftables", "dnsmasq", "curl", "rsync", "dnsutils")
+                   "python3-yaml", "nftables", "dnsmasq", "curl", "rsync", "dnsutils",
+                   "wireguard-tools")
             chroot(root, "apt-get", "clean")
     finally:
         resolver.unlink(missing_ok=True)
@@ -244,6 +257,7 @@ def build(args):
                                  ("mosdns", args.mosdns, sources["mosdns"]["binary_sha256"])):
         if not path.is_file() or digest(path) != expected:
             raise ValueError(f"{name}: input checksum mismatch")
+    verify_core(args.mihomo, sources["mihomo"])
     size = args.size_mib * MIB
     disk_id = secrets.randbits(32)
     layout = mbr(size, disk_id)

@@ -6,11 +6,11 @@
   <text x="64" y="92" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#8B9A8D">rpi5-mihomo-gateway / Raspberry Pi 5</text>
   <text x="64" y="176" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="58" font-weight="600" fill="#EEF2EC">一个会自证的网关</text>
   <text x="64" y="242" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="25" fill="#A7B3A7">四件事同时成立，才算上线成功。</text>
-  <text x="64" y="280" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="25" fill="#A7B3A7">失败自动换回上一颗内核，并推送原因。</text>
+  <text x="64" y="280" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="25" fill="#A7B3A7">门禁失败会告警，换核回滚由人执行。</text>
   <line x1="64" y1="322" x2="248" y2="322" stroke="#242C26" stroke-width="2"/>
-  <text x="64" y="360" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">10-25 换核漏编 gVisor：7 分钟无告警。</text>
-  <text x="64" y="440" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">门禁与回滚，见「安全网」</text>
-  <text x="64" y="390" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">当时的巡检只判进程存活。</text>
+  <text x="64" y="360" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">10-25 换核漏编 gVisor：代理流量静默黑洞。</text>
+  <text x="64" y="440" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">门禁与回滚，见「30 秒看懂」</text>
+  <text x="64" y="390" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">出口抽样走 mixed-port，绕开 TUN。</text>
   <rect x="648" y="64" width="488" height="432" fill="#151A17" stroke="#2A332B"/>
   <text x="676" y="118" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">当前状态</text>
   <text x="676" y="184" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="48" font-weight="600" fill="#CBF16D">已验证</text>

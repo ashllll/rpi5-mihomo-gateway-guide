@@ -1,0 +1,24 @@
+[Unit]
+Description=Probe the LAN resolver and restart dnsmasq when it stops answering
+Documentation=file:///usr/local/share/doc/mihomo-gateway/README.md
+After=dnsmasq.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-dnsmasq-guard
+RuntimeDirectory=mihomo-dnsmasq-guard
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+Nice=10
+IOSchedulingClass=idle
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/run/lock
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true

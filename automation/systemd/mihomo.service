@@ -4,6 +4,7 @@ Wants=network-online.target
 After=network-online.target NetworkManager.service nftables.service dnsmasq.service
 
 [Service]
+EnvironmentFile=-/etc/mihomo-automation.env
 Type=simple
 LimitNPROC=500
 LimitNOFILE=1000000

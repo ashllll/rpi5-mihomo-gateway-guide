@@ -1,0 +1,1531 @@
+#!/usr/bin/python3
+
+"""Measure bounded download samples and refresh opt-in file providers."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import fcntl
+import hashlib
+import ipaddress
+import json
+import math
+import os
+import re
+import runpy
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path, PurePosixPath
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, urljoin, urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+import yaml
+
+
+CONFIG_DEFAULT = Path("/etc/mihomo/config.yaml")
+MANIFEST_DEFAULT = Path(
+    os.environ.get("MIHOMO_CAPABILITIES", "/etc/mihomo/adaptive/capabilities.yaml")
+)
+MIHOMO_DEFAULT = Path("/usr/local/bin/mihomo")
+STATE_DEFAULT = Path("/var/lib/mihomo-download-quality/scores.json")
+LOCK_DIR_DEFAULT = Path("/run/lock")
+OWN_LOCK_NAME = "mihomo-download-quality.lock"
+MAINTENANCE_LOCK_NAME = "mihomo-maintenance.lock"
+MAX_SAMPLE_BYTES = 262144
+MAX_SAMPLES_PER_PROFILE = 3
+MAX_PROFILES = 3
+MAX_TIMEOUT_SECONDS = 10
+MAX_CONCURRENCY = 2
+MAX_REDIRECTS = 5
+CYCLE_TIMEOUT_SECONDS = 120
+DEFAULT_TTL_SECONDS = 3600
+DEFAULT_IMPROVEMENT_RATIO = 1.5
+PROFILE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+DOMAIN_NAME = re.compile(
+    r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$"
+)
+
+
+class NoAutomaticRedirects(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
+def canonical_json(value: object) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, ensure_ascii=True, separators=(",", ":")
+    ).encode("ascii")
+
+
+def node_fingerprint(node: dict) -> str:
+    return hashlib.sha256(canonical_json(node)).hexdigest()
+
+
+def unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(items))
+
+
+def candidate_definitions(config: dict, policy: dict) -> dict[str, dict]:
+    by_name = {
+        item.get("name"): item
+        for item in config.get("proxies", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if "candidate_groups" in policy:
+        for provider in config.get("proxy-providers", {}).values():
+            if isinstance(provider, dict):
+                for node in provider.get("payload", []):
+                    if isinstance(node, dict) and isinstance(node.get("name"), str):
+                        by_name.setdefault(node["name"], node)
+    return by_name
+
+
+def candidate_scope(config: dict, policy: dict, definitions: dict) -> list[str] | None:
+    if "candidate_groups" not in policy:
+        return None
+    selected = policy["candidate_groups"]
+    if not isinstance(selected, list) or any(not isinstance(n, str) for n in selected):
+        raise ValueError("invalid candidate groups")
+    groups = {g["name"]: g for g in config.get("proxy-groups", []) if isinstance(g, dict) and "name" in g}
+    if not selected or any(name not in groups for name in selected):
+        return []
+    pending = list(selected)
+    seen = set()
+    names = []
+    providers = config.get("proxy-providers", {})
+    while pending:
+        name = pending.pop(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in definitions:
+            names.append(name)
+        elif name in groups:
+            group = groups[name]
+            pending.extend(group.get("proxies", []))
+            for provider_name in group.get("use", []):
+                provider = providers.get(provider_name, {})
+                pending.extend(n["name"] for n in provider.get("payload", [])
+                               if isinstance(n, dict) and isinstance(n.get("name"), str))
+    return names
+
+
+def ordered_node_defs(config: dict, eligible_names: list[str], policy: dict | None = None) -> list[dict]:
+    policy = policy or {}
+    by_name = candidate_definitions(config, policy)
+    scope = candidate_scope(config, policy, by_name)
+    return [
+        copy.deepcopy(by_name[name])
+        for name in unique(eligible_names)
+        if name in by_name and (scope is None or name in scope)
+    ]
+
+
+def eligible_hash(node_defs: list[dict]) -> str:
+    canonical = sorted(
+        (copy.deepcopy(item) for item in node_defs),
+        key=lambda item: str(item.get("name", "")),
+    )
+    return hashlib.sha256(canonical_json(canonical)).hexdigest()[:16]
+
+
+def provider_relative_path(profile_id: str, node_defs: list[dict]) -> str:
+    return f"./providers/quality-{profile_id}-{eligible_hash(node_defs)}.yaml"
+
+
+def provider_file_bytes(node_defs: list[dict]) -> bytes:
+    return yaml.safe_dump(
+        {"proxies": node_defs},
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+        width=4096,
+    ).encode("utf-8")
+
+
+def _validate_domain_list(domains: object) -> list[str]:
+    if not isinstance(domains, list):
+        raise ValueError("invalid download-quality domains")
+    result = []
+    for domain in domains:
+        if not isinstance(domain, str) or not DOMAIN_NAME.fullmatch(domain):
+            raise ValueError("invalid download-quality domain")
+        result.append(domain)
+    return unique(result)
+
+
+def _profile_settings(policy: dict) -> tuple[int, int, int, int, float, dict]:
+    try:
+        sample_bytes = int(policy.get("sample_bytes", MAX_SAMPLE_BYTES))
+        sample_limit = int(policy.get("sample_limit", MAX_SAMPLES_PER_PROFILE))
+        timeout = int(policy.get("timeout_seconds", MAX_TIMEOUT_SECONDS))
+        ttl = int(policy.get("state_ttl_seconds", DEFAULT_TTL_SECONDS))
+        ratio = float(policy.get("improvement_ratio", DEFAULT_IMPROVEMENT_RATIO))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("invalid download-quality limits") from None
+    if sample_bytes <= 0 or sample_limit <= 0 or timeout <= 0 or ttl <= 0:
+        raise ValueError("invalid download-quality limits")
+    if not math.isfinite(ratio) or ratio < 1:
+        raise ValueError("invalid download-quality improvement ratio")
+    profiles = policy.get("profiles", {})
+    if not isinstance(profiles, dict) or len(profiles) > MAX_PROFILES:
+        raise ValueError("invalid download-quality profiles")
+    return (
+        min(sample_bytes, MAX_SAMPLE_BYTES),
+        min(sample_limit, MAX_SAMPLES_PER_PROFILE),
+        min(timeout, MAX_TIMEOUT_SECONDS),
+        ttl,
+        ratio,
+        profiles,
+    )
+
+
+def configure(config: dict, capabilities: dict, eligible_names: list[str]) -> None:
+    """Add opt-in file providers and exact-domain routing to the in-memory config."""
+    if not isinstance(capabilities, dict):
+        return
+    policy = capabilities.get("download_quality")
+    if not isinstance(policy, dict) or policy.get("enabled") is not True:
+        return
+
+    _, _, _, _, _, profiles = _profile_settings(policy)
+    node_defs = ordered_node_defs(config, eligible_names, policy)
+    definitions = {node["name"]: node for node in node_defs}
+    allowed = set(definitions)
+    node_defs = [
+        node for node in node_defs
+        if dependency_closure(node["name"], definitions, allowed) is not None
+    ]
+    if not node_defs:
+        return
+    health_interval = int(policy.get("health_interval_seconds", 300))
+    if not 60 <= health_interval <= 3600:
+        raise ValueError("invalid download-quality health interval")
+    providers = config.get("proxy-providers")
+    if providers is None:
+        providers = {}
+        config["proxy-providers"] = providers
+    if not isinstance(providers, dict):
+        raise ValueError("invalid proxy-provider mapping")
+    groups = config.get("proxy-groups")
+    if groups is None:
+        groups = []
+        config["proxy-groups"] = groups
+    if not isinstance(groups, list):
+        raise ValueError("invalid proxy-group list")
+    rules = config.get("rules")
+    if rules is None:
+        rules = []
+        config["rules"] = rules
+    if not isinstance(rules, list) or any(not isinstance(rule, str) for rule in rules):
+        raise ValueError("invalid rule list")
+
+    additions = []
+    for profile_id, profile in profiles.items():
+        if not isinstance(profile_id, str) or not PROFILE_ID.fullmatch(profile_id):
+            raise ValueError("invalid download-quality profile id")
+        if not isinstance(profile, dict):
+            raise ValueError("invalid download-quality profile")
+        group_name = profile.get("group")
+        sample_url = profile.get("sample_url")
+        health_url = profile.get("health_url", sample_url)
+        health_expected = profile.get("health_expected", "200-399")
+        git_smart_http = profile.get("git_smart_http", False)
+        seed_groups = profile.get("seed_groups", [])
+        seed_nodes = profile.get("seed_nodes", [])
+        expected_content_type = profile.get("expected_content_type")
+        if not isinstance(seed_nodes, list) or any(not isinstance(n, str) for n in seed_nodes):
+            raise ValueError("invalid seed nodes")
+        if expected_content_type is not None and (
+            not isinstance(expected_content_type, str)
+            or not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", expected_content_type)
+            or git_smart_http
+        ):
+            raise ValueError("invalid expected content type")
+        if (
+            not isinstance(group_name, str)
+            or not group_name
+            or not isinstance(sample_url, str)
+            or not isinstance(health_url, str)
+            or not isinstance(health_expected, str)
+            or not re.fullmatch(r"[1-5][0-9]{2}(?:-[1-5][0-9]{2})?", health_expected)
+            or not isinstance(git_smart_http, bool)
+        ):
+            raise ValueError("invalid download-quality profile fields")
+        parsed_url = urlsplit(sample_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username
+        ):
+            raise ValueError("invalid download-quality sample URL")
+        parsed_health_url = urlsplit(health_url)
+        if (
+            parsed_health_url.scheme not in {"http", "https"}
+            or not parsed_health_url.hostname
+            or parsed_health_url.username
+        ):
+            raise ValueError("invalid download-quality health URL")
+        if not isinstance(seed_groups, list) or any(
+            not isinstance(name, str) for name in seed_groups
+        ):
+            raise ValueError("invalid download-quality seed groups")
+        if len(seed_groups) > 3:
+            raise ValueError("too many download-quality seed groups")
+        domains = _validate_domain_list(profile.get("domains", []))
+        provider_name = f"quality-{profile_id}"
+        provider_path = provider_relative_path(profile_id, node_defs)
+        health_check = {
+            "enable": True,
+            "interval": health_interval,
+            "url": health_url,
+            "expected-status": health_expected,
+            "lazy": False,
+        }
+        providers[provider_name] = {
+            "type": "file",
+            "path": provider_path,
+            "health-check": copy.deepcopy(health_check),
+            # Mihomo's supported fallback payload lets a new versioned file
+            # provider start before the first timer cycle has written its file.
+            "payload": copy.deepcopy(node_defs),
+        }
+
+        matching = [
+            item
+            for item in groups
+            if isinstance(item, dict) and item.get("name") == group_name
+        ]
+        if len(matching) > 1:
+            raise ValueError("duplicate download-quality proxy group")
+        group = {
+            "name": group_name,
+            "type": "fallback",
+            "use": [provider_name],
+            "url": health_url,
+            "interval": health_interval,
+            "lazy": False,
+            "expected-status": health_expected,
+        }
+        if matching:
+            groups[groups.index(matching[0])] = group
+        else:
+            groups.append(group)
+        additions.extend(f"DOMAIN,{domain},{group_name}" for domain in domains)
+
+    seen_rules = set(rules)
+    prefix = []
+    for rule in additions:
+        if rule not in seen_rules:
+            prefix.append(rule)
+            seen_rules.add(rule)
+    config["rules"] = [*prefix, *rules]
+
+
+def load_yaml(path: Path) -> dict:
+    with path.open(encoding="utf-8") as stream:
+        value = yaml.safe_load(stream)
+    if not isinstance(value, dict):
+        raise ValueError("invalid YAML mapping")
+    return value
+
+
+def load_state(path: Path) -> dict:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            value = json.load(stream)
+        if isinstance(value, dict) and isinstance(value.get("profiles"), dict):
+            return value
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {"version": 1, "profiles": {}}
+
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+        os.chmod(path, 0o600)
+        try:
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def write_state(path: Path, state: dict) -> None:
+    payload = (
+        json.dumps(state, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+        + "\n"
+    ).encode("ascii")
+    atomic_write(path, payload)
+
+
+class ControllerError(Exception):
+    def __init__(self, status: int | None = None):
+        super().__init__()
+        self.status = status
+
+
+def controller_address() -> str:
+    host = os.environ.get("GATEWAY_LAN_IP", "10.77.0.1")
+    port = os.environ.get("MIHOMO_CONTROLLER_PORT", "9090")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError("invalid controller port")
+    return f"{host}:{port}"
+
+
+def api_request(
+    controller: str, secret: str, path: str, method: str = "GET", timeout: float = 2
+) -> object:
+    headers = {"Accept": "application/json"}
+    if secret:
+        headers["Authorization"] = "Bearer " + secret
+    request = Request(f"http://{controller}{path}", headers=headers, method=method)
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            payload = response.read(65537)
+            if len(payload) > 65536:
+                raise ControllerError()
+            if not payload:
+                return None
+            return json.loads(payload)
+    except HTTPError as error:
+        raise ControllerError(error.code) from None
+    except (OSError, URLError, ValueError, TimeoutError):
+        raise ControllerError() from None
+
+
+def group_now(controller: str, secret: str, group_name: str) -> str | None:
+    try:
+        value = api_request(
+            controller, secret, "/proxies/" + quote(group_name, safe="")
+        )
+    except ControllerError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    now = value.get("now")
+    return now if isinstance(now, str) else None
+
+
+def read_provider_order(
+    path: Path, fallback: object, eligible_names: list[str]
+) -> list[str]:
+    allowed = set(eligible_names)
+    try:
+        value = load_yaml(path)
+    except (OSError, ValueError, yaml.YAMLError):
+        value = {}
+    if isinstance(value.get("proxies"), list):
+        names = [
+            item.get("name") for item in value["proxies"] if isinstance(item, dict)
+        ]
+        order = [name for name in names if isinstance(name, str) and name in allowed]
+        if order:
+            return unique(order)
+    if isinstance(fallback, list):
+        names = [item.get("name") for item in fallback if isinstance(item, dict)]
+        order = [name for name in names if isinstance(name, str) and name in allowed]
+        if order:
+            return unique(order)
+    return list(eligible_names)
+
+
+def choose_candidates(
+    profile: dict,
+    eligible_names: list[str],
+    profile_state: dict,
+    current_order: list[str],
+    controller: str,
+    secret: str,
+    sample_limit: int,
+) -> list[str]:
+    if not eligible_names or sample_limit <= 0:
+        return []
+    index = int(profile_state.get("cursor", 0) or 0) % len(eligible_names)
+    names = []
+    rotating_count = 0
+    if not profile_state.get("seeded", False):
+        seed_groups = profile.get("seed_groups", [])
+        if isinstance(seed_groups, list):
+            for group_name in seed_groups:
+                if isinstance(group_name, str):
+                    candidate = group_now(controller, secret, group_name)
+                    if candidate in eligible_names:
+                        names.append(candidate)
+        names.extend(n for n in profile.get("seed_nodes", []) if n in eligible_names and n not in names)
+    else:
+        incumbent = group_now(controller, secret, str(profile.get("group", "")))
+        if incumbent in eligible_names:
+            names.append(incumbent)
+        elif current_order:
+            names.append(current_order[0])
+
+    for offset in range(len(eligible_names)):
+        candidate = eligible_names[(index + offset) % len(eligible_names)]
+        if candidate not in names:
+            names.append(candidate)
+            rotating_count += 1
+        if len(names) >= sample_limit:
+            break
+    profile_state["cursor"] = (index + max(1, rotating_count)) % len(eligible_names)
+    profile_state["seeded"] = True
+    return names[:sample_limit]
+
+
+def score_sample(result: dict, scores: dict, now: float, ttl: int) -> None:
+    fingerprint = result["fingerprint"]
+    previous = scores.get(fingerprint, {})
+    if not isinstance(previous, dict):
+        previous = {}
+    failures = max(0, int(previous.get("failures", 0) or 0))
+    if result.get("success"):
+        prior_success = float(previous.get("last_success_at", 0) or 0)
+        old_ewma = float(previous.get("ewma_bps", 0) or 0)
+        age = now - prior_success
+        if prior_success and 0 <= age <= ttl and old_ewma > 0:
+            ewma = 0.5 * old_ewma + 0.5 * float(result["bps"])
+        else:
+            ewma = float(result["bps"])
+        failures = 0
+        last_success_at = now
+    else:
+        ewma = float(previous.get("ewma_bps", 0) or 0)
+        last_success_at = float(previous.get("last_success_at", 0) or 0)
+        failures += 1
+    scores[fingerprint] = {
+        "name": result["name"],
+        "ewma_bps": max(0.0, ewma),
+        "failures": failures,
+        "last_success_at": last_success_at,
+        "last_sample_at": now,
+        "last_status": result.get("status"),
+        "last_sample_success": bool(result.get("success")),
+    }
+
+
+def effective_score(item: dict) -> float:
+    failures = max(0, min(4, int(item.get("failures", 0) or 0)))
+    return max(0.0, float(item.get("ewma_bps", 0) or 0)) / (2**failures)
+
+
+def rank_order(
+    current_order: list[str],
+    eligible_names: list[str],
+    fingerprints: dict[str, str],
+    scores: dict,
+    now: float,
+    ttl: int,
+    improvement_ratio: float,
+) -> tuple[list[str], bool]:
+    allowed = set(eligible_names)
+    current = unique(
+        [name for name in [*current_order, *eligible_names] if name in allowed]
+    )
+    fresh = {}
+    for name in eligible_names:
+        info = scores.get(fingerprints.get(name, ""), {})
+        if not isinstance(info, dict):
+            continue
+        last_success = float(info.get("last_success_at", 0) or 0)
+        age = now - last_success
+        if last_success and 0 <= age <= ttl:
+            fresh[name] = effective_score(info)
+    if not fresh:
+        return current, False
+    original = unique([name for name in current_order if name in allowed])
+    incumbent = original[0] if original else (current[0] if current else None)
+    best = min(
+        fresh,
+        key=lambda name: (
+            -fresh[name],
+            current.index(name) if name in current else len(current),
+        ),
+    )
+    head = incumbent
+    if best != incumbent and incumbent is not None:
+        incumbent_score = fresh.get(incumbent)
+        if (
+            incumbent_score is None
+            or fresh[best] >= incumbent_score * improvement_ratio
+        ):
+            head = best
+    elif incumbent is None:
+        head = best
+    tail = [name for name in current if name != head]
+    ranked_tail = sorted(
+        [name for name in tail if name in fresh],
+        key=lambda name: (-fresh[name], current.index(name)),
+    )
+    result = unique([head, *ranked_tail, *tail, *current])
+    return result, result != original
+
+
+def update_score_state(
+    profile_state: dict,
+    eligible_names: list[str],
+    node_defs: dict[str, dict],
+    results: list[dict],
+    now: float,
+    ttl: int,
+) -> dict:
+    scores = profile_state.get("scores")
+    if not isinstance(scores, dict):
+        scores = {}
+    allowed_fingerprints = {
+        node_fingerprint(node_defs[name])
+        for name in eligible_names
+        if name in node_defs
+    }
+    scores = {
+        key: value
+        for key, value in scores.items()
+        if key in allowed_fingerprints and isinstance(value, dict)
+    }
+    for result in results:
+        score_sample(result, scores, now, ttl)
+    profile_state["scores"] = scores
+    return scores
+
+
+def may_reorder(results: list[dict]) -> bool:
+    return any(result.get("success") for result in results) and not any(
+        result.get("status") in {403, 429} for result in results
+    )
+
+
+def _socket_from_response(response):
+    current = response
+    for _ in range(5):
+        sock = getattr(current, "_sock", None)
+        if sock is not None:
+            return sock
+        current = getattr(current, "fp", None) or getattr(current, "raw", None)
+        if current is None:
+            break
+    return None
+
+
+def _sample_opener(proxy_url: str):
+    return build_opener(
+        ProxyHandler({"http": proxy_url, "https": proxy_url}),
+        NoAutomaticRedirects(),
+    )
+
+
+def _open_with_bounded_redirects(opener, request: Request, deadline: float):
+    redirect_count = 0
+    current = request
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        try:
+            return opener.open(current, timeout=remaining)
+        except HTTPError as error:
+            code = error.code
+            location = error.headers.get("Location")
+            if code not in {301, 302, 303, 307, 308} or not location:
+                error.close()
+                raise
+            if redirect_count >= MAX_REDIRECTS:
+                error.close()
+                raise
+            if current.get_method() != "GET":
+                error.close()
+                raise
+            next_url = urljoin(current.full_url, location)
+            parsed = urlsplit(next_url)
+            error.close()
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.hostname
+                or parsed.username
+            ):
+                raise ValueError("invalid sample redirect URL")
+            current = Request(
+                next_url,
+                headers={key: value for key, value in current.header_items()
+                         if key.lower() not in {"host", "proxy-authorization"}},
+                method="GET",
+            )
+            redirect_count += 1
+
+
+def _read_bounded(response, byte_limit: int, deadline: float) -> bytes:
+    received = bytearray()
+    sock = _socket_from_response(response)
+    while len(received) < byte_limit:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError()
+        if sock is not None:
+            sock.settimeout(remaining)
+        chunk = response.read1(min(65536, byte_limit - len(received)))
+        if not chunk:
+            break
+        received.extend(chunk)
+        if response.isclosed():
+            break
+    return bytes(received)
+
+
+def fetch_sample(
+    proxy_url: str, sample_url: str, sample_bytes: int, deadline: float,
+    expected_content_type: str | None = None,
+) -> dict:
+    started = time.monotonic()
+    parsed = urlsplit(sample_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+        return {
+            "success": False,
+            "status": None,
+            "bytes": 0,
+            "elapsed": max(0.0, time.monotonic() - started),
+            "error": "ValueError",
+        }
+    request = Request(
+        sample_url,
+        headers={
+            "Accept-Encoding": "identity",
+            "Range": f"bytes=0-{sample_bytes - 1}",
+            "User-Agent": "mihomo-download-quality/1",
+        },
+    )
+    opener = _sample_opener(proxy_url)
+    received = 0
+    status = None
+    error_name = None
+    try:
+        with _open_with_bounded_redirects(opener, request, deadline) as response:
+            status = response.getcode()
+            if status not in {200, 206}:
+                return {
+                    "success": False,
+                    "status": status,
+                    "bytes": 0,
+                    "elapsed": time.monotonic() - started,
+                    "error": None,
+                }
+            sock = _socket_from_response(response)
+            if expected_content_type is not None and response.headers.get_content_type().lower() != expected_content_type.lower():
+                return {"success": False, "status": status, "bytes": 0,
+                        "elapsed": time.monotonic() - started, "bps": 0.0, "error": "UnexpectedContentType"}
+            minimum = min(32768, sample_bytes)
+            while received < sample_bytes:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                if sock is not None:
+                    sock.settimeout(remaining)
+                chunk = response.read1(min(65536, sample_bytes - received))
+                if not chunk:
+                    break
+                received += len(chunk)
+                if response.isclosed():
+                    break
+            elapsed = max(0.001, time.monotonic() - started)
+            return {
+                "success": received >= minimum,
+                "status": status,
+                "bytes": received,
+                "elapsed": elapsed,
+                "bps": received / elapsed if received >= minimum else 0.0,
+                "error": None if received >= minimum else "IncompleteRead",
+            }
+    except HTTPError as error:
+        status = error.code
+        error_name = "HTTPError"
+    except (TimeoutError, socket.timeout):
+        error_name = "TimeoutError"
+    except (OSError, URLError, ValueError) as error:
+        error_name = type(error).__name__
+    except Exception as error:
+        error_name = type(error).__name__
+    return {
+        "success": False,
+        "status": status,
+        "bytes": received,
+        "elapsed": max(0.001, time.monotonic() - started),
+        "bps": 0.0,
+        "error": error_name or "ProbeError",
+    }
+
+
+def _pkt_line(payload: bytes) -> bytes:
+    return f"{len(payload) + 4:04x}".encode("ascii") + payload
+
+
+def _git_packet(payload: bytes, offset: int) -> tuple[bytes | None, int, bool]:
+    if offset + 4 > len(payload):
+        return None, offset, False
+    try:
+        length = int(payload[offset : offset + 4], 16)
+    except ValueError:
+        return None, offset, False
+    if length == 0:
+        return None, offset + 4, True
+    if length < 4 or length > 65520 or offset + length > len(payload):
+        return None, offset, False
+    return payload[offset + 4 : offset + length], offset + length, False
+
+
+def _git_head_and_capabilities(advert: bytes) -> tuple[str, set[str]] | None:
+    service, offset, flush = _git_packet(advert, 0)
+    if flush or service is None or service.rstrip(b"\n") != b"# service=git-upload-pack":
+        return None
+    _, offset, flush = _git_packet(advert, offset)
+    if not flush:
+        return None
+    head_record, _, flush = _git_packet(advert, offset)
+    if flush or head_record is None or b"\x00" not in head_record:
+        return None
+    ref, raw_capabilities = head_record.split(b"\x00", 1)
+    match = re.fullmatch(rb"([0-9a-f]{40}) HEAD", ref)
+    if not match:
+        return None
+    capability_text = raw_capabilities.rstrip(b"\n")
+    capabilities = {
+        item.decode("ascii")
+        for item in capability_text.split()
+        if re.fullmatch(rb"[a-z0-9_-]+", item)
+    }
+    return match.group(1).decode("ascii"), capabilities
+
+
+def _git_pack_sample(response_body: bytes, minimum_pack_bytes: int) -> tuple[bool, int]:
+    offset = 0
+    prefix = bytearray()
+    pack_bytes = 0
+    while offset < len(response_body):
+        packet, next_offset, flush = _git_packet(response_body, offset)
+        if flush:
+            offset = next_offset
+            continue
+        if packet is None:
+            break
+        offset = next_offset
+        if packet.startswith(b"ERR "):
+            return False, pack_bytes
+        if packet.startswith((b"NAK", b"ACK ", b"shallow ")):
+            continue
+        if not packet or packet[0] not in {1, 2, 3}:
+            return False, pack_bytes
+        if packet[0] == 3:
+            return False, pack_bytes
+        if packet[0] == 1:
+            data = packet[1:]
+            if len(prefix) < 4:
+                prefix.extend(data[: 4 - len(prefix)])
+                if len(prefix) == 4 and prefix != b"PACK":
+                    return False, pack_bytes
+            pack_bytes += len(data)
+    return prefix == b"PACK" and pack_bytes >= minimum_pack_bytes, pack_bytes
+
+
+def fetch_git_smart_http(
+    proxy_url: str, sample_url: str, sample_bytes: int, deadline: float
+) -> dict:
+    started = time.monotonic()
+    received = 0
+    status = None
+    error_name = None
+    parsed = urlsplit(sample_url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or not parsed.path.endswith("/info/refs")
+        or query != {"service": ["git-upload-pack"]}
+    ):
+        return {
+            "success": False,
+            "status": None,
+            "bytes": 0,
+            "elapsed": max(0.001, time.monotonic() - started),
+            "bps": 0.0,
+            "error": "ValueError",
+        }
+
+    opener = _sample_opener(proxy_url)
+    get_request = Request(
+        sample_url,
+        headers={
+            "Accept": "application/x-git-upload-pack-advertisement",
+            "Accept-Encoding": "identity",
+            "Cache-Control": "no-cache",
+            "User-Agent": "mihomo-download-quality/1",
+        },
+    )
+    try:
+        with _open_with_bounded_redirects(opener, get_request, deadline) as response:
+            status = response.getcode()
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+            if status != 200 or content_type.strip().lower() != (
+                "application/x-git-upload-pack-advertisement"
+            ):
+                return {
+                    "success": False,
+                    "status": status,
+                    "bytes": 0,
+                    "elapsed": max(0.001, time.monotonic() - started),
+                    "bps": 0.0,
+                    "error": "InvalidGitAdvertisement",
+                }
+            advert = _read_bounded(response, min(65536, sample_bytes), deadline)
+            received = len(advert)
+            final_url = response.geturl()
+        parsed_advert = _git_head_and_capabilities(advert)
+        if parsed_advert is None or received >= sample_bytes:
+            return {
+                "success": False,
+                "status": status,
+                "bytes": received,
+                "elapsed": max(0.001, time.monotonic() - started),
+                "bps": 0.0,
+                "error": "InvalidGitAdvertisement",
+            }
+        head, advertised_capabilities = parsed_advert
+        requested_capabilities = [
+            name
+            for name in (
+                "multi_ack_detailed",
+                "no-progress",
+                "side-band-64k",
+                "ofs-delta",
+            )
+            if name in advertised_capabilities
+        ]
+        if "side-band-64k" not in requested_capabilities:
+            return {
+                "success": False,
+                "status": status,
+                "bytes": received,
+                "elapsed": max(0.001, time.monotonic() - started),
+                "bps": 0.0,
+                "error": "UnsupportedGitCapabilities",
+            }
+        request_body = (
+            _pkt_line(
+                f"want {head} {' '.join(requested_capabilities)}\n".encode("ascii")
+            )
+            + _pkt_line(b"deepen 1\n")
+            + b"0000"
+            + _pkt_line(b"done\n")
+        )
+        final = urlsplit(final_url)
+        upload_path = final.path[: -len("/info/refs")] + "/git-upload-pack"
+        post_url = urlunsplit((final.scheme, final.netloc, upload_path, "", ""))
+        post_request = Request(
+            post_url,
+            data=request_body,
+            headers={
+                "Accept": "application/x-git-upload-pack-result",
+                "Accept-Encoding": "identity",
+                "Cache-Control": "no-cache",
+                "Content-Type": "application/x-git-upload-pack-request",
+                "User-Agent": "mihomo-download-quality/1",
+            },
+            method="POST",
+        )
+        remaining_budget = sample_bytes - received
+        with _open_with_bounded_redirects(opener, post_request, deadline) as response:
+            status = response.getcode()
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+            if status != 200 or content_type.strip().lower() != (
+                "application/x-git-upload-pack-result"
+            ):
+                return {
+                    "success": False,
+                    "status": status,
+                    "bytes": received,
+                    "elapsed": max(0.001, time.monotonic() - started),
+                    "bps": 0.0,
+                    "error": "InvalidGitPackResponse",
+                }
+            pack_response = _read_bounded(response, remaining_budget, deadline)
+        received += len(pack_response)
+        minimum_pack = min(32768, remaining_budget)
+        valid_pack, _pack_bytes = _git_pack_sample(pack_response, minimum_pack)
+        elapsed = max(0.001, time.monotonic() - started)
+        return {
+            "success": valid_pack,
+            "status": status,
+            "bytes": received,
+            "elapsed": elapsed,
+            "bps": received / elapsed if valid_pack else 0.0,
+            "error": None if valid_pack else "IncompleteGitPack",
+        }
+    except HTTPError as error:
+        status = error.code
+        error_name = "HTTPError"
+    except (TimeoutError, socket.timeout):
+        error_name = "TimeoutError"
+    except (OSError, URLError, ValueError) as error:
+        error_name = type(error).__name__
+    except Exception as error:
+        error_name = type(error).__name__
+    return {
+        "success": False,
+        "status": status,
+        "bytes": received,
+        "elapsed": max(0.001, time.monotonic() - started),
+        "bps": 0.0,
+        "error": error_name or "ProbeError",
+    }
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as handle:
+        handle.bind(("127.0.0.1", 0))
+        return int(handle.getsockname()[1])
+
+
+def dependency_closure(
+    name: str, node_defs: dict[str, dict], allowed_names: set[str]
+) -> list[dict] | None:
+    selected = []
+    visiting = set()
+    included = set()
+
+    def visit(current: str) -> bool:
+        if current in {"DIRECT", "REJECT"}:
+            return True
+        if current in included:
+            return True
+        if (
+            current in visiting
+            or current not in allowed_names
+            or current not in node_defs
+        ):
+            return False
+        visiting.add(current)
+        node = node_defs[current]
+        parent = node.get("dialer-proxy")
+        if isinstance(parent, str) and parent and not visit(parent):
+            return False
+        visiting.remove(current)
+        included.add(current)
+        selected.append(copy.deepcopy(node))
+        return True
+
+    return selected if visit(name) else None
+
+
+def probe_candidate(
+    binary: Path,
+    name: str,
+    eligible_names: list[str],
+    node_defs: dict[str, dict],
+    sample_url: str,
+    sample_bytes: int,
+    timeout_seconds: int,
+    bootstrap_dns: list[str],
+    git_smart_http: bool = False,
+    expected_content_type: str | None = None,
+) -> dict:
+    node = node_defs.get(name)
+    result = {
+        "name": name,
+        "fingerprint": node_fingerprint(node) if node else "",
+        "success": False,
+        "status": None,
+        "bytes": 0,
+        "bps": 0.0,
+    }
+    selected = dependency_closure(name, node_defs, set(eligible_names))
+    if not node or selected is None:
+        result["error"] = "UnresolvedDialerProxy"
+        return result
+
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    process = None
+    temporary = None
+    try:
+        port = free_port()
+        isolated = {
+            "mode": "rule",
+            "log-level": "silent",
+            "ipv6": False,
+            "proxies": selected,
+            "listeners": [
+                {
+                    "name": "quality-probe",
+                    "type": "mixed",
+                    "listen": "127.0.0.1",
+                    "port": port,
+                    "proxy": name,
+                }
+            ],
+            "tun": {"enable": False},
+            "dns": {
+                "enable": True,
+                "default-nameserver": bootstrap_dns,
+                "nameserver": bootstrap_dns,
+                "proxy-server-nameserver": bootstrap_dns,
+            },
+        }
+        temporary = tempfile.TemporaryDirectory(prefix="mihomo-quality-")
+        directory = Path(temporary.name)
+        config_path = directory / "probe.yaml"
+        config_path.write_bytes(
+            yaml.safe_dump(
+                isolated, allow_unicode=True, sort_keys=False, width=4096
+            ).encode("utf-8")
+        )
+        os.chmod(config_path, 0o600)
+        process = subprocess.Popen(
+            [str(binary), "-d", str(directory), "-f", str(config_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                result["error"] = "MihomoExited"
+                return result
+            try:
+                with socket.create_connection(
+                    ("127.0.0.1", port),
+                    timeout=min(0.15, max(0.01, deadline - time.monotonic())),
+                ):
+                    break
+            except OSError:
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+        else:
+            result["error"] = "TimeoutError"
+            return result
+        proxy_url = f"http://127.0.0.1:{port}"
+        if git_smart_http:
+            sample = fetch_git_smart_http(proxy_url, sample_url, sample_bytes, deadline)
+        elif expected_content_type is None:
+            sample = fetch_sample(proxy_url, sample_url, sample_bytes, deadline)
+        else:
+            sample = fetch_sample(proxy_url, sample_url, sample_bytes, deadline, expected_content_type)
+        result.update(sample)
+        result["elapsed"] = max(0.001, time.monotonic() - started)
+        if result["success"]:
+            result["bps"] = result["bytes"] / result["elapsed"]
+        return result
+    except Exception as error:
+        result["error"] = type(error).__name__
+        return result
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+        if temporary is not None:
+            temporary.cleanup()
+
+
+def provider_path_for_config(
+    config_path: Path, profile_id: str, expected_relative: str, spec: object
+) -> Path | None:
+    if not isinstance(spec, dict) or spec.get("path") != expected_relative:
+        return None
+    relative = PurePosixPath(expected_relative)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or not re.fullmatch(
+            r"\./providers/quality-[A-Za-z0-9_-]+-[0-9a-f]{16}\.yaml", expected_relative
+        )
+    ):
+        return None
+    if not expected_relative.startswith(f"./providers/quality-{profile_id}-"):
+        return None
+    root = config_path.parent.resolve()
+    provider_dir = root / "providers"
+    candidate = provider_dir / relative.name
+    if provider_dir.is_symlink() or candidate.is_symlink():
+        return None
+    candidate = candidate.resolve()
+    if candidate.parent != provider_dir.resolve():
+        return None
+    return candidate
+
+
+def replace_provider_and_refresh(path: Path, payload: bytes, refresh) -> bool:
+    existed = path.is_file()
+    previous = path.read_bytes() if existed else None
+    atomic_write(path, payload)
+    try:
+        refresh()
+        return True
+    except Exception:
+        if existed and previous is not None:
+            atomic_write(path, previous)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            refresh()
+        except Exception:
+            pass
+        return False
+
+
+def guarded_provider_update(
+    config_path: Path,
+    expected_config_hash: str,
+    provider_path: Path,
+    payload: bytes,
+    profile_id: str,
+    expected_relative: str,
+    lock_dir: Path,
+    refresh,
+) -> bool:
+    lock_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    lock_path = lock_dir / MAINTENANCE_LOCK_NAME
+    with lock_path.open("a+b") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        try:
+            current_bytes = config_path.read_bytes()
+            if hashlib.sha256(current_bytes).hexdigest() != expected_config_hash:
+                return False
+            current = yaml.safe_load(current_bytes)
+            active = current.get("proxy-providers", {}).get(f"quality-{profile_id}", {})
+            checked = provider_path_for_config(
+                config_path, profile_id, expected_relative, active
+            )
+            if checked != provider_path:
+                return False
+            return replace_provider_and_refresh(provider_path, payload, refresh)
+        except (OSError, ValueError, yaml.YAMLError):
+            return False
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def current_config_fingerprint(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def load_eligible(
+    config: dict, capabilities: dict
+) -> tuple[list[str], dict[str, dict]]:
+    policy = capabilities.get("download_quality", {})
+    definitions = candidate_definitions(config, policy)
+    scope = candidate_scope(config, policy, definitions)
+    names = set(definitions) if scope is None else set(scope)
+    overlay_path = Path(__file__).with_name("mihomo-policy-overlay")
+    overlay = runpy.run_path(str(overlay_path))
+    buckets = overlay["bulk_capable_nodes"](names, capabilities)
+    authorized = unique([name for bucket in buckets for name in bucket])
+    eligible = authorized if scope is None else [name for name in scope if name in authorized]
+    eligible = [name for name in eligible if name in definitions]
+    allowed = set(eligible)
+    eligible = [
+        name
+        for name in eligible
+        if dependency_closure(name, definitions, allowed) is not None
+    ]
+    return eligible, {name: definitions[name] for name in eligible}
+
+
+def valid_bootstrap_dns(policy: dict) -> list[str]:
+    values = policy.get("bootstrap_dns", ["223.5.5.5"])
+    if not isinstance(values, list) or not values:
+        raise ValueError("invalid bootstrap resolver list")
+    result = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValueError("invalid bootstrap resolver")
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            raise ValueError("invalid bootstrap resolver") from None
+        result.append(value)
+    return result
+
+
+def run_cycle(args: argparse.Namespace) -> int:
+    config_path = args.config
+    manifest_path = args.manifest
+    raw_config = config_path.read_bytes()
+    config = yaml.safe_load(raw_config)
+    if not isinstance(config, dict):
+        raise ValueError("invalid Mihomo config mapping")
+    capabilities = load_yaml(manifest_path)
+    policy = capabilities.get("download_quality", {})
+    if not isinstance(policy, dict) or policy.get("enabled") is not True:
+        print("download quality: disabled")
+        return 0
+
+    sample_bytes, sample_limit, timeout_seconds, ttl, ratio, profiles = (
+        _profile_settings(policy)
+    )
+    bootstrap_dns = valid_bootstrap_dns(policy)
+    eligible_names, node_defs = load_eligible(config, capabilities)
+    if not eligible_names or not profiles:
+        print("download quality: no eligible candidates")
+        return 0
+
+    generated = copy.deepcopy(config)
+    configure(generated, capabilities, eligible_names)
+    generated_providers = generated.get("proxy-providers", {})
+    active_providers = config.get("proxy-providers", {})
+    if not isinstance(active_providers, dict):
+        active_providers = {}
+    secret = config.get("secret", "")
+    if not isinstance(secret, str):
+        secret = ""
+    controller = controller_address()
+    state = load_state(args.state)
+    profile_states = state.setdefault("profiles", {})
+    if not isinstance(profile_states, dict):
+        profile_states = {}
+    profile_states = {
+        key: value for key, value in profile_states.items() if key in profiles
+    }
+    state["profiles"] = profile_states
+
+    all_jobs = []
+    profile_info = {}
+    for profile_id, profile in profiles.items():
+        if (
+            not isinstance(profile_id, str)
+            or not PROFILE_ID.fullmatch(profile_id)
+            or not isinstance(profile, dict)
+        ):
+            raise ValueError("invalid download-quality profile")
+        generated_spec = (
+            generated_providers.get(f"quality-{profile_id}")
+            if isinstance(generated_providers, dict)
+            else None
+        )
+        active_spec = active_providers.get(f"quality-{profile_id}")
+        expected_relative = (
+            generated_spec.get("path") if isinstance(generated_spec, dict) else None
+        )
+        target_path = provider_path_for_config(
+            config_path, profile_id, expected_relative, active_spec
+        )
+        fallback = (
+            generated_spec.get("payload", [])
+            if isinstance(generated_spec, dict)
+            else []
+        )
+        if target_path is None:
+            target_path = (
+                (config_path.parent / expected_relative[2:]).resolve()
+                if isinstance(expected_relative, str)
+                and expected_relative.startswith("./providers/")
+                else config_path.parent / "providers" / "invalid.yaml"
+            )
+        current_order = read_provider_order(target_path, fallback, eligible_names)
+        pstate = profile_states.setdefault(profile_id, {})
+        if not isinstance(pstate, dict):
+            pstate = {}
+            profile_states[profile_id] = pstate
+        candidates = (
+            []
+            if target_path is None and not args.observe
+            else choose_candidates(
+                profile,
+                eligible_names,
+                pstate,
+                current_order,
+                controller,
+                secret,
+                sample_limit,
+            )
+        )
+        profile_info[profile_id] = {
+            "state": pstate,
+            "current_order": current_order,
+            "active_spec": active_spec,
+            "expected_relative": expected_relative,
+            "results": [],
+        }
+        sample_url = profile.get("sample_url")
+        if not isinstance(sample_url, str):
+            raise ValueError("invalid sample URL")
+        for name in candidates:
+            all_jobs.append(
+                (
+                    profile_id,
+                    name,
+                    sample_url,
+                    profile.get("git_smart_http", False),
+                    profile.get("expected_content_type"),
+                )
+            )
+
+    if all_jobs and not args.mihomo.is_file():
+        raise FileNotFoundError()
+    cycle_deadline = time.monotonic() + CYCLE_TIMEOUT_SECONDS
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENCY) as pool:
+        futures = {}
+        for profile_id, name, sample_url, git_smart_http, expected_content_type in all_jobs:
+            futures[
+                pool.submit(
+                    probe_candidate,
+                    args.mihomo,
+                    name,
+                    eligible_names,
+                    node_defs,
+                    sample_url,
+                    sample_bytes,
+                    timeout_seconds,
+                    bootstrap_dns,
+                    git_smart_http,
+                    expected_content_type,
+                )
+            ] = (profile_id, name)
+        for future in as_completed(
+            futures, timeout=max(0.1, cycle_deadline - time.monotonic())
+        ):
+            profile_id, name = futures[future]
+            try:
+                profile_info[profile_id]["results"].append(future.result())
+            except Exception as error:
+                profile_info[profile_id]["results"].append(
+                    {
+                        "name": name,
+                        "fingerprint": node_fingerprint(node_defs[name]),
+                        "success": False,
+                        "status": None,
+                        "bytes": 0,
+                        "bps": 0.0,
+                        "error": type(error).__name__,
+                    }
+                )
+
+    updated = 0
+    sampled = 0
+    for profile_id, info in profile_info.items():
+        results = info["results"]
+        sampled += len(results)
+        scores = update_score_state(
+            info["state"], eligible_names, node_defs, results, time.time(), ttl
+        )
+        fingerprints = {
+            name: node_fingerprint(node_defs[name]) for name in eligible_names
+        }
+        proposed, changed = rank_order(
+            info["current_order"],
+            eligible_names,
+            fingerprints,
+            scores,
+            time.time(),
+            ttl,
+            ratio,
+        )
+        info["state"]["order"] = (
+            proposed if changed and may_reorder(results) else info["current_order"]
+        )
+        if args.observe or not changed or not may_reorder(results):
+            continue
+        target_path = provider_path_for_config(
+            config_path,
+            profile_id,
+            info["expected_relative"],
+            info["active_spec"],
+        )
+        if target_path is None:
+            continue
+        payload = provider_file_bytes(
+            [node_defs[name] for name in proposed if name in node_defs]
+        )
+        path_url = "/providers/proxies/" + quote(f"quality-{profile_id}", safe="")
+        refresh = lambda path_url=path_url: api_request(
+            controller, secret, path_url, method="PUT"
+        )
+        if guarded_provider_update(
+            config_path,
+            current_config_fingerprint(raw_config),
+            target_path,
+            payload,
+            profile_id,
+            info["expected_relative"],
+            args.lock_dir,
+            refresh,
+        ):
+            info["state"]["order"] = proposed
+            updated += 1
+
+    state["version"] = 1
+    write_state(args.state, state)
+    action = "observed" if args.observe else "updated"
+    print(
+        f"download quality: {action}; profiles={len(profile_info)} samples={sampled} providers={updated}"
+    )
+    return 0
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG_DEFAULT)
+    parser.add_argument("--manifest", type=Path, default=MANIFEST_DEFAULT)
+    parser.add_argument("--mihomo", type=Path, default=MIHOMO_DEFAULT)
+    parser.add_argument("--state", type=Path, default=STATE_DEFAULT)
+    parser.add_argument("--lock-dir", type=Path, default=LOCK_DIR_DEFAULT)
+    parser.add_argument(
+        "--observe",
+        action="store_true",
+        help="probe and update private scores without provider writes or API mutations",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    args.lock_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    lock_path = args.lock_dir / OWN_LOCK_NAME
+    with lock_path.open("a+b") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("download quality: cycle already running")
+            return 0
+        try:
+            return run_cycle(args)
+        except Exception as error:
+            print(f"download quality: {type(error).__name__}", file=sys.stderr)
+            return 1
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,5 +1,5 @@
 {
-  "_purpose": "人工整合的参数清单；不是 setup.sh 或 tools/render.py 的输入文件。真实值只保存在部署端。",
+  "_purpose": "人工整合的参数清单，不是任何脚本的输入文件；尖括号为必填占位符，真实值只保存在部署端。真机对应 wg-ucg-pilot 点对点链路（/30，MTU 1380），其余值按站点填写。",
   "client": {
     "ipv4": "<SELECTED_CLIENT_IPV4>",
     "wifi_mac": "<SELECTED_CLIENT_WIFI_MAC>",

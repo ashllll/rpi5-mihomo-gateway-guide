@@ -8,7 +8,7 @@ updated: 2026-10-24
 
 [ADR 索引](README.md) · [Wiki 首页](../README.md)
 
-> **历史机制记录，已由 [ADR-0007](0007-native-routing-budget.md) 取代。** 2026-10-24 起不再运行下载吞吐采样、评分或动态 provider 排序。当前下载在既有授权扁平叶节点间使用原生 `url-test`，预算只由原生核心准入；当前契约见[下载分流](../wiki/download-routing.md)与[检测预算](../adaptive-selection.zh-CN.md)。下文保留此前设计和验收证据，不作为当前操作步骤。
+> **历史机制记录，已由 [ADR-0007](0007-native-routing-budget.md) 取代。** 2026-10-24 起不再运行下载吞吐采样、评分或动态 provider 排序。当前下载在既有授权扁平叶节点间使用原生 `url-test`，预算只由原生核心准入；当前契约见[下载分流](../wiki/download-routing.md)与 [ADR-0007](0007-native-routing-budget.md)。下文保留此前设计和验收证据，不作为当前操作步骤。
 
 真实下载测量表明，同一资产在不同供应商出口上的表现差异显著；轻量延迟与另一个 CDN 的探针不能代表它。
 采用独立的 Release、HTTPS Git 和包下载工作负载，小流量采样后调整其候选顺序。
@@ -27,7 +27,7 @@ updated: 2026-10-24
 
 ## 依据与验收
 
-历史实现文件为 `automation/sbin/mihomo-download-quality` 与 `tools/check_download_quality.py`，二者于 2026-10-24 移除；[策略](../../automation/policy/capabilities.yaml)和[运行边界](../wiki/download-routing.md)仍维护当前业务规则。
+历史采样实现与其离线回归于 2026-10-24 移出主链路（采样器保留但休眠）；[策略](../../automation/policy/capabilities.yaml)和[运行边界](../wiki/download-routing.md)仍维护当前业务规则。
 验收覆盖真实核心行为、有界下载样本、实际 LAN 出口及其他业务不被改道；
 小样本提速不代表长期吞吐或所有 DSH 安装操作均已验收。
 
@@ -38,7 +38,7 @@ updated: 2026-10-24
 没有足够额度则仅保留排序建议，不能先写文件再补账。当时核心原生周期与业务失败触发仍在任务账本之外；下述修订接管这些实际发起入口。
 采用时间 EWMA、最少合格样本、TTL、连续失败/恢复、正常切换保持时间；限制与源站错误单独标记。
 本地核心启动从交付字节率中剔除，仍不宣称测得持续吞吐。
-完整约束、参考项目和未验收项见[测量与评分](../adaptive-selection.zh-CN.md)。
+完整约束、参考项目和未验收项见 [ADR-0007](0007-native-routing-budget.md)。
 
 ## 2026-10-24 原生实际发起准入
 
@@ -47,11 +47,11 @@ updated: 2026-10-24
 新 native_budget 模式取消旧的整池事务预扣，避免与核心准入双扣；额度不足时可以跳过检查，文件回滚仍执行。
 质量采样含 observe/worker 均核对同核心、配置、账户策略和规范账本路径；符号链接别名保持同一把锁和文件。
 旧 quality-only 预扣路径仅保留兼容，不能开启原生检测。受管启动拒绝原版或绑定错误核心。
-见[核心源码与构建](../../core/README.md)及[统一预算](../adaptive-selection.zh-CN.md)。
+见[核心源码与构建](../../core/README.md)及[统一预算](0007-native-routing-budget.md)。
 本轮不部署、不启动预算服务、不恢复任何线上检测。
 
 ## 2026-10-24 原生选路简化（当前决定）
 
-删除全部自研吞吐采样、评分与 provider 动态重排。Download、GitHub Download、Model Download 和 Package Download 都是扁平的原生 `url-test`，只包含既有授权叶节点，并共用一个轻量检查所有者；Streaming/Social/AI Research 使用按既有顺序的原生 fallback，TW Fixed IP 保持固定 `select`。每次原生检测通过同一本地 broker 预扣 2 次额度；沿用 `/var/lib/mihomo-measurements/quality-budget.json` 和 `quality_attempts_per_hour`，保留已有账户键与未过期历史。模板仍默认禁用检测。
+删除全部自研吞吐采样、评分与 provider 动态重排。Download、GitHub Download、Model Download 和 Package Download 都是扁平的原生 `url-test`，只包含既有授权叶节点，并共用一个轻量检查所有者；Streaming/Social/AI Research 使用按既有顺序的原生 fallback，TW Fixed IP 保持固定 `select`。每次原生检测通过同一本地 broker 预扣 2 次额度；沿用 `/var/lib/mihomo-measurements/quality-budget.json` 和 `quality_attempts_per_hour`，保留已有账户键与未过期历史。模板保留检测开关；本机已启用原生检测并经预算准入。
 
 当前实现不执行本 ADR 上文记录的样本下载、分数更新、provider 排序或质量专用事务。部署、平台播放、真实下载和 timer 状态均未由本轮离线源码变更证明。
