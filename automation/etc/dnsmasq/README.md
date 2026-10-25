@@ -26,7 +26,7 @@
 | `192.0.2.117`（`host-record`） | 网关自身管理网地址，供 `gateway.lan` 解析 | 同上 |
 | `gateway` / `gateway.lan` / `gateway.localdomain` | 网关主机名三连（`host-record` 优先于 `/etc/hosts 127.0.1.1`） | 通用占位 |
 | `198.51.100.1`（`vlan-pilot.conf`） | VLAN 试点段的网关地址 | RFC 5737 TEST-NET-2 |
-| `198.51.100.100-198.51.100.199` | VLAN 试点 DHCP 池，10m 租期 | 同上 |
+| `198.51.100.100-198.51.100.199` | VLAN 试点 DHCP 池，12h 租期 | 同上 |
 | `198.51.100.10` | 试点终端固定租约 | 同上 |
 | `00-00-5e-00-53-01` | 试点终端的 MAC 固定租约（dash 记法，dnsmasq 两种记法都收） | RFC 7042 文档 MAC |
 

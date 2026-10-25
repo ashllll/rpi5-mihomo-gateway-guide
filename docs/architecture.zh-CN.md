@@ -33,7 +33,7 @@
 |---|---|---|---|
 | `wan0` | `192.168.0.117/24`（DHCP） | NetworkManager | 上游；管理入口只在这里与 `wlan0` |
 | `lan0` | `192.168.1.1/24` | NetworkManager | 主 LAN，DHCP 池 `192.168.1.100–199`，租约 12h |
-| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 上的 802.1Q VLAN 20；租约 10 分钟，静态租约 `.10` |
+| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 上的 802.1Q VLAN 20；租约 12 小时，静态租约 `.10` |
 | `wg-ucg-pilot` | `10.253.254.1/30` | `wg-quick@wg-ucg-pilot` | UCG 点对点；UDP 51891 在 `wan0` 上放行 |
 | `Mihomo` | `198.18.0.1/30` | Mihomo TUN | 网关侧 TUN 地址；客户端看到的是 fake-IP `198.18.0.1/16` |
 
