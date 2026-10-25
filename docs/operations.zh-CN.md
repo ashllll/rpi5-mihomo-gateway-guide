@@ -58,8 +58,8 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mihomo-social-quality.timer` | 同上，仅 X 视频场景，每 2 分钟一轮 | `sudo /usr/local/sbin/mihomo-social-quality` |
 
 `homeassistant-access-guard.service` 也在发布层（oneshot，开机跑一次）。
-本机另有 2 个不在发布层的单元：`ikuai-wan-watch.service`（只读记录上游 WAN 抖动）、
-`rp5-agent.service`（T-Display 监控的只读指标，tcp/8799），由部署端单独维护，仓库不发布。
+本机另有 1 个不在发布层的单元：`rp5-agent.service`（T-Display 监控的只读指标，tcp/8799），
+由部署端单独维护，仓库不发布（2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`）。
 
 ## 3. 故障对照表
 
@@ -171,7 +171,11 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 - **会推送的事件**（同一 key 默认 600 秒内去重，ServerChan 免费额度有限，所以只推移位级事件）：
   单元失败（`OnFailure`）、gate `business` 迁移、`mihomo-watch` 的五类巡检
   （WAN/温度/磁盘/内存/单元）、`mihomo-dnsmasq-guard` 的分级重启（dnsmasq 静默 / MosDNS 降级重启 /
-  重启预算耗尽只推一次）、MosDNS 连续失败切兜底模式。
+  重启预算耗尽只推一次）、MosDNS 连续失败切兜底模式、**设备绕过网关 DNS**（`mihomo-watch` 的
+  `dns-bypass` 探针：谁的 IP、DHCP 主机名、MAC，向哪个上游解析器查询；只记日志和推送，不拦流量）。
+  `dns-bypass` 探针的观测规则装在独立表 `inet dns_bypass`（prerouting priority -151），
+  与 `inet mihomo` 无关，重启 Mihomo 不会丢；接口与上游地址由 `WATCH_DNS_BYPASS_IF` /
+  `WATCH_DNS_BYPASS_TARGET` 指定。
 
 ## 8. 两条真实事故的教训
 

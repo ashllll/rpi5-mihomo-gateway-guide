@@ -65,11 +65,12 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mosdns-rules-update.timer` | 原子更新 MosDNS 规则数据 | 每天 04:20（抖动 30 分钟） |
 | `mosdns-binary-update.timer` | 官方稳定版 MosDNS 换核 | 每周日 05:10（抖动 1 小时） |
 | `dnsmasq.service` | `lan0` DHCP + DNS；启动前写入直连上游基线；崩溃自动重启 | 常驻 |
-| `dnsmasq-vlan-pilot.service` | `proxy20` 试点 DHCP + DNS（租约 10 分钟） | 常驻 |
+| `dnsmasq-vlan-pilot.service` | `proxy20` 试点 DHCP + DNS（租约 12 小时） | 常驻 |
 | `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，Home Assistant 只对下游 LAN 开放 | 开机一次 |
 
-本机另有 2 个非发布层单元处于 enabled：`ikuai-wan-watch.service`（只读记录上游 WAN 抖动）、
-`rp5-agent.service`（`0.0.0.0:8799` 只读状态，供 T-Display-S3 监视器），属于这台机器的本地附加物。
+本机另有 1 个非发布层单元处于 enabled：`rp5-agent.service`（`0.0.0.0:8799` 只读状态，供
+T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 已移除对已退休 iKuai 的
+`ikuai-wan-watch.service`）。
 
 其余 worker（`mihomo-healthcheck.service`、`mihomo-watch.service`、`mihomo-alert@.service`、
 `mihomo-download-quality.service` 等）是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起。
