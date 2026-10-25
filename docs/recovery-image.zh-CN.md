@@ -84,8 +84,8 @@ sudo python3 gateway_image.py restore \
 
 1. 将恢复介质装入 Pi 5，连接上游网线。从上游路由器的 DHCP 列表查找新地址，使用新账号和 SSH 公钥登录。
 2. 确认 `findmnt /` 指向恢复介质；检查 `df -h /`、`cloud-init status --wait` 与 `systemctl status regenerate_ssh_host_keys`。
-3. 进入 `/opt/rpi5-mihomo-gateway-guide`，复制 `examples/site.example.json` 为私有 `site.local.json`，填写本次实际接口和网段。
-4. 按[分阶段部署](deployment-current.zh-CN.md)生成、检查和应用网络配置，确认独立管理连接可用后再启用网关服务。
+3. 按[部署文档](deployment.zh-CN.md)准备本机参数（`automation/env/automation.env.example` 列出的地址、接口与网段），写入部署端私有文件。
+4. 按[部署文档](deployment.zh-CN.md)安装自动化层与网络配置，确认独立管理连接可用后再启用网关服务。
 5. 按[自动化说明](../automation/README.zh-CN.md)添加自己的订阅、规则数据与能力清单，验收通过后按需启用 timer。
 
 真实 MAC 绑定与网络连接均需重新建立；不能假设新介质上的接口仍叫原来的 `wan0` / `lan0`。

@@ -5,7 +5,6 @@ Wants=network-online.target mihomo.service
 After=network-online.target mihomo.service
 
 [Service]
-# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
 EnvironmentFile=-/etc/mihomo-automation.env
 Type=simple
 DynamicUser=true

@@ -1,0 +1,156 @@
+# Local override segment of /etc/mihomo/config.yaml.
+#
+# The subscription pipeline merges a new subscription into the current config
+# (proxies/proxy-groups come from the provider) and then rebuilds the policy
+# groups, rules and the generated measurement-<hex> inline providers. The keys
+# below are local: the pipeline must preserve them verbatim. Proxies,
+# proxy-groups, rules, proxy-providers and secret are generated or deployment
+# data, so they are absent here on purpose.
+#
+# LAN values are placeholders taken from automation/env/automation.env.example
+# (GATEWAY_LAN_IP). Replace them with the site LAN address before reusing this
+# file; it is a reference snapshot, not a drop-in replacement for a live config.
+allow-lan: true
+mode: rule
+log-level: info
+mixed-port: 7890
+bind-address: 10.77.0.1
+lan-allowed-ips:
+  - 10.77.0.0/24
+external-controller: 10.77.0.1:9090
+external-ui: ui
+ipv6: false
+interface-name: wan0
+find-process-mode: 'off'
+unified-delay: false
+tcp-concurrent: true
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+tun:
+  enable: true
+  stack: mixed
+  device: Mihomo
+  auto-route: true
+  auto-redirect: true
+  auto-detect-interface: false
+  strict-route: true
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+  include-interface:
+    - lan0
+    - wg-ucg-pilot
+    - proxy20
+  # The live config excludes the site private /16; the site LAN address is not
+  # published, so the placeholder LAN supernet stands in for it.
+  route-exclude-address:
+    - 10.77.0.0/16
+    - 224.0.0.0/4
+
+dns:
+  enable: true
+  listen: 127.0.0.1:1053
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter-mode: rule
+  fake-ip-filter:
+    - RULE-SET,game-domain,real-ip
+    - RULE-SET,game-cn-domain,real-ip
+    - RULE-SET,steam-domain,real-ip
+    - DOMAIN-SUFFIX,lan,real-ip
+    - DOMAIN-SUFFIX,local,real-ip
+    - DOMAIN-SUFFIX,localdomain,real-ip
+    - DOMAIN-SUFFIX,youtube.com,real-ip
+    - DOMAIN-SUFFIX,youtu.be,real-ip
+    - DOMAIN-SUFFIX,googlevideo.com,real-ip
+    - DOMAIN-SUFFIX,ytimg.com,real-ip
+    - DOMAIN-SUFFIX,youtube-nocookie.com,real-ip
+    - DOMAIN,youtubei.googleapis.com,real-ip
+    - MATCH,fake-ip
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  direct-nameserver:
+    - https://dns.alidns.com/dns-query#DIRECT
+    - https://doh.pub/dns-query#DIRECT
+  nameserver-policy:
+    rule-set:game-domain:
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+    rule-set:game-cn-domain:
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+    rule-set:steam-domain:
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+    rule-set:cn-domain:
+      - https://dns.alidns.com/dns-query#DIRECT
+      - https://doh.pub/dns-query#DIRECT
+  # Plain queries leave through the generated policy group, so the upstream
+  # DoH is requested by the core itself instead of failing open to the ISP.
+  # Two entries, deliberately through two different groups: with both pinned to
+  # the same selector a dead node takes foreign DNS down until that node's health
+  # check notices.  The second entry rides the fallback pool instead.
+  nameserver:
+    - https://1.1.1.1/dns-query#Default Proxy
+    - https://8.8.8.8/dns-query#BWB Backup
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports:
+        - 80
+        - 8080-8880
+    TLS:
+      ports:
+        - 443
+        - 8443
+    QUIC:
+      ports:
+        - 443
+        - 8443
+  # sniffer.skip-src-address is derived from the deployment's WireGuard peer
+  # addressing and is not published; see README.md.
+
+rule-providers:
+  private-ip:
+    type: file
+    behavior: ipcidr
+    format: mrs
+    path: ./rules/geoip-private.mrs
+  cn-ip:
+    type: file
+    behavior: ipcidr
+    format: mrs
+    path: ./rules/geoip-cn.mrs
+  cn-domain:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./rules/geosite-cn.mrs
+  game-domain:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./rules/dustinwin-games.mrs
+  game-cn-domain:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./rules/dustinwin-games-cn.mrs
+  steam-domain:
+    type: file
+    behavior: domain
+    format: mrs
+    path: ./rules/geosite-steam.mrs

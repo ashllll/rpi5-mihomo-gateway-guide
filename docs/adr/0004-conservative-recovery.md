@@ -6,16 +6,18 @@ updated: 2026-10-24
 
 # ADR-0004：只读观测，移除重复选路控制者
 
-[ADR 索引](README.md) · [测量与评分机制](../adaptive-selection.zh-CN.md)
+[ADR 索引](README.md) · 测量与评分机制（2026-10-24 已退役，无独立文档）
 
-> **历史决策记录，已由 [ADR-0007](0007-native-routing-budget.md) 取代。** 本 ADR 记录 2026-10-16 的只读观测方案。当前约定见[原生延迟选路与检测预算](../adaptive-selection.zh-CN.md)。
+> **历史决策记录，已由 [ADR-0007](0007-native-routing-budget.md) 取代。** 本 ADR 记录 2026-10-16 的只读观测方案。当前约定见 [ADR-0007](0007-native-routing-budget.md) 与[运维文档](../operations.zh-CN.md)。
 
-原方案允许业务复测与可选隔离。连接开销审核后，改为核心原生选路、被动影子评分，
-健康检查只看进程。旧 adaptive-apply 不再写配置、恢复 base-pools 或发请求。
+原方案允许业务复测与可选隔离。连接开销审核后，改为核心原生选路与被动影子评分，
+健康检查只看进程。旧的自动应用脚本不再写配置、恢复 base-pools 或发请求。
+（2026-10-25 复核：影子评分本身也已退役，下载/社交质量采样接续且当前休眠；
+健康检查不再“只看进程”，而是校验 TUN、两张 nft 表与规则 9000。）
 默认停止测量不表示进程或业务故障；业务必须由真实客户端独立验收。
 
 替代方案是继续维护两套故障切换和配置写入者，会增加重复测量、历史资格恢复及配置重载风险。
 保留原生选路意味着源码的影子健康状态不会直接隔离节点，质量排序只作用于显式启用的专用 provider。
 
-[进程检查](../../automation/sbin/mihomo-healthcheck)、历史只读采集程序 `automation/sbin/mihomo-adaptive-score`（2026-10-24 已移除）、
+[进程检查](../../automation/sbin/mihomo-healthcheck)、历史只读采集程序（2026-10-24 已移除）、
 [回归](../../tools/check_stability.py)分别验证当时职责，离线通过不能替代线上恢复验收。

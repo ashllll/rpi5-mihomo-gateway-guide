@@ -1,0 +1,14 @@
+[Unit]
+Description=PC-only VLAN DHCP and DNS pilot
+Wants=network-online.target
+After=network-online.target NetworkManager.service nftables.service mihomo.service
+[Service]
+Type=simple
+RuntimeDirectory=dnsmasq-vlan-pilot
+RuntimeDirectoryMode=0755
+ExecStartPre=/usr/sbin/dnsmasq --test --conf-file=/etc/dnsmasq-vlan-pilot.conf
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/dnsmasq-vlan-pilot.conf --pid-file=
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

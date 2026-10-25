@@ -27,7 +27,37 @@ def rejected(call):
     raise AssertionError("Unsafe input was accepted")
 
 
+def core_stub(path, version_line, protocol_line):
+    path.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "  -v) echo '" + version_line + "'; exit 0 ;;\n"
+        "  -measurement-budget-protocol) echo '" + protocol_line + "'; exit 0 ;;\n"
+        "esac\n"
+        "exit 1\n"
+    )
+    path.chmod(0o755)
+
+
 def main():
+    sources = json.loads((ROOT / "image/sources.json").read_text())
+    upstream = json.loads((ROOT / "core/upstream.json").read_text())
+    assert sources["mihomo"]["version"] == "v1.19.28-budget-status-contract-v3"
+    assert sources["mihomo"]["protocol"] == upstream["protocol"] == "mihomo-budget-v1"
+    assert sources["mihomo"]["patch"] == "core/mihomo-v1.19.28-budget.patch"
+    with tempfile.TemporaryDirectory() as temporary:
+        core = Path(temporary) / "mihomo"
+        core_stub(core, "mihomo v1.19.28-budget-status-contract-v3 with_gvisor no_tailscale",
+                  "mihomo-budget-v1")
+        image.verify_core(core, sources["mihomo"])
+        for version_line, protocol_line in (
+            ("mihomo v1.19.28-budget-status-contract-v3 with_gvisor", "mihomo-budget-v1"),
+            ("mihomo v1.19.28 with_gvisor no_tailscale", "mihomo-budget-v1"),
+            ("mihomo v1.19.28-budget-status-contract-v3 with_gvisor no_tailscale", "upstream"),
+        ):
+            core_stub(core, version_line, protocol_line)
+            rejected(lambda: image.verify_core(core, sources["mihomo"]))
+
     key_parts = [b"ssh-ed25519", bytes(range(32))]
     key = "ssh-ed25519 " + base64.b64encode(b"".join(struct.pack(">I", len(p)) + p for p in key_parts)).decode()
     config = image.seed_config("gateway", key, "gateway-test")

@@ -248,14 +248,18 @@ def configure_measurement(config: dict, capabilities: dict) -> None:
     totals = {}
     for spec in providers.values():
         health = spec.get('health-check', {})
+        if not isinstance(health.get('enable', False), bool):
+            raise ValueError('provider health-check.enable must be boolean')
+        url, expected = health.get('url'), str(health.get('expected-status', '*'))
+        # Disabled periodic checks still own their manual-retest status contract.
+        if isinstance(url, str) and url:
+            if url in contracts and contracts[url] != expected:
+                raise ValueError('conflicting expected status for one measurement URL')
+            contracts[url] = expected
         if health.get('enable') is not True:
             continue
-        url, expected = health.get('url'), str(health.get('expected-status', '*'))
         if not isinstance(url, str) or not url:
             raise ValueError('native provider requires an explicit check URL')
-        if url in contracts and contracts[url] != expected:
-            raise ValueError('conflicting expected status for one measurement URL')
-        contracts[url] = expected
         health['interval'] = max(interval, int(health.get('interval', interval)))
         health['lazy'] = True
         payload = spec.get('payload', [])
@@ -272,6 +276,8 @@ def configure_measurement(config: dict, capabilities: dict) -> None:
                 raise ValueError('native budget requires an unambiguous account')
             totals[account] = totals.get(account, 0) + 3600 / health['interval']
     for account, cost in totals.items():
+        if measurement.get('enforce_budget', True) is False:
+            continue
         allowed = measurement['accounts'][account].get('native_probes_per_hour', 0)
         if (isinstance(allowed, bool) or not isinstance(allowed, (int, float))
                 or not math.isfinite(allowed) or cost > allowed):
@@ -405,6 +411,8 @@ def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, 
         updated = {a: [e for e in entries.get(a, [])
                        if (e[2] if len(e) == 3 else e[0] + 3600) > now] for a in charges}
         for account, amount in charges.items():
+            if measurement.get('enforce_budget', True) is False:
+                continue
             limit = measurement['accounts'][account].get('quality_attempts_per_hour', 0)
             if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit):
                 return False

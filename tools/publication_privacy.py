@@ -23,7 +23,7 @@ NODE_PATTERNS = {
 }
 ARCHIVE_PATHS = (
     "README.md", "SECURITY.md", "docs/deployment-debugging-summary.zh-CN.md",
-    "assets/network-topology.svg", "web/index.html",
+    "assets/network-topology.svg",
 )
 # These historical archive guards also catch endpoints without a URL scheme.
 ARCHIVE_PATTERNS = {

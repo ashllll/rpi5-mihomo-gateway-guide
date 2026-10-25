@@ -6,8 +6,8 @@ Wants=network-online.target
 OnFailure=mihomo-alert@%N.service
 
 [Service]
-Type=oneshot
 EnvironmentFile=-/etc/mihomo-alert.env
+Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-watch
 ProtectSystem=strict
 ProtectHome=read-only

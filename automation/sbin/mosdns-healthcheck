@@ -52,6 +52,9 @@ else
     mode=failed
     action=fallback
     logger -t mosdns-healthcheck "mosdns remains unhealthy; selecting fallback DNS mode"
+    if [ -x /usr/local/sbin/mihomo-alert ]; then
+      /usr/local/sbin/mihomo-alert --health "mosdns probes failed; DNS fallback mode selected" mosdns-fallback || true
+    fi
   fi
 fi
 
