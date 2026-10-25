@@ -244,6 +244,19 @@ def apply_stability(config: dict, capabilities: dict) -> None:
     overrides = policy.get("groups", {})
     allowed = {"type", "url", "interval", "timeout", "lazy", "tolerance",
                "max-failed-times", "expected-status"}
+    # Interval is the detection latency: a group pinned to a dead node keeps
+    # failing for at least that long.  The ceiling makes every generated group
+    # recoverable within minutes even when the built-in default is stale.
+    ceiling = policy.get("max_interval", 180)
+    if not isinstance(ceiling, int) or isinstance(ceiling, bool) or ceiling <= 0:
+        raise ValueError("stability.max_interval must be a positive integer")
+    # A group without an explicit interval falls back to the meter's own probe
+    # cadence, so every automatic group is scheduled instead of inheriting a
+    # stale value from the previous generation of the file.
+    native = capabilities.get("measurement", {}).get("native_interval_seconds", ceiling)
+    if not isinstance(native, int) or isinstance(native, bool) or native <= 0:
+        native = ceiling
+    default_interval = min(native, ceiling)
     for group in config.get("proxy-groups", []):
         options = overrides.get(group.get("name"), {})
         if set(options) - allowed:
@@ -253,6 +266,12 @@ def apply_stability(config: dict, capabilities: dict) -> None:
                 group.get("name") == "Research + AI" and strategy == "select"):
             raise ValueError(f"stability strategy conflicts with {group.get('name')} policy")
         group.update(options)
+        if group.get("type") in ("url-test", "fallback", "load-balance"):
+            if "interval" not in options:
+                group["interval"] = default_interval
+            interval = group.get("interval")
+            if isinstance(interval, int) and not isinstance(interval, bool) and interval > ceiling:
+                group["interval"] = ceiling
     additions = [f"IP-CIDR{('6' if ':' in cidr else '')},{cidr},Telegram,no-resolve"
                  for cidr in policy.get("telegram_cidrs", [])]
     config["rules"] = unique([*additions, *config.get("rules", [])])

@@ -222,6 +222,37 @@ class NativeBudgetTests(unittest.TestCase):
                     server.shutdown()
                     worker.join()
 
+    def test_probe_wave_is_admitted_and_policy_refresh_is_picked_up(self):
+        settings = policy(limit=100000)
+        config_value = config()
+        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+            directory = Path(raw)
+            cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'quality-budget.json'))
+            cfg.write_text(yaml.safe_dump(config_value))
+            manifest.write_text(yaml.safe_dump({'measurement': settings}))
+            path = str(directory/'budget.sock')
+            with BROKER['Server'](path, cfg, manifest, ledger) as server:
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    # One health-check wave asks for every candidate at once.
+                    # Recomputed inputs or a small listener backlog turned that
+                    # wave into silent denials, so a whole wave must be granted.
+                    started = time.monotonic()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as pool:
+                        results = list(pool.map(lambda _: socket_request(path), range(100)))
+                    self.assertEqual(sum(results), 100)
+                    self.assertLess(time.monotonic() - started, 30)
+
+                    # A replaced manifest must take effect without a restart.
+                    before = BROKER['request_status'](path)['measurement_id']
+                    manifest.write_text(yaml.safe_dump({'measurement': policy(limit=4)}))
+                    after = BROKER['request_status'](path)['measurement_id']
+                    self.assertNotEqual(before, after)
+                finally:
+                    server.shutdown()
+                    worker.join()
+
     def test_startup_failure_refresh_and_rollback_requests_each_predebit(self):
         settings = policy(limit=10)
         config_value = config()

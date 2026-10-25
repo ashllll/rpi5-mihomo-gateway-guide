@@ -315,8 +315,14 @@ class MeasurementTests(unittest.TestCase):
                         group['use'] = ['external']
                 self.q['configure_measurement'](c, {'measurement': self.settings()})
                 for group in c['proxy-groups']:
+                    if group.get('type') not in {'url-test', 'fallback', 'load-balance'}:
+                        continue
                     self.assertEqual(str(group.get('expected-status')), '204')
-                    self.assertNotIn('url', group)  # No second health-check owner.
+                    if not existing:
+                        # The group keeps the check URL: its own scheduler is
+                        # the only probe source that runs for inline owners.
+                        self.assertIn('url', group)
+                        self.assertLessEqual(group.get('interval', 0), 180)
 
     def test_control_names_cannot_enter_shared_owner_filters(self):
         for enabled in (False, True):
