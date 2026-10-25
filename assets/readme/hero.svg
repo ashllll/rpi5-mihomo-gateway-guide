@@ -1,31 +1,50 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img">
-  <title>一个会自证的网关</title>
-  <desc>深色仪表盘：左侧标题与说明，右侧是内核、nft、策略路由与出口四项真实状态及转发计数。</desc>
+  <title>一台会自证的网关</title>
+  <desc>深色技术版面：左侧是仓库名、标题与自证说明，右侧是 rp5 当前状态面板与自愈时间线。</desc>
   <rect width="1200" height="560" fill="#0F1311"/>
   <rect x="0.5" y="0.5" width="1199" height="559" fill="none" stroke="#242C26"/>
-  <text x="64" y="92" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#8B9A8D">rpi5-mihomo-gateway / Raspberry Pi 5</text>
-  <text x="64" y="176" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="58" font-weight="600" fill="#EEF2EC">一个会自证的网关</text>
-  <text x="64" y="242" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="25" fill="#A7B3A7">四件事同时成立，才算上线成功。</text>
-  <text x="64" y="280" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="25" fill="#A7B3A7">门禁失败会告警，换核回滚由人执行。</text>
-  <line x1="64" y1="322" x2="248" y2="322" stroke="#242C26" stroke-width="2"/>
-  <text x="64" y="360" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">10-25 换核漏编 gVisor：代理流量静默黑洞。</text>
-  <text x="64" y="440" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">门禁与回滚，见「30 秒看懂」</text>
-  <text x="64" y="390" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">出口抽样走 mixed-port，绕开 TUN。</text>
-  <rect x="648" y="64" width="488" height="432" fill="#151A17" stroke="#2A332B"/>
-  <text x="676" y="118" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">当前状态</text>
-  <text x="676" y="184" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="48" font-weight="600" fill="#CBF16D">已验证</text>
-  <text x="886" y="184" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#8FA38F">verified</text>
-  <rect x="676" y="230" width="11" height="11" fill="#CBF16D"/>
-  <text x="704" y="242" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#E3EAE1">TUN</text>
-  <text x="1112" y="242" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#93A293" text-anchor="end">Mihomo / up</text>
-  <rect x="676" y="278" width="11" height="11" fill="#CBF16D"/>
-  <text x="704" y="290" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#E3EAE1">nft</text>
-  <text x="1112" y="290" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#93A293" text-anchor="end">mihomo + rp_filter</text>
-  <rect x="676" y="326" width="11" height="11" fill="#CBF16D"/>
-  <text x="704" y="338" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#E3EAE1">rule</text>
-  <text x="1112" y="338" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#93A293" text-anchor="end">9000 → 2022 / ok</text>
-  <rect x="676" y="374" width="11" height="11" fill="#CBF16D"/>
-  <text x="704" y="386" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#E3EAE1">egress</text>
-  <text x="1112" y="386" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#93A293" text-anchor="end">204 gstatic / ok</text>
-  <text x="676" y="476" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">packets 45594 / conns 93 / 02:14</text>
+
+  <text x="64" y="86" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#7C8B7F">rpi5-mihomo-gateway · Raspberry Pi 5</text>
+
+  <text x="64" y="172" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="56" font-weight="600" fill="#EEF2EC">一台会自证的网关</text>
+
+  <text x="64" y="236" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#A7B3A7">下游零客户端，全部收口在内核：</text>
+  <text x="64" y="272" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#A7B3A7">翻墙、直连、DNS 分流各走各的。</text>
+  <text x="64" y="308" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="24" fill="#A7B3A7">每次变更都留下能复查的证据。</text>
+
+  <line x1="64" y1="342" x2="240" y2="342" stroke="#242C26" stroke-width="2"/>
+
+  <rect x="64" y="366" width="9" height="9" fill="#CBF16D"/>
+  <text x="86" y="376" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#C7D2C6">门禁只认内核：TUN、nft 规则、9000 策略、真实出口</text>
+  <rect x="64" y="408" width="9" height="9" fill="#CBF16D"/>
+  <text x="86" y="418" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#C7D2C6">2026-10-25 换核漏编 gVisor：进程活着，流量静默黑洞</text>
+  <rect x="64" y="450" width="9" height="9" fill="#CBF16D"/>
+  <text x="86" y="460" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#C7D2C6">30 秒解析自愈 · 连红 3 分钟重启 · 每小时至多一次</text>
+
+  <text x="64" y="516" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">12 个常驻单元 / 4 个休眠 / 12 个仓库检查器</text>
+
+  <rect x="704" y="64" width="432" height="432" fill="#151A17" stroke="#2A332B"/>
+  <text x="730" y="112" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="20" fill="#93A293">rp5 · 当前状态</text>
+  <text x="730" y="176" font-family="'PingFang SC','Hiragino Sans GB','Noto Sans SC','Source Han Sans SC',system-ui,sans-serif" font-size="44" font-weight="600" fill="#CBF16D">已验证</text>
+  <text x="1110" y="176" text-anchor="end" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#8FA38F">business=verified</text>
+
+  <rect x="730" y="220" width="10" height="10" fill="#CBF16D"/>
+  <text x="756" y="231" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="22" fill="#E3EAE1">TUN</text>
+  <text x="1110" y="231" text-anchor="end" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">up · 198.18.0.1/30</text>
+
+  <rect x="730" y="266" width="10" height="10" fill="#CBF16D"/>
+  <text x="756" y="277" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#E3EAE1">nft</text>
+  <text x="1110" y="277" text-anchor="end" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">redirect to :46225</text>
+
+  <rect x="730" y="312" width="10" height="10" fill="#CBF16D"/>
+  <text x="756" y="323" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#E3EAE1">rule</text>
+  <text x="1110" y="323" text-anchor="end" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">9000 → 2022</text>
+
+  <rect x="730" y="358" width="10" height="10" fill="#CBF16D"/>
+  <text x="756" y="369" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#E3EAE1">egress</text>
+  <text x="1110" y="369" text-anchor="end" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="21" fill="#93A293">204 gstatic</text>
+
+  <line x1="730" y1="398" x2="1110" y2="398" stroke="#2A332B" stroke-width="2"/>
+  <text x="730" y="430" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#7C8B7F">启动自检 → 1 min 探针 → 5 min 出口 → 自愈</text>
+  <text x="730" y="460" font-family="'SFMono-Regular',ui-monospace,'SF Mono',Menlo,monospace" font-size="19" fill="#5E6B60">dnsmasq 30 s 分层探针 · 静默才重启</text>
 </svg>
