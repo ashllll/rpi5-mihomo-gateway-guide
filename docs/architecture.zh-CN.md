@@ -7,33 +7,31 @@
 ## 1. 拓扑
 
 ```text
-                         上游路由器 192.168.0.1/24
-                                  │  DHCP
-                    ┌─────────────┴─────────────┐
-                    │  wan0 192.168.0.117/24    │  SSH tcp/22、rp5-agent tcp/8799
-                    │                           │  仅限 192.168.0.0/24
-                    ▼                           │
-   ┌─────────────────────────────────────────┐  │
-│ rp5 · Debian 13 · 12 个 enabled 单元           │
-   │  nft: inet rp_filter / ip rp_nat        │  │
-   │  ip rule 9000–9010 → table 2022         │  │
-   │  ┌───────────────┐  ┌────────────────┐  │  │
-   │  │ Mihomo        │  │ mosdns  :5335  │  │  │
-   │  │ TUN 198.18.0.1│  │ dnsmasq :53 ×2 │  │  │
-   │  └───────────────┘  └────────────────┘  │  │
-   └───┬───────────────┬───────────────┬─────┘  │
-       │ lan0          │ proxy20       │ wg-ucg-pilot
-       │ 192.168.1.1/24│ 192.168.20.1/24│ 10.253.254.1/30
-       ▼               ▼               ▼
-   主 LAN 客户端    VLAN 20 单台 PC   UCG 点对点
-   （交换机/AP）     （802.1Q id 20）   （WireGuard）
+                          UCG 交换机（上游 LAN 192.168.0.0/24）
+                              │  一根网线：VLAN1 + VLAN20
+                              ▼
+   ┌─────────────────────────────────────────────────┐
+   │ rp5 · Debian 13 · 12 个 enabled 单元            │
+   │  wan0 192.168.0.117/24（VLAN1：上游 + 管理）    │
+   │  proxy20 192.168.20.1/24（802.1Q VLAN 20）      │
+   │  nft: inet rp_filter / ip rp_nat                │
+   │  ip rule 9000–9010 → table 2022                 │
+   │  ┌───────────────┐  ┌──────────────────────┐    │
+   │  │ Mihomo        │  │ mosdns  :5335        │    │
+   │  │ TUN 198.18.0.1│  │ dnsmasq 环回 :53     │    │
+   │  └───────────────┘  └──────────────────────┘    │
+   └───┬─────────────────────────┬───────────────────┘
+       │ wg-ucg-pilot            │ proxy20
+       │ 10.253.254.1/30         │ 192.168.20.1/24
+       ▼                         ▼
+   UCG 点对点（WireGuard）       RP5-PC-TEST Wi-Fi 客户端
+                                     （UCG 广播，802.1Q id 20）
 ```
 
 | 接口 | 地址 | 归属 | 说明 |
 |---|---|---|---|
-| `wan0` | `192.168.0.117/24`（DHCP） | NetworkManager | 上游；管理入口只在这里与 `wlan0` |
-| `lan0` | `192.168.1.1/24` | NetworkManager | 主 LAN，DHCP 池 `192.168.1.100–199`，租约 12h |
-| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 上的 802.1Q VLAN 20；租约 12 小时，静态租约 `.10` |
+| `wan0` | `192.168.0.117/24`（DHCP，VLAN1） | NetworkManager | 上游出口；管理入口只在这里与 `wlan0` |
+| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端；DHCP/DNS 由 `dnsmasq-vlan-pilot.service` 提供，租约 12 小时，静态租约 `.10` |
 | `wg-ucg-pilot` | `10.253.254.1/30` | `wg-quick@wg-ucg-pilot` | UCG 点对点；UDP 51891 在 `wan0` 上放行 |
 | `Mihomo` | `198.18.0.1/30` | Mihomo TUN | 网关侧 TUN 地址；客户端看到的是 fake-IP `198.18.0.1/16` |
 
@@ -47,7 +45,7 @@
 
 ```text
 iifname "Mihomo"                                   return   # 核心自身出站不劫持
-iifname != { lan0, proxy20, wg-ucg-pilot }         return   # 只服务三个下游接口
+iifname != { proxy20, wg-ucg-pilot }              return   # 只服务两个下游接口
 ip daddr { 192.168.0.0/16, 224.0.0.0/4 }           return   # 私网与组播直连
 ip saddr @inet4_local_address_set dport 53 (tcp/udp) dnat to 198.18.0.2:53
 ip daddr @inet4_local_address_set                  return
@@ -57,23 +55,28 @@ ipv4 tcp                                           redirect to :46225
 ```
 
 `inet4_local_address_set` = `{10.253.254.0/30, 127.0.0.0/8, 172.17.0.0–172.21.255.255,
-192.168.0.0/23, 192.168.20.0/24, 198.18.0.0/30}`。DNS 走 `dnat` 到 TUN 内地址，
+192.168.0.0/24, 192.168.20.0/24, 198.18.0.0/30}`。DNS 走 `dnat` 到 TUN 内地址，
 TCP 走 `redirect` 到 `:46225`（auto-redirect 的动态监听端口），UDP 交给 TUN 的 auto-route。
 `tcp option mptcp exists drop` 是有意的：MPTCP 连接绕过重定向会变成半断。
 
 ### 2.2 `inet rp_filter` + `ip rp_nat`（`/etc/nftables.conf`，`nftables.service` 载入）
 
 文件用 `destroy table` 幂等，不 `flush ruleset`，否则会清掉 Mihomo 的动态表；
-末尾 `include /etc/nftables.d/ucg-pc-link.nft` 与 `vlan-pilot.nft`。
+末尾 `include /etc/nftables.d/ucg-pc-link.nft` 与 `vlan-pilot.nft`。仓库副本在
+`automation/etc/nftables.conf` 与 `automation/etc/nftables.d/`，`install.sh` 用
+`install_default` 补缺、不覆盖本地改动。
 
-- `input` policy **drop**：`lo`、`established/related`、`lan0` 整体放行（可信 LAN，
-  同时容纳动态代理端口）；`wan0`/`wlan0` 只放行来自 `192.168.0.0/24` 的 `tcp/22`、
-  `tcp/8799`、DHCP（68/546）与上游 WireGuard 握手 `udp/51891`；`proxy20` 放行 DHCP、
-  DNS 与 `ct status dnat`；`wg-ucg-pilot` 放行 `ct status dnat`；ICMP 放行。
-- `forward` policy **drop**：只允许 `lan0↔Mihomo`、`lan0→wan0`、`proxy20↔Mihomo`、
-  `proxy20→wan0`（限去 `192.168.0.0/24`）、`wg-ucg-pilot→Mihomo/wan0` 与 established。
-- `ip rp_nat` 的 `postrouting` 对 `192.168.1.0/24 out wan0` 做 `masquerade`；
-  `proxy20` 与 WireGuard 的 NAT 在各自 include 文件里。
+- `input` policy **drop**：基础表放行 `lo`、`established/related` 与 ICMP；`wan0`/`wlan0`
+  只放行来自 `192.168.0.0/24` 的 `tcp/22`、`tcp/8799`、DHCP（68/546）与上游
+  WireGuard 握手 `udp/51891`。`proxy20` 与 `wg-ucg-pilot` 的服务规则全在 include 里：
+  VLAN20 的 DHCP、DNS、`ct status dnat` 与 `tcp/22` 由 `vlan-pilot.nft` 放行
+  （笔记本漫游到 `RP5-PC-TEST` SSID 时仍能 SSH 回来），WireGuard 的 dnat 与
+  masquerade 由 `ucg-pc-link.nft` 放行。
+- `forward` policy **drop**：基础表只放行 established/related；VLAN20 的
+  `proxy20↔Mihomo`、`proxy20→wan0`（限去 `192.168.0.0/24`）与
+  `wg-ucg-pilot→Mihomo/wan0` 由两个 include 放行。
+- `ip rp_nat` 的 `postrouting` 自身不放 masquerade：`proxy20` 与 WireGuard 的 NAT
+  在各自 include 文件里。
 
 > 注意命名冲突：nft 表 `rp_filter` 与内核 sysctl `net.ipv4.conf.*.rp_filter` 是两件事。
 > 本机 sysctl 取 `2`（loose，见 `/etc/sysctl.d/99-router.conf` 与各接口值）；
@@ -82,7 +85,7 @@ TCP 走 `redirect` 到 `:46225`（auto-redirect 的动态监听端口），UDP �
 ### 2.3 策略路由
 
 ```text
-9000  from all iif {lan0, proxy20, wg-ucg-pilot}  goto 9002
+9000  from all iif {proxy20, wg-ucg-pilot}       goto 9002
 9001  from all                                    goto 9010
 9002  nop
 9003  to 198.18.0.0/30                            lookup 2022
@@ -102,19 +105,26 @@ TCP 走 `redirect` 到 `:46225`（auto-redirect 的动态监听端口），UDP �
 ## 3. DNS 三层
 
 ```text
-客户端 ──53──► dnsmasq (lan0 192.168.1.1 / proxy20 192.168.20.1)
-                     │  上游读 /etc/dnsmasq-upstreams.conf
+客户端（VLAN20）──53──► dnsmasq-vlan-pilot (proxy20 192.168.20.1)
+                              │  server=127.0.0.1#1053，直投不看国内解析
+                              ▼
+                       Mihomo DNS 127.0.0.1:1053
+                         └─ fake-IP 198.18.0.1/16；
+                            fake-ip-filter 内的域名保留真实地址
+
+网关本机 ──53──► dnsmasq 环回 (127.0.0.1)
+                     │  上游读 /etc/dnsmasq-upstreams.conf（mosdns / mihomo / direct）
                      ▼
               mosdns 127.0.0.1:5335
               ├─ 国内域名/国内 IP ─► AliDNS / DNSPod（DoH，直连，concurrent 2）
               └─ 代理域名/其它     ─► Mihomo DNS 127.0.0.1:1053
-                                        └─ fake-IP 198.18.0.1/16；
-                                           fake-ip-filter 内的域名保留真实地址
 ```
 
-1. **dnsmasq**：两个实例，`lan0` 与 `proxy20` 各一，`no-resolv` + `servers-file`
-   把上游选择外置；`host-record` 只登记网关自身名字。`cache-size=1000`（LAN）、
-   `cache-size=0`（VLAN 试点，避免与 fake-IP 混存）。
+1. **dnsmasq**：两个作用域。`resolver.conf` 只服务环回（`interface=lo`、
+   `listen-address=127.0.0.1`），供网关自身工具与健康检查使用，`no-resolv` +
+   `servers-file` 把上游选择外置，`cache-size=1000`；`vlan-pilot.conf` 由独立进程
+   服务 `proxy20`，`server=127.0.0.1#1053` 直投 Mihomo DNS，`cache-size=0`
+   （避免与 fake-IP 混存）。`host-record` 只登记网关自身名字。
 2. **mosdns**：规则集来自 `/etc/mosdns/rules/current/*.txt`（`proxy-list`、`direct-list`、
    `apple-cn`、`google-cn`、`geoip-cn`）。`cache_cn` 只缓存国内真实答案，
    fake-IP 不进 MosDNS 长期缓存；`no_ecs` 关闭 ECS；`forward_cn` 并发请求
@@ -169,7 +179,7 @@ mihomo-measurement-budget.service（无参数）＝常驻 broker
      ─► 常态: mihomo-healthcheck.timer 每分钟
           四要素 + 转发计数器；进程停了才尝试 systemctl restart（先抢维护锁）
           业务判定 business=verified|idle|failed|degraded
-     ─► 每 5 分钟 --egress：经 socks5 192.168.1.1:7890 取 gstatic 204（不花预算）
+     ─► 每 5 分钟 --egress：经 socks5 127.0.0.1:7890 取 gstatic 204（不花预算）
      ─► 状态迁移才告警；mihomo-watch.timer 另查单元/温度/磁盘/内存/WAN
 ```
 

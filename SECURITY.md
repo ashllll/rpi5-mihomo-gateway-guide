@@ -10,16 +10,16 @@ stay in `/etc/mihomo-automation.env`, `/etc/mihomo/secrets`,
 
 | Address | Port | Service | Reachable from |
 |---|---|---|---|
-| `192.168.1.1` | 53/tcp+udp | dnsmasq (main LAN) | `lan0` |
-| `192.168.20.1` | 53/tcp+udp | dnsmasq (VLAN 20 pilot) | `proxy20` |
-| `192.168.1.1` | 7890/tcp+udp | Mihomo mixed proxy (`lan-allowed-ips: 192.168.1.0/24`) | `lan0` |
-| `192.168.1.1` | 9090/tcp | Mihomo external controller (bearer secret) | `lan0` |
-| `0.0.0.0` | 46225/tcp | Mihomo auto-redirect listener | `lan0`, `proxy20`, `wg-ucg-pilot` |
+| `127.0.0.1` | 53/tcp+udp | dnsmasq (loopback resolver) | `lo` |
+| `192.168.20.1` | 53/tcp+udp | dnsmasq (VLAN 20 pilot, `dnsmasq-vlan-pilot.service`) | `proxy20` |
+| `0.0.0.0` | 7890/tcp+udp | Mihomo mixed proxy (`bind-address: "*"`, `lan-allowed-ips` = loopback + upstream/VLAN20 placeholders) | `lo`; other interfaces filtered by `inet rp_filter` input |
+| `0.0.0.0` | 9090/tcp | Mihomo external controller (bearer secret) | `lo`; other interfaces filtered by `inet rp_filter` input |
+| `0.0.0.0` | 46225/tcp | Mihomo auto-redirect listener | `proxy20`, `wg-ucg-pilot` |
 | `127.0.0.1` | 1053, 5335, 9091 | Mihomo DNS, MosDNS DNS, MosDNS/prometheus API | loopback |
 | `0.0.0.0` | 8799/tcp | rp5-agent read-only metrics (Bearer secret from env) | `wan0`/`wlan0`, source `192.168.0.0/24` |
-| `0.0.0.0` | 22/tcp | SSH | `wan0`/`wlan0`, source `192.168.0.0/24` |
+| `0.0.0.0` | 22/tcp | SSH | `wan0`/`wlan0`, source `192.168.0.0/24`; `proxy20` via the pilot include |
 | `wan0` | 51891/udp | WireGuard (`wg-ucg-pilot`) | upstream `192.168.0.1` only |
-| — | 8123/tcp | Home Assistant UI | **rejected** from `wan0`/`wlan0` by `homeassistant-access-guard.service`; allowed only from downstream LANs |
+| — | 8123/tcp | Home Assistant UI | **rejected** from `wan0`/`wlan0` by `homeassistant-access-guard.service`; no upstream path reaches it |
 
 IPv6 forwarding and DNS are disabled; `inet rp_filter` rejects IPv6 input on the
 service interface and drops MPTCP TCP options that would bypass redirection.
@@ -27,17 +27,19 @@ service interface and drops MPTCP TCP options that would bypass redirection.
 ## Firewall model
 
 `inet rp_filter` keeps INPUT and FORWARD at `policy drop` and applies an explicit
-whitelist: `lan0` and `lo` are accepted as a trusted LAN, WAN-side access is limited to
-SSH and 8799 from `192.168.0.0/24` plus DHCP/ICMP, `proxy20` only gets DHCP, DNS and
-`ct status dnat`, and `wg-ucg-pilot` only reaches Mihomo or `wan0`. `ip rp_nat`
-masquerades `192.168.1.0/24` out `wan0`. The kernel `net.ipv4.conf.*.rp_filter` sysctl is
-`2` (loose); the nft table named `rp_filter` is a separate object with the same name.
+whitelist: `lo` and established/related are accepted, WAN-side access is limited to
+SSH and 8799 from `192.168.0.0/24` plus DHCP/ICMP/WireGuard, `proxy20` only gets
+DHCP, DNS, `ct status dnat` and `tcp/22`, and `wg-ucg-pilot` only reaches Mihomo or
+`wan0`. `ip rp_nat` itself has no masquerade rule; the VLAN20 and WireGuard NAT live
+in their include files. The kernel `net.ipv4.conf.*.rp_filter` sysctl is `2` (loose);
+the nft table named `rp_filter` is a separate object with the same name.
 
-The LAN trust model is intentional: accepting all of `lan0` is what lets Mihomo's
-dynamically allocated redirect port work. It is **not** guest isolation, and a static
-port whitelist would silently break transparent proxying. Mihomo binds mixed and
-controller to the LAN address and restricts mixed traffic with `lan-allowed-ips`;
-neither replaces network isolation for untrusted clients.
+The gateway has no separate downstream LAN interface: one cable into the UCG switch
+carries VLAN1 (upstream and management) and VLAN20 (`proxy20`, the UCG-broadcast
+`RP5-PC-TEST` Wi-Fi clients). Transparent proxying relies on `ip rule 9000` and the
+core's `redirect`, not on accepting a whole interface, and management calls are pinned
+to loopback. Mihomo listens on `bind-address: "*"` and restricts the mixed port with
+`lan-allowed-ips`; neither replaces network isolation for untrusted clients.
 
 The published layer writes only files it owns (scripts, units, dnsmasq/MosDNS/locality
 skeletons) and never edits sshd, NetworkManager, sysctl or `/etc/nftables.conf`.

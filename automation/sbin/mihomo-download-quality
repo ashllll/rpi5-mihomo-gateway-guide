@@ -388,7 +388,7 @@ class ControllerError(Exception):
 
 
 def controller_address() -> str:
-    host = os.environ.get("GATEWAY_LAN_IP", "10.77.0.1")
+    host = "127.0.0.1"
     port = os.environ.get("MIHOMO_CONTROLLER_PORT", "9090")
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="900" viewBox="0 0 1280 900" role="img" aria-labelledby="topologyTitle topologyDesc">
   <title id="topologyTitle">rp5 网关数据面：四个接口、三层 DNS、预算包装器与六个 drop-in</title>
-  <desc id="topologyDesc">2026-10-25 真机记录。主 LAN lan0 192.168.1.1/24、单 PC 试点 VLAN 20 proxy20 192.168.20.1/24、UCG 链路 wg-ucg-pilot 10.253.254.1/30 汇入 rp5；DNS 经 dnsmasq 到 MosDNS，国内 DoH 直连、其余交 Mihomo fake-IP；Mihomo 由预算包装器启动，数据面由 inet mihomo、inet rp_filter、ip rp_nat 与 ip rule 9000 组成，出口为 wan0 192.168.0.117/24。图中不含节点、订阅与密钥。</desc>
+  <desc id="topologyDesc">2026-10-25 真机记录。一根网线接 UCG 交换机：VLAN1 上的 wan0 192.168.0.117/24（上游与管理入口）、同一根线上的 802.1Q VLAN20 proxy20 192.168.20.1/24（UCG 广播的 RP5-PC-TEST Wi-Fi 客户端，dnsmasq-vlan-pilot 提供 DHCP/DNS）、UCG 链路 wg-ucg-pilot 10.253.254.1/30；DNS 由 dnsmasq 环回作用域接 MosDNS、VLAN20 作用域直投 Mihomo fake-IP；Mihomo 由预算包装器启动，数据面由 inet mihomo、inet rp_filter、ip rp_nat 与 ip rule 9000 组成，出口为 wan0 192.168.0.117/24。图中不含节点、订阅与密钥。</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#7F8F84"/>
@@ -29,19 +29,19 @@
   <text class="subtitle muted" x="48" y="80">2026-10-25 真机状态（Debian 13 / aarch64）。图只画结构与路径，不含节点、订阅、密钥与真实 MAC。</text>
 
   <!-- downstream -->
-  <text x="40" y="128" class="panel-title">下游</text>
+  <text x="40" y="128" class="panel-title">链路与对端（一根网线接 UCG）</text>
 
   <rect x="40" y="144" width="212" height="96" rx="10" fill="#161D19" stroke="#2C3730"/>
-  <text x="56" y="170" class="box-title">主 LAN · lan0</text>
-  <text x="56" y="194" class="box-line mono muted">192.168.1.1/24</text>
-  <text x="56" y="214" class="box-line muted">DHCP .100–.199 · 12h</text>
-  <text x="56" y="232" class="box-line muted">DNS 与代理入口</text>
+  <text x="56" y="170" class="box-title">同一条线 · 802.1Q</text>
+  <text x="56" y="194" class="box-line mono muted">VLAN1 · 192.168.0.117/24</text>
+  <text x="56" y="214" class="box-line mono muted">VLAN20 · 192.168.20.1/24</text>
+  <text x="56" y="232" class="box-line muted">对端：UCG 交换机</text>
 
   <rect x="40" y="256" width="212" height="96" rx="10" fill="#161D19" stroke="#2C3730"/>
-  <text x="56" y="282" class="box-title">VLAN 20 · proxy20</text>
-  <text x="56" y="306" class="box-line muted">192.168.20.1/24 · 单 PC 试点</text>
-  <text x="56" y="326" class="box-line muted">DHCP .100–.199 · 10m</text>
-  <text x="56" y="344" class="box-line muted">只放行 DHCP / DNS / dnat</text>
+  <text x="56" y="282" class="box-title">RP5-PC-TEST · Wi-Fi</text>
+  <text x="56" y="306" class="box-line muted">UCG 广播，VLAN20 接入</text>
+  <text x="56" y="326" class="box-line muted">dnsmasq-vlan-pilot 发 DHCP/DNS</text>
+  <text x="56" y="344" class="box-line muted">租约 12h · 静态租约 .10</text>
 
   <rect x="40" y="368" width="212" height="96" rx="10" fill="#161D19" stroke="#2C3730"/>
   <text x="56" y="394" class="box-title">UCG 链路 · wg-ucg-pilot</text>
@@ -61,10 +61,10 @@
 
   <!-- dnsmasq -->
   <rect x="320" y="164" width="286" height="104" rx="9" fill="#1A211D" stroke="#3A4A40"/>
-  <text x="336" y="190" class="box-title">dnsmasq（两个实例）</text>
-  <text x="336" y="212" class="box-line mono muted">192.168.1.1:53 · 192.168.20.1:53</text>
-  <text x="336" y="232" class="box-line muted">servers-file 指向当前上游模式</text>
-  <text x="336" y="252" class="box-line muted">cache 1000（VLAN 实例 cache 0）</text>
+  <text x="336" y="190" class="box-title">dnsmasq（两个作用域）</text>
+  <text x="336" y="212" class="box-line mono muted">127.0.0.1:53 · 192.168.20.1:53</text>
+  <text x="336" y="232" class="box-line muted">resolver.conf 只服务环回</text>
+  <text x="336" y="252" class="box-line muted">VLAN 实例直投 Mihomo :1053</text>
 
   <!-- mosdns -->
   <rect x="320" y="304" width="286" height="132" rx="9" fill="#1A211D" stroke="#3A4A40"/>
@@ -104,7 +104,7 @@
   <text x="684" y="498" class="box-title">Mihomo 核心</text>
   <text x="684" y="520" class="box-line muted">v1.19.28-budget-status-contract-v3</text>
   <text x="684" y="540" class="box-line mono muted">TUN Mihomo 198.18.0.1/30</text>
-  <text x="684" y="560" class="box-line mono muted">mixed 192.168.1.1:7890 · controller :9090</text>
+  <text x="684" y="560" class="box-line mono muted">mixed 127.0.0.1:7890 · controller :9090</text>
   <text x="684" y="578" class="box-line muted">原生 url-test / fallback 负责选路</text>
 
   <g class="flow-accent" marker-end="url(#arrowAccent)">
@@ -116,7 +116,7 @@
   <rect x="320" y="608" width="648" height="88" rx="9" fill="#161D19" stroke="#3A4A40"/>
   <text x="336" y="632" class="box-title">数据面（由内核与部署端共同维护）</text>
   <text x="336" y="654" class="box-line mono muted">inet mihomo：53 dnat → 198.18.0.2；TCP redirect → :46225；UDP 走 TUN</text>
-  <text x="336" y="674" class="box-line mono muted">inet rp_filter（INPUT/FORWARD drop）· ip rp_nat masquerade · ip rule 9000 → table 2022</text>
+  <text x="336" y="674" class="box-line mono muted">inet rp_filter（INPUT/FORWARD drop）· ip rp_nat 仅 include 的 NAT · ip rule 9000 → table 2022</text>
   <text x="336" y="690" class="box-line muted">内核 rp_filter sysctl = 2（loose），与同名 nft 表是两个对象</text>
 
   <g class="flow" marker-end="url(#arrow)">
@@ -144,7 +144,7 @@
 
   <!-- upstream -->
   <rect x="1024" y="152" width="216" height="104" rx="10" fill="#161D19" stroke="#2C3730"/>
-  <text x="1040" y="178" class="box-title">上游 · wan0</text>
+  <text x="1040" y="178" class="box-title">上游 · wan0（VLAN1）</text>
   <text x="1040" y="202" class="box-line mono muted">192.168.0.117/24</text>
   <text x="1040" y="222" class="box-line muted">上游网关 192.168.0.1</text>
   <text x="1040" y="242" class="box-line muted">SSH 与 8799 只信这个 /24</text>

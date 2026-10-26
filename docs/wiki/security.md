@@ -6,13 +6,14 @@
 
 ## 信任边界
 
-- `lan0` 入站整体放行：为了容纳 auto-redirect 的动态端口，固定端口白名单会漏掉新
-  监听并切断透明代理。这是“可信内网”取舍，不是访客隔离方案。
-- `wan0`/`wlan0` 只允许来自 `192.168.0.0/24` 的 SSH（tcp/22）与 rp5-agent（tcp/8799），
-  以及 DHCP、ICMP 与上游 WireGuard 握手（udp/51891）。
-- `proxy20` 是单台 PC 试点：只放行 DHCP、DNS 与 `ct status dnat`；转发限去
-  `192.168.0.0/24`。`wg-ucg-pilot` 只允许进 Mihomo 或出 `wan0`。
-- controller（`:9090`）与 mixed（`:7890`）都绑定 `192.168.1.1`，只对主 LAN；secret 不进仓库。
+- 入站不再整口放行：`lo` 与 established/related 之外，`wan0`/`wlan0` 只允许来自
+  `192.168.0.0/24` 的 SSH（tcp/22）与 rp5-agent（tcp/8799），以及 DHCP、ICMP 与
+  上游 WireGuard 握手（udp/51891）。透明代理靠 `ip rule 9000` 与 `redirect`，
+  不靠“整口可信”。
+- `proxy20` 是单台 PC 试点：放行 DHCP、DNS、`ct status dnat` 与 `tcp/22`（管理口）；
+  转发限去 `192.168.0.0/24`。`wg-ucg-pilot` 只允许进 Mihomo 或出 `wan0`。
+- 本机管理调用固定走环回：mixed `127.0.0.1:7890`、controller `0.0.0.0:9090`
+  （核心 `bind-address: "*"`）、dnsmasq `127.0.0.1:53`；secret 不进仓库。
 - 防火墙只 `destroy table` 自有表，绝不 `flush ruleset`；Mihomo 的动态表归核心。
 
 ## 不成立的推断

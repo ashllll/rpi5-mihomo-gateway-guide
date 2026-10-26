@@ -1,6 +1,6 @@
 <img src="assets/readme/hero.svg" width="100%" alt="一台会自证的网关：左侧是自证说明，右侧是 rp5 当前状态面板与自愈时间线">
 
-一台 Raspberry Pi 5 透明网关的**可复现镜像**：上游路由器 → rp5 → 主 LAN / VLAN20 试点 / WireGuard 对端。
+一台 Raspberry Pi 5 透明网关的**可复现镜像**：上游路由器 → rp5 → VLAN20 试点 Wi-Fi / WireGuard 对端。
 下游设备不装客户端；国内直连、海外与指定业务走 TUN，DNS 三层分流，显式节点检测先过本地预算准入。
 
 > 仓库描述**这一台机器**（Debian 13 / arm64）的现状。换机器要改网段、接口名、VLAN 与订阅数据；
@@ -20,8 +20,8 @@
 
 | 你关心的事 | 这台机器的做法 |
 |---|---|
-| 四个网段 | `wan0` 192.168.0.117/24（上游 DHCP）→ `lan0` 192.168.1.1/24（主 LAN）→ `proxy20` 192.168.20.1/24（`wan0` 上的 802.1Q VLAN 20，单台 PC 试点）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点） |
-| 三层 DNS | `dnsmasq`（`lan0`/`proxy20` 各一实例，:53）→ `mosdns`（127.0.0.1:5335，国内/海外分流）→ Mihomo DNS（127.0.0.1:1053，fake-IP 198.18.0.0/16） |
+| 四个网段 | 一根网线接 UCG 交换机：`wan0` 192.168.0.117/24（VLAN1，上游 + 管理入口）与 `proxy20` 192.168.20.1/24（同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点）→ Mihomo TUN 198.18.0.1/30 |
+| 三层 DNS | `dnsmasq` 两个作用域：VLAN20 `192.168.20.1:53` 直投 Mihomo DNS `127.0.0.1:1053`（fake-IP）；环回 `127.0.0.1:53`（网关自身）→ `mosdns` 127.0.0.1:5335（国内/海外分流）→ Mihomo DNS |
 | 自编译预算版核心 | `/usr/local/bin/mihomo` = `v1.19.28-budget-status-contract-v3`，`go1.27.2`，tags `no_tailscale, with_gvisor`；补丁与构建说明在 [`core/`](core/README.md) |
 | 预算外壳 | `mihomo-measurement-budget.service` 建 `/run/mihomo-measurements/budget.sock`；drop-in 用 `--run-core` 校验协议与状态后拉起核心，账本首次预扣时创建，协议 `mihomo-budget-v1` |
 | 门禁 | 启动后验 TUN、两张 nft 表、`redirect to` 规则、9000 规则并取一次 204；之后持续观测，连续红就自愈；状态写 `/run/mihomo-healthcheck/status` |
@@ -45,10 +45,10 @@
 
 <img src="assets/readme/path.svg" width="100%" alt="一次连接的路径：客户端、TUN 接管、nftables 白名单与 DNS 改写、规则与预算、最后出口">
 
-`ip rule 9000` 把 `lan0`/`proxy20`/`wg-ucg-pilot` 的流量送进表 `2022`，`inet mihomo` 在 prerouting
+`ip rule 9000` 把 `proxy20`/`wg-ucg-pilot` 的流量送进表 `2022`，`inet mihomo` 在 prerouting
 先做白名单（核心自身、非内网、私网段直接 return），再把 DNS 查询 `dnat` 到 `198.18.0.2:53`、
 TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/forward 默认 drop）与
-`ip rp_nat`（`192.168.1.0/24` 出 `wan0` 做 masquerade）完成。整张网段图见
+`ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
 [`assets/network-topology.svg`](assets/network-topology.svg)，结构说明见[架构文档](docs/architecture.zh-CN.md)。
 
 ## 单元：12 个 enabled、4 个休眠
@@ -58,15 +58,15 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo.service` | 代理核心，`ExecStart` 被 drop-in 覆盖为预算 broker 的 `--run-core` | 常驻 |
 | `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
-| `mihomo-dnsmasq-guard.timer` | 分层解析探针：LAN 侧迟滞/无答案才升级判定；静默才重启，重启有冷却与预算 | 每 30 秒 |
+| `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
 | `mosdns-healthcheck.timer` | 校验 5335 分流与 metrics | 开机 30s 后每 1 分钟 |
 | `mosdns-rules-update.timer` | 原子更新 MosDNS 规则数据 | 每天 04:20（抖动 30 分钟） |
 | `mosdns-binary-update.timer` | 官方稳定版 MosDNS 换核 | 每周日 05:10（抖动 1 小时） |
-| `dnsmasq.service` | `lan0` DHCP + DNS；启动前写入直连上游基线；崩溃自动重启 | 常驻 |
+| `dnsmasq.service` | 环回 resolver（`/etc/dnsmasq.d/resolver.conf`，`127.0.0.1:53`）；启动前写入直连上游基线；崩溃自动重启 | 常驻 |
 | `dnsmasq-vlan-pilot.service` | `proxy20` 试点 DHCP + DNS（租约 12 小时） | 常驻 |
-| `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，Home Assistant 只对下游 LAN 开放 | 开机一次 |
+| `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 Home Assistant UI | 开机一次 |
 
 本机另有 1 个非发布层单元处于 enabled：`rp5-agent.service`（`0.0.0.0:8799` 只读状态，供
 T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 已移除对已退休 iKuai 的
@@ -98,9 +98,9 @@ T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 �
 仓库只发布“装成这台机器”的运行层，不含网络事务、订阅内容与凭据。从裸 Debian 13 起：
 
 ```sh
-# 1. 网络身份（手工一次性）：wan0 DHCP、lan0 静态 /24、proxy20 = wan0 上的 VLAN 20、
+# 1. 网络身份（手工一次性）：wan0 DHCP（VLAN1）、proxy20 = 同一根线上的 802.1Q VLAN 20、
 #    wg-quick@wg-ucg-pilot，及 /etc/sysctl.d/99-router.conf
-sudo ip -br addr                      # 四个接口都要有地址
+sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有地址（TUN 由核心创建）
 # 2. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
 sudo nft -c -f /etc/nftables.conf
 # 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
@@ -122,7 +122,7 @@ sudo cat /run/mihomo-healthcheck/status
 | 机制实现 | `automation/sbin/*`（22 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
 | 单元与 drop-in | `automation/systemd/**`（32 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
 | 数据与解析 | `automation/etc/mosdns/**`、`automation/etc/dnsmasq-upstreams.*`、`automation/policy/route-defaults.yaml`、NetworkManager dispatcher | **逐字节一致** |
-| 脱敏模板 | `automation/etc/dnsmasq/{lan.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实地址，**按设计不同** |
+| 脱敏模板 | `automation/etc/dnsmasq/{resolver.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实地址，**按设计不同** |
 | 站点态 | `automation/policy/capabilities.yaml`、`automation/etc/mihomo/config.local.yaml` | 账号、开关与私有覆写只在真机 `/etc/mihomo/adaptive/` 与合并后的 `config.yaml` 里 |
 | 凭据 | `secrets/*`、`/etc/mihomo-alert.env`、`/etc/mihomo/reconcile-targets.conf` | 不发布、不入库 |
 
@@ -147,8 +147,10 @@ sudo cat /run/mihomo-healthcheck/status
 | 预算服务校验协议、账本与预扣 | 平台解锁、账号可用、节点吞吐或供应商允许下载 |
 | `nft -c -f` 通过 | 目标机之外的环境可用；本机 nftables 表是部署端文件，不是通用模板 |
 
-可信 LAN 模型：`lan0` 入站整体放行是为了容纳动态透明代理端口，不做访客隔离。
-公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`，详见 [SECURITY.md](SECURITY.md)。
+入站模型：`lo` 与 established 之外，`wan0`/`wlan0` 只收上游 LAN 的 SSH 与 `8799`，
+VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理靠 `ip rule 9000` 与
+`redirect` 工作，不再依赖整口信任。公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`，
+详见 [SECURITY.md](SECURITY.md)。
 本仓库不发布订阅地址、节点标签、controller secret、WireGuard 私钥与真实 MAC。
 
 ## 发布前自查

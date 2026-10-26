@@ -15,7 +15,7 @@
 | `sbin/` | 可执行脚本 | `/usr/local/sbin/`（0755） |
 | `systemd/` | 单元与 drop-in 片段 | `/etc/systemd/system/`（0644） |
 | `etc/dnsmasq-upstreams.*` | 三份 dnsmasq 上游基线（direct / mihomo / mosdns） | `/etc/mihomo/` |
-| `etc/dnsmasq/` | 两块 dnsmasq 作用域与初始上游：`lan.conf`、`vlan-pilot.conf`、`upstreams.conf` | `/etc/dnsmasq.d/lan.conf`、`/etc/dnsmasq-vlan-pilot.conf`、`/etc/dnsmasq-upstreams.conf`（仅缺失时播种） |
+| `etc/dnsmasq/` | 两个 dnsmasq 作用域与初始上游：`resolver.conf`（环回）、`vlan-pilot.conf`、`upstreams.conf` | `/etc/dnsmasq.d/resolver.conf`、`/etc/dnsmasq-vlan-pilot.conf`、`/etc/dnsmasq-upstreams.conf`（仅缺失时播种） |
 | `etc/mosdns/` | MosDNS 配置骨架与两份自定义域名规则 | `/etc/mosdns/` |
 | `etc/mihomo/config.local.yaml` | 本机覆盖段（不含凭据） | `/etc/mihomo/config.local.yaml`（已存在则保留） |
 | `policy/capabilities.yaml` | 稳定性、节点能力与私有路由覆写模板（`overlay` 段为空） | `/etc/mihomo/adaptive/capabilities.yaml` |
@@ -62,7 +62,7 @@
 预算 drop-in 就是 `systemd/mihomo.service.d/measurement-budget.conf`，不再有单独的 `optional/` 副本。
 带 `Exec*` 且依赖部署参数的单元统一加载 `EnvironmentFile=-/etc/mihomo-automation.env`；`mihomo-watch.service`
 与 `mihomo-alert@.service` 读 `/etc/mihomo-alert.env`。`homeassistant-access-guard.service` 是一次性单元，从 WAN、WLAN
-口 `REJECT` tcp/8123，把 Home Assistant UI 限制在下游 LAN；脚本自己加载 `/etc/mihomo-automation.env`，单元不另设
+口 `REJECT` tcp/8123，上游侧访问不到 Home Assistant UI；脚本自己加载 `/etc/mihomo-automation.env`，单元不另设
 `EnvironmentFile`。
 
 | Timer | 周期 | 作用 |
@@ -102,7 +102,7 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 
 - `sbin/` 与 `systemd/` **覆盖式**安装，保证脚本与单元始终是仓库版本；
 - 部署数据（`capabilities.yaml`、`route-defaults.yaml`、MosDNS 配置与规则、`config.local.yaml`、三份 dnsmasq 上游基线、
-  dnsmasq 的 `lan.conf` / `vlan-pilot.conf`、两份示例 env）**已存在则保留**，不会覆盖运维人员改过的文件；
+  dnsmasq 的 `resolver.conf` / `vlan-pilot.conf`、两份示例 env）**已存在则保留**，不会覆盖运维人员改过的文件；
 - `route-defaults.yaml` 独立安装为 0644 公共数据，不写入或替换已有私有 `capabilities.yaml`；旧清单缺少路由表时使用这份默认表；
 - 创建 0700 权限的 `/etc/mihomo/{secrets,adaptive,providers}` 与 `/var/lib/mihomo-{measurements,extra-subscriptions,subscription-backups}`；
 - 若 `/etc/dnsmasq-upstreams.conf` 不存在，用 `etc/dnsmasq/upstreams.conf` 播种，保证代理栈启动前 DNS 可用；
@@ -117,19 +117,18 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 
 ## 部署参数（`/etc/mihomo-automation.env`）
 
-`env/automation.env.example` 是发布层的 env 模板，覆盖脚本读取的全部变量；共享的 LAN 地址、mixed/controller 端口和 WAN 接口
+`env/automation.env.example` 是发布层的 env 模板，覆盖脚本读取的全部变量；共享的 mixed/controller 端口、WAN 接口与管理无线接口
 按站点填写，其余独有参数同样在这里审阅。把 env 安装为 **0600** 并排除在版本控制之外。
 已有部署应合并这四个共享字段，保留现有订阅镜像、能力清单路径和管理接口等设置；不要直接覆盖已有 env。
 脚本内置同样的示例默认值，因此不写 env 文件也能启动，但上线前必须改成实际值。
 
 | 变量 | 示例 | 作用 |
 |---|---|---|
-| `GATEWAY_LAN_IP` | `10.77.0.1` | 网关 LAN 地址：dnsmasq 的 :53 / DHCP、Mihomo mixed 端口与 external controller 都监听在此；dnsmasq 配置不展开环境变量，改这里时同步改 `etc/dnsmasq/lan.conf` 的 `listen-address` / `dhcp-range` / `dhcp-option` |
 | `MIHOMO_MIXED_PORT` | `7890` | Mihomo HTTP/SOCKS 混合端口 |
 | `MIHOMO_CONTROLLER_PORT` | `9090` | Mihomo external controller 端口 |
 | `SUBSCRIPTION_BACKUP_URL` | 空 | 供应商文档提供的镜像链接；留空时只用 `subscription.url` 单链接 |
 | `WAN_INTERFACE` | `wan0` | 上游（WAN）接口名 |
-| `WLAN_INTERFACE` | `wlan0` | 下游 / 管理无线接口 |
+| `WLAN_INTERFACE` | `wlan0` | 管理无线接口 |
 | `MANAGEMENT_INTERFACE` | `wlan0` | 可选 dispatcher 观察的接口 |
 | `MIHOMO_MANAGEMENT_CONNECTION_UUID` | 空 | 留空表示该接口上的所有连接都接受；填值后只对指定连接动作 |
 | `MIHOMO_RECONCILE_TARGETS` | `/etc/mihomo/reconcile-targets.conf` | Selector → 目标组 的映射文件 |
@@ -162,9 +161,9 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - **预算边界**：核心的启动、周期、失败、刷新与回滚 URLTest 均经本地准入服务，每个原生检查固定预扣 2 次额度；锁内重读当前配置和策略，失联或超额只拒绝检测、不改变业务路由。沿用 `quality_attempts_per_hour` 账本键和原账本路径。这不是业务 TCP 总连接数上限，见[运维手册](../docs/operations.zh-CN.md)。
 - **互斥**：定时任务用 `flock` 串行化（Mihomo 维护一条锁，MosDNS 各任务一条锁），避免更新与检查互相踩踏。
 - **DNS 自愈**：`mihomo-dns-mode` 带锁选择并验证 dnsmasq 上游；已有活动文件可能原位写入，失败时尝试恢复原文件，不把候选临时文件等同于原子发布。
-- **可信内网前提**：本方案以单点、可信内网为边界，LAN INPUT 整体放行，不使用可用于不可信访客网络的通用加固策略。
+- **可信内网前提**：本方案以单点、可信内网为边界，入站只放行 `lo`、established、上游 LAN 的 SSH/8799 与 DHCP，VLAN20 的管理口单独放行；不作为访客网络的加固策略。
 - **不影响宿主其它服务**：本层只管理自己的单元、`/etc/mihomo`、`/etc/mosdns`、`/etc/dnsmasq-upstreams.conf`、
-  `/etc/dnsmasq.d/lan.conf`、`/etc/dnsmasq-vlan-pilot.conf` 与自己的状态目录。
+  `/etc/dnsmasq.d/resolver.conf`、`/etc/dnsmasq-vlan-pilot.conf` 与自己的状态目录。
 
 ## 仓库门禁
 

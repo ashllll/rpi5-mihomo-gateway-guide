@@ -17,7 +17,7 @@ redirect 端口由核心自己管理；这是“不 `flush ruleset`”的原因�
 
 ## 证据链
 
-客户端拿到 fake-IP 只证明解析成功。此后还要经过默认路由、`lan0` 转发、
+客户端拿到 fake-IP 只证明解析成功。此后还要经过默认路由、`proxy20` 转发、
 `inet mihomo` 的 `dnat/redirect`、规则命中与节点出口；显式代理与网关本机
 `curl` 都绕过了其中一段，不能替代真实 LAN 验收。判定“已就绪”只认
 `/run/mihomo-healthcheck/status` 的 `tun/redirect/filter/route` 四要素。

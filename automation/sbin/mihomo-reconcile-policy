@@ -9,11 +9,10 @@ if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
 
-: "${GATEWAY_LAN_IP:=10.77.0.1}"
 : "${MIHOMO_CONTROLLER_PORT:=9090}"
 : "${MIHOMO_RECONCILE_TARGETS:=/etc/mihomo/reconcile-targets.conf}"
 
-controller="http://${GATEWAY_LAN_IP}:${MIHOMO_CONTROLLER_PORT}"
+controller="http://127.0.0.1:${MIHOMO_CONTROLLER_PORT}"
 secret_file=/etc/mihomo/secrets/dashboard.secret
 targets_file=$MIHOMO_RECONCILE_TARGETS
 
