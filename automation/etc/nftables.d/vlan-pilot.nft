@@ -1,0 +1,19 @@
+# PC VLAN pilot (proxy20).  Installed to /etc/nftables.d/vlan-pilot.nft;
+# /etc/nftables.conf includes this file last, after the rp_filter tables exist.
+# Addresses are RFC 5737 documentation placeholders (see the 20261020 comments
+# on the gateway for the live comments); the recorded gateway keeps its real
+# private ranges and install_default never overwrites them.
+insert rule inet rp_filter input iifname "proxy20" meta nfproto ipv6 counter drop comment "rp5-pc-vlan-pilot"
+insert rule inet rp_filter forward iifname "proxy20" meta nfproto ipv6 counter drop comment "rp5-pc-vlan-pilot"
+insert rule inet rp_filter forward iifname "proxy20" oifname != "Mihomo" ip daddr != 198.51.100.0/24 counter drop comment "rp5-pc-vlan-pilot"
+add rule inet rp_filter input iifname "proxy20" udp sport 68 udp dport 67 counter accept comment "rp5-pc-vlan-pilot"
+add rule inet rp_filter input iifname "proxy20" ip saddr 203.0.113.0/24 meta l4proto { tcp, udp } th dport 53 counter accept comment "rp5-pc-vlan-pilot"
+add rule inet rp_filter input iifname "proxy20" ip saddr 203.0.113.0/24 ct status dnat counter accept comment "rp5-pc-vlan-pilot"
+# Management on the pilot VLAN: a laptop that roams onto this SSID would
+# otherwise lose SSH to the gateway (the input policy drops everything except
+# DHCP/DNS/dnat), which is exactly how the 2026-10-25 lockout happened.
+add rule inet rp_filter input iifname "proxy20" ip saddr 203.0.113.0/24 tcp dport 22 counter accept comment "rp5-pc-vlan-pilot-mgmt"
+add rule inet rp_filter forward iifname "proxy20" oifname "Mihomo" ip saddr 203.0.113.0/24 counter accept comment "rp5-pc-vlan-pilot"
+add rule inet rp_filter forward iifname "Mihomo" oifname "proxy20" ip daddr 203.0.113.0/24 counter accept comment "rp5-pc-vlan-pilot"
+add rule inet rp_filter forward iifname "proxy20" oifname "wan0" ip saddr 203.0.113.0/24 ip daddr 198.51.100.0/24 counter accept comment "rp5-pc-vlan-pilot"
+add rule ip rp_nat postrouting ip saddr 203.0.113.0/24 oifname "wan0" ip daddr 198.51.100.0/24 counter masquerade comment "rp5-pc-vlan-pilot"

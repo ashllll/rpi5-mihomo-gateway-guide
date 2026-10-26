@@ -14,9 +14,8 @@ releases_dir=$rules_root/releases
 if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
-: "${GATEWAY_LAN_IP:=10.77.0.1}"
 : "${MIHOMO_MIXED_PORT:=7890}"
-proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mosdns-rules.XXXXXX)
 test_pid=
 

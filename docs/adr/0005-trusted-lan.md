@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by 0008
 recorded: 2026-10-16
 ---
 

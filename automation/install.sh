@@ -118,17 +118,30 @@ else
   say "skip etc/NetworkManager/dispatcher.d (NetworkManager is not installed)"
 fi
 
-# dnsmasq runs two independent scopes. lan.conf belongs in dnsmasq.d, the pilot
-# on its own config path, so the two DHCP servers cannot read each other's file.
+# dnsmasq keeps two independent scopes.  resolver.conf only serves loopback for
+# the gateway's own tools (the old downstream LAN and the Pi's AP were retired);
+# the pilot scope lives on its own config path so the two cannot read each
+# other's file.
 for baseline in "$here"/etc/dnsmasq-upstreams.*; do
   install_default "$baseline" "/etc/mihomo/$(basename "$baseline")" 0644
 done
-install_default "$here/etc/dnsmasq/lan.conf" /etc/dnsmasq.d/lan.conf 0644
+install_default "$here/etc/dnsmasq/resolver.conf" /etc/dnsmasq.d/resolver.conf 0644
 install_default "$here/etc/dnsmasq/vlan-pilot.conf" /etc/dnsmasq-vlan-pilot.conf 0644
 
 install_default "$here/etc/mosdns/config.yaml" /etc/mosdns/config.yaml 0644
 for rule in "$here"/etc/mosdns/rules/*; do
   install_default "$rule" "/etc/mosdns/rules/$(basename "$rule")" 0644
+done
+
+# Front-door firewall plus its two includes.  nftables.service loads
+# /etc/nftables.conf; the includes are part of the same ruleset, so a host that
+# already has local edits keeps them (install_default).
+if [ "$dry_run" = false ]; then
+  mkdir -p -- "$root/etc/nftables.d"
+fi
+install_default "$here/etc/nftables.conf" /etc/nftables.conf 0644
+for include in "$here"/etc/nftables.d/*; do
+  install_default "$include" "/etc/nftables.d/$(basename "$include")" 0600
 done
 
 install_default "$here/policy/capabilities.yaml" /etc/mihomo/adaptive/capabilities.yaml 0644
@@ -192,8 +205,8 @@ Still required before the gateway is fully functional:
   3. Fill the curated-pool node labels in the overlay section of
      /etc/mihomo/adaptive/capabilities.yaml, and write
      /etc/mihomo/reconcile-targets.conf for mihomo-reconcile-policy.
-  4. Check the interface and address in /etc/dnsmasq.d/lan.conf: the shipped
-     file is a documentation placeholder that assumes lan0 and 192.0.2.1.
+  4. resolver.conf serves loopback only; set its host-record addresses to the
+     gateway's real management address if the site differs from the placeholder.
   5. The NetworkManager dispatcher in etc/NetworkManager/dispatcher.d/ is
      installed only where NetworkManager exists; it takes MANAGEMENT_INTERFACE
      and MIHOMO_MANAGEMENT_CONNECTION_UUID from /etc/mihomo-automation.env.

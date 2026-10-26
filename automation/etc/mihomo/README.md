@@ -49,10 +49,11 @@
 
 ## 占位与脱敏
 
-- `10.77.0.0/24`、`10.77.0.1` 是占位站点 LAN（与 `automation/env/automation.env.example`
-  的 `GATEWAY_LAN_IP` 一致）。真机值属于部署数据，不发布；复用时替换这三个键：
-  `bind-address`、`lan-allowed-ips`、`external-controller`。
-- `tun.route-exclude-address` 的 `10.77.0.0/16` 是同一占位超网，真机排除的是它自己的 LAN /16。
+- `127.0.0.1/32` 固定在 `lan-allowed-ips`：本机管理调用（mixed、controller、DNS 探测）
+  全部走环回，核心按 `bind-address: "*"` 监听。上游 VLAN1 与 VLAN20 客户端各用
+  `198.51.100.0/24`、`203.0.113.0/24` 占位；真机值属于部署数据，不发布。复用时替换
+  这三个键：`bind-address`、`lan-allowed-ips`、`external-controller`。
+- `tun.route-exclude-address` 的 `10.77.0.0/16` 是占位超网，真机排除的是它自己的上游 LAN /16。
 - `sniffer.skip-src-address` 由部署端 WireGuard 对端地址计算，骨架不发布该列表，真机配置里存在。
 - `dns.nameserver` 里的 `#Default Proxy` 指向生成器创建的策略组，所以本地段只能在组已存在的配置上叠加。
 

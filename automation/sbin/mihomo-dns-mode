@@ -14,8 +14,6 @@ fi
 
 # dnsmasq answers on the LAN address, so the post-switch verification below
 # queries that address rather than loopback.
-: "${GATEWAY_LAN_IP:=10.77.0.1}"
-
 dns_query() {
   server=$1
   port=$2
@@ -169,19 +167,19 @@ attempt=1
 while [ "$attempt" -le 12 ]; do
   case "$mode" in
     mosdns)
-      cn_answer=$(dns_query "$GATEWAY_LAN_IP" 53 baidu.com | tail -n 1 || true)
-      proxy_answer=$(dns_query "$GATEWAY_LAN_IP" 53 openai.com | tail -n 1 || true)
+      cn_answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
+      proxy_answer=$(dns_query "127.0.0.1" 53 openai.com | tail -n 1 || true)
       if [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer" &&
          [ -n "$proxy_answer" ] && is_fake_ip "$proxy_answer"; then
         verified=true
       fi
       ;;
     mihomo)
-      answer=$(dns_query "$GATEWAY_LAN_IP" 53 openai.com | tail -n 1 || true)
+      answer=$(dns_query "127.0.0.1" 53 openai.com | tail -n 1 || true)
       [ -n "$answer" ] && is_fake_ip "$answer" && verified=true
       ;;
     direct)
-      answer=$(dns_query "$GATEWAY_LAN_IP" 53 baidu.com | tail -n 1 || true)
+      answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
       [ -n "$answer" ] && ! is_fake_ip "$answer" && verified=true
       ;;
   esac

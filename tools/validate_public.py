@@ -69,7 +69,7 @@ REQUIRED = (
     "automation/README.zh-CN.md",
     "automation/env/automation.env.example",
     "automation/env/mihomo-alert.env.example",
-    "automation/etc/dnsmasq/lan.conf",
+    "automation/etc/dnsmasq/resolver.conf",
     "automation/etc/dnsmasq/vlan-pilot.conf",
     "automation/etc/dnsmasq/upstreams.conf",
     "automation/etc/mosdns/config.yaml",

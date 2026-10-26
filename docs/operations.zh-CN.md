@@ -18,11 +18,14 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 |---|---|---|
 | `business` | `verified` / `idle` | 转发计数器在增长 / 链路在但没流量 |
 | `tun` `redirect` `filter` `route` | 全 `1` | TUN 设备、`inet mihomo`、`inet rp_filter`、`ip rule 9000` 四要素 |
-| `egress` | `ok` | 最近一次经 `192.168.1.1:7890` 取 gstatic 204 成功 |
+| `egress` | `ok` | 最近一次经 `127.0.0.1:7890` 取 gstatic 204 成功 |
 | `action` | `none` | 本次未触发恢复动作；`restart` 表示探针重启过核心 |
 | `fatal` | `none` | 非 `none` 时优先看它，再对照 `journalctl` |
 
 `business=failed` / 任一四要素为 0 / `egress!=ok` 都代表代理链路不可用。
+
+出口抽样固定走 `127.0.0.1:7890`：核心按 `bind-address: "*"` 监听，本机已无独立 LAN 口，环回是唯一不随链路状态变化的入口；`lan-allowed-ips` 必须含 `127.0.0.1/32`，否则核心会重置环回连接。生产拓扑是「一根网线接 UCG 交换机」：上行 VLAN1（`192.168.0.0/24`）+ 下行 VLAN20（`192.168.20.1/24`，UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端），独立下游 LAN 口与 Pi 自建 AP 已移除。
+
 探针只在状态迁移时推送告警，所以“没新告警”不等于“此刻正常”，仍需看 `egress`。
 黑障自愈：进程还活着但证据连续红 3 次，探针会重启核心一次（`restarted_at` 记录时间，
 每小时至多一次）；三次仍不绿说明重启救不回来，直接查节点/订阅/上游。
@@ -35,9 +38,9 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | 单元 | 作用 | 触发 |
 |---|---|---|
 | `nftables.service` | 载入 `rp_filter` / `rp_nat` | 开机、手动 reload |
-| `dnsmasq.service` | 主 LAN DNS/DHCP；`boot-safe.conf` 保证先于 mihomo 写 direct 基线；`restart.conf` 补 `Restart=always`／`RestartSec=2s`（Debian 原 unit 没有重启策略，崩溃后全屋 DNS 静默失效，而 mihomo 门禁只证明代理链路，看不到它） | 常驻，崩溃自起 |
+| `dnsmasq.service` | 环回 resolver（`/etc/dnsmasq.d/resolver.conf`，`127.0.0.1:53`）；`boot-safe.conf` 保证先于 mihomo 写 direct 基线；`restart.conf` 补 `Restart=always`／`RestartSec=2s`（Debian 原 unit 没有重启策略，崩溃后网关自身解析静默失效，而 mihomo 门禁只证明代理链路，看不到它） | 常驻，崩溃自起 |
 | `dnsmasq-vlan-pilot.service` | VLAN 20 独立 DNS/DHCP | 常驻 |
-| `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，HA UI 只对下游 LAN 开放 | 开机一次（oneshot） |
+| `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 HA UI | 开机一次（oneshot） |
 | `mihomo-dnsmasq-guard.timer` | 每 30 秒分层探测：先 `127.0.0.1:53` 两个国内域名，失败再退到 `127.0.0.1:5335`。dnsmasq 静默（0/2）立即重启它；只有一个域名慢/无答案记为降级，连续两轮先重启 mosdns、仍不恢复再重启 dnsmasq。重启预算 3 次/15 分钟，超出只告警不重启（`throttled`），避免重启风暴 | 定时 |
 | `mihomo.service` | 核心（`--run-core` 校验后拉起；`ExecStartPre` 先 `mihomo -t`） | 常驻，`Restart=always` |
 | `mihomo-measurement-budget.service` | 预算准入 broker（建 socket；账本首扣创建） | 常驻（enabled） |
@@ -69,9 +72,9 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `redirect=0` | `nft list table inet mihomo` | 表没建：核心未完成启动；`systemctl restart mihomo` 后复跑 `--startup-check 30` |
 | `filter=0` | `nft list tables`、`systemctl status nftables` | 缺表：`systemctl reload nftables`；若配置改坏，先 `nft -c -f /etc/nftables.conf` |
 | `route=0` | `ip rule`、`ip route show table 2022` | 规则 9000 缺失通常是核心未完成 auto-route；重启核心并观察 |
-| `egress=failed` | `curl -x socks5h://192.168.1.1:7890 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204` | 204 说明探针误报；否则看节点/订阅/上游 |
+| `egress=failed` | `curl -x socks5h://127.0.0.1:7890 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204` | 204 说明探针误报；否则看节点/订阅/上游 |
 | DNS 全挂 | `cat /etc/dnsmasq-upstreams.conf`、`dig @127.0.0.1 -p 5335 example.com` | 上游模式错：`mihomo-dns-mode auto`；mosdns 挂：看 `mosdns-healthcheck` 与 `journalctl -u mosdns` |
-| 客户端只走直连 | `cat /run/mihomo-healthcheck/status`、`nft list table inet mihomo` | 四要素正常但规则未命中：检查客户端是否指向 `192.168.1.1` 的 DNS |
+| 客户端只走直连 | `cat /run/mihomo-healthcheck/status`、`nft list table inet mihomo` | 四要素正常但规则未命中：检查 UCG 的 DHCP 是否把 VLAN20 客户端的 DNS 指向 `192.168.20.1` |
 | 预算拒绝一切 | `systemctl status mihomo-measurement-budget`、`ls -l /run/mihomo-measurements/` | broker 未起或 socket 权限错；账本损坏先备份再重建 |
 | 告警不来 | `sudo /usr/local/sbin/mihomo-alert --test` | 看 `/etc/mihomo-alert.env`（0600）与 `journalctl -t mihomo-alert` |
 

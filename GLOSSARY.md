@@ -11,7 +11,7 @@ fake-IP 只证明解析成功，不证明转发成功。
 
 **auto-redirect**：Mihomo 自动维护的 TCP 重定向入口（动态端口，本机 `:46225`），
 配合 `inet mihomo` 的 `redirect` 规则把 TCP 送进核心。端口是动态的，所以防火墙
-不能写死白名单，`lan0` 整体放行。
+不按固定端口放行，由核心自己的动态表与 `ip rule 9000` 承担转发。
 
 **预算准入**：显式节点拨号前的本地额度检查。核心请求
 `/run/mihomo-measurements/budget.sock`，broker 校验协议、节点身份与期限，按 2 次尝试预扣，

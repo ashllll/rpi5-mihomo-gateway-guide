@@ -43,9 +43,8 @@ if [ -n "${MIHOMO_ROUTE_DEFAULTS:-}" ]; then
 else
   unset MIHOMO_ROUTE_DEFAULTS
 fi
-: "${GATEWAY_LAN_IP:=10.77.0.1}"
 : "${MIHOMO_MIXED_PORT:=7890}"
-proxy=http://${GATEWAY_LAN_IP}:${MIHOMO_MIXED_PORT}
+proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mihomo-subscription.XXXXXX)
 remote=$work_dir/subscription.yaml
 candidate=$work_dir/config.yaml
