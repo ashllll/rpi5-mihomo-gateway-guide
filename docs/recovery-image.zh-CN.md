@@ -88,7 +88,7 @@ sudo python3 gateway_image.py restore \
 4. 按[部署文档](deployment.zh-CN.md)安装自动化层与网络配置，确认独立管理连接可用后再启用网关服务。
 5. 按[自动化说明](../automation/README.zh-CN.md)添加自己的订阅、规则数据与能力清单，验收通过后按需启用 timer。
 
-真实 MAC 绑定与网络连接均需重新建立；不能假设新介质上的接口仍叫原来的 `wan0` / `lan0`。
+真实 MAC 绑定与网络连接均需重新建立；不能假设新介质上的接口仍叫原来的 `wan0` / `proxy20`。
 一键工具让 NetworkManager 自行为有线网卡建立 DHCP 连接；cloud-init 负责账号和扩容，避免把网卡通配符渲染为错误接口名。
 保持上游 SSH 或本地控制台，先确认管理链路再改网络。公开镜像不能恢复已经脱敏删除的原账号、节点或私有业务数据。
 

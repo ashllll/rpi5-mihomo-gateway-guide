@@ -1,0 +1,12 @@
+# PC-only UCG WireGuard link.  Installed to /etc/nftables.d/ucg-pc-link.nft;
+# /etc/nftables.conf includes this file last, after the rp_filter tables exist.
+# Addresses are RFC 5737 / RFC 1918 documentation placeholders.
+add rule inet rp_filter input iifname "wan0" ip saddr 198.51.100.1 ip daddr 198.51.100.10 udp dport 51891 counter accept comment "pc-live-pilot-20261020"
+add rule inet rp_filter input iifname "wg-ucg-pilot" ct status dnat counter accept comment "pc-live-pilot-20261020"
+add rule inet rp_filter forward iifname "wg-ucg-pilot" oifname "Mihomo" counter accept comment "pc-live-pilot-20261020"
+add rule inet rp_filter forward iifname "wg-ucg-pilot" oifname "wan0" counter accept comment "pc-live-pilot-20261020"
+add rule ip rp_nat postrouting ip saddr 10.203.0.2/32 oifname "wan0" counter masquerade comment "pc-live-pilot-20261020"
+
+# Derived from current TUN endpoints and route exclusions.
+add rule inet rp_filter input iifname "Mihomo" ip saddr 198.18.0.2 ip daddr 198.18.0.1 meta l4proto tcp counter accept comment "gateway-fix-20261020-dns"
+insert rule inet rp_filter forward iifname "wg-ucg-pilot" oifname != "Mihomo" ip daddr != { 198.51.100.0/24, 224.0.0.0/4 } counter drop comment "gateway-fix-20261020-guard"

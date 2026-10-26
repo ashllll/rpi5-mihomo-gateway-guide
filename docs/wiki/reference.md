@@ -9,7 +9,7 @@
 | [`automation/install.sh`](../../automation/install.sh) | 就地执行 | 覆盖式幂等；`--dry-run` 预览；只 enable 11 个单元 |
 | [`automation/sbin/`](../../automation/sbin/) | `/usr/local/sbin/` | 探针、预算 broker、DNS 模式机、订阅/规则/换核工具 |
 | [`automation/systemd/`](../../automation/systemd/) | `/etc/systemd/system/` | 单元与 6 个 `mihomo.service.d` drop-in |
-| [`automation/etc/dnsmasq/`](../../automation/etc/dnsmasq/) | `/etc/dnsmasq.d/lan.conf` 等 | 两个 dnsmasq 作用域 + 上游基线 |
+| [`automation/etc/dnsmasq/`](../../automation/etc/dnsmasq/) | `/etc/dnsmasq.d/resolver.conf` 等 | 两个 dnsmasq 作用域（环回 + VLAN20）+ 上游基线 |
 | [`automation/etc/mosdns/`](../../automation/etc/mosdns/) | `/etc/mosdns/` | 配置与自定义规则；大规则集由更新任务下载 |
 | [`automation/env/`](../../automation/env/) | `/etc/*.env.example` | 部署参数模板，真实文件 0600 |
 | [`automation/policy/`](../../automation/policy/) | `/etc/mihomo/adaptive/` | 能力清单与路由默认值骨架 |

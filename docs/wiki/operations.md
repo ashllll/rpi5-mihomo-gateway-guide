@@ -23,8 +23,8 @@ ss -lntup
 | 层 | 只读检查 | 判定 |
 |---|---|---|
 | 上游 | `ip route`、`curl --noproxy '*' https://www.baidu.com/` | 单次成功只说明这一刻直连可达 |
-| DNS | `dig @192.168.1.1 example.com +time=2`、`dig @127.0.0.1 -p 5335 example.com` | 两个入口分别验证 dnsmasq 与 mosdns |
-| 显式代理 | `curl -x socks5h://192.168.1.1:7890 .../generate_204` | 204 只证明该端口，不证明透明转发 |
+| DNS | `dig @192.168.20.1 example.com +time=2`、`dig @127.0.0.1 -p 5335 example.com` | 两个入口分别验证 VLAN20 的 dnsmasq 与 mosdns |
+| 显式代理 | `curl -x socks5h://127.0.0.1:7890 .../generate_204` | 204 只证明环回端口，不证明透明转发 |
 | 真实 LAN | 下游终端关闭 VPN/系统代理后重新取租约再测 | 唯一能验收透明代理与 VLAN 的层 |
 
 故障对照、DNS 模式回退、换核与账本位置见[运维全文](../operations.zh-CN.md)。

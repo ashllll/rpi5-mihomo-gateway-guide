@@ -7,10 +7,10 @@
 
 | 项目 | 本机取值 |
 |---|---|
-| 硬件 | Raspberry Pi 5、arm64、两块有线网口（`wan0` 上联、`lan0` 下联） |
+| 硬件 | Raspberry Pi 5、arm64、单根网线接 UCG 交换机（`wan0` 与 `proxy20` 同线） |
 | 系统 | Raspberry Pi OS Lite / Debian 13，systemd 252+，NetworkManager |
 | 附加接口 | `wan0` 上的 802.1Q VLAN 20（`proxy20`）、WireGuard `wg-ucg-pilot` |
-| 网关地址 | `lan0 192.168.1.1/24`、`proxy20 192.168.20.1/24`、`wg-ucg-pilot 10.253.254.1/30` |
+| 网关地址 | `proxy20 192.168.20.1/24`、`wg-ucg-pilot 10.253.254.1/30`、Mihomo TUN `198.18.0.1/30` |
 | 上游 | `wan0` 由上游 DHCP 分配（本机 `.117`），SSH 与 8799 只对上联私网开放 |
 | 运行层 | 12 个 enabled 单元、4 个 disabled timer、6 个 `mihomo.service.d` drop-in |
 
@@ -37,28 +37,26 @@ net.ipv4.conf.all.accept_redirects=0
 各接口的 `net.ipv4.conf.*.rp_filter` 本机为 `2`（loose）。不要写成全局 `0`：
 `inet rp_filter` 的 forward 白名单依赖反向路径检查拦住伪造源。
 
-验收：`sysctl net.ipv4.ip_forward` 为 1；`ip -br addr` 里四个接口都有地址。
+验收：`sysctl net.ipv4.ip_forward` 为 1；`ip -br addr` 里 `wan0`、`proxy20`、`wg-ucg-pilot` 都有地址（TUN 由核心启动后创建）。
 
 ## 2. 网络身份（手工一次性）
 
-NetworkManager 管三个连接，WireGuard 用 wg-quick：
+NetworkManager 管两个连接（`wan0`、`proxy20`），WireGuard 用 wg-quick：
 
 ```sh
-# 上联：DHCP 拿地址与默认路由
-nmcli con show                       # 确认 wan0 / lan0 / proxy20 三个连接
-# 下联：静态地址 + 内置 DHCP/DNS 由 dnsmasq 负责
-nmcli con mod lan0 ipv4.addresses 192.168.1.1/24 ipv4.method manual
-# VLAN 试点：wan0 上的 802.1Q VLAN 20
+# 上游：DHCP 拿 VLAN1 地址与默认路由（也是唯一管理入口）
+nmcli con show                       # 确认 wan0 / proxy20 两个连接
+# VLAN 试点：同一根网线上的 802.1Q VLAN 20，DHCP/DNS 由 dnsmasq-vlan-pilot 负责
 nmcli con add type vlan con-name proxy20 dev wan0 id 20 \
   ipv4.method manual ipv4.addresses 192.168.20.1/24
 sudo systemctl enable --now wg-quick@wg-ucg-pilot
 ```
 
-`dnsmasq` 的 `interface=` 与 `listen-address` 必须和这三个连接一致；`proxy20` 的
+`dnsmasq` 两个作用域的 `interface=` 与 `listen-address` 必须和这两个连接一致；`proxy20` 的
 静态租约只给一台试点 PC，租约目录在 `/run/dnsmasq-vlan-pilot/leases`。
 WireGuard 只做点对点：UDP 51891 在 `wan0` 放行，对端 `10.253.254.2`。
 
-验收：`nmcli device` 中 `wan0`、`lan0`、`proxy20` 都是 connected，`wg show` 有握手。
+验收：`nmcli device` 中 `wan0`、`proxy20` 都是 connected，`wg show` 有握手。
 
 ## 3. 数据面 nftables
 
@@ -71,12 +69,12 @@ sudo nft list tables                 # 应看到 inet rp_filter 与 ip rp_nat
 ```
 
 - `inet rp_filter`：input/forward 默认 drop，白名单见[架构文档](architecture.zh-CN.md)。
-- `ip rp_nat`：`192.168.1.0/24` 出 `wan0` 做 masquerade。
-- `include` 的两个文件分别是 WireGuard 试点与 VLAN 试点规则，属于部署端内容，
-  **不随仓库发布**；换机器时必须按新接口重写，不能照抄地址。
+- `ip rp_nat`：自身不放 masquerade，VLAN20 与 WireGuard 的 NAT 在各自 include 文件里。
+- `include` 的两个文件分别是 WireGuard 试点与 VLAN 试点规则；仓库只发布占位骨架
+  （`automation/etc/nftables.d/`），换机器时必须按新接口重写，不能照抄地址。
 
-验收：`nft list chain inet rp_filter input` 有 `policy drop` 与 LAN 放行；
-`nft list chain ip rp_nat postrouting` 有 masquerade。
+验收：`nft list chain inet rp_filter input` 有 `policy drop`、`lo` 与上游白名单；
+`nft list chain ip rp_nat postrouting` 基础表为空；VLAN20 与 WireGuard 的 masquerade 只在各自 include。
 
 ## 4. 运行层安装
 
@@ -97,7 +95,7 @@ sudo automation/install.sh               # 真机安装
 |---|---|
 | `automation/sbin/*` | `/usr/local/sbin/`（0755，覆盖） |
 | `automation/systemd/**` | `/etc/systemd/system/`（0644，覆盖，含 `.d/` drop-in） |
-| `automation/etc/dnsmasq/lan.conf` | `/etc/dnsmasq.d/lan.conf` |
+| `automation/etc/dnsmasq/resolver.conf` | `/etc/dnsmasq.d/resolver.conf` |
 | `automation/etc/dnsmasq/vlan-pilot.conf` | `/etc/dnsmasq-vlan-pilot.conf` |
 | `automation/etc/dnsmasq/upstreams.conf` | `/etc/dnsmasq-upstreams.conf`（仅缺失时 seed） |
 | `automation/etc/dnsmasq-upstreams.*` | `/etc/mihomo/`（模式机基线，保留已有） |

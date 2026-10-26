@@ -470,8 +470,8 @@ def expected_install_map(root: Path) -> set[Path]:
         elif parts[0] == "etc":
             if relative.name.startswith("dnsmasq-upstreams."):
                 expected.add(Path("etc/mihomo") / relative.name)
-            elif relative.as_posix() == "etc/dnsmasq/lan.conf":
-                expected.add(Path("etc/dnsmasq.d/lan.conf"))
+            elif relative.as_posix() == "etc/dnsmasq/resolver.conf":
+                expected.add(Path("etc/dnsmasq.d/resolver.conf"))
             elif relative.as_posix() == "etc/dnsmasq/vlan-pilot.conf":
                 expected.add(Path("etc/dnsmasq-vlan-pilot.conf"))
             elif relative.as_posix() == "etc/dnsmasq/upstreams.conf":
@@ -678,7 +678,6 @@ def load_module(path: Path):
 def check_runtime_parameters() -> None:
     environment = dict(
         os.environ,
-        GATEWAY_LAN_IP="10.66.0.9",
         MIHOMO_MIXED_PORT="17890",
         MIHOMO_CONTROLLER_PORT="19090",
         MIHOMO_CAPABILITIES="/tmp/example-capabilities.yaml",

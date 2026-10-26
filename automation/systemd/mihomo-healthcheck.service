@@ -4,7 +4,7 @@ Wants=network-online.target
 After=network-online.target mihomo.service
 
 [Service]
-# Deployment parameters (GATEWAY_LAN_IP, ports, interfaces).
+# Deployment parameters (ports, interfaces; the probe itself uses loopback).
 EnvironmentFile=-/etc/mihomo-automation.env
 Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-healthcheck

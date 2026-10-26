@@ -7,8 +7,8 @@ DNS/MosDNS 配置骨架与自编译核心的补丁说明；网络事务、订阅
 
 ## 最短路径
 
-1. 按[部署文档](../deployment.zh-CN.md)重建网络身份（`wan0` 上联、`lan0` 主 LAN、
-   `proxy20` VLAN 20、`wg-ucg-pilot`）与 `/etc/nftables.conf`。
+1. 按[部署文档](../deployment.zh-CN.md)重建网络身份（`wan0` VLAN1 上联、
+   `proxy20` VLAN20、`wg-ucg-pilot`）与 `/etc/nftables.conf`。
 2. `sudo automation/install.sh --dry-run` 看计划，再去掉 `--dry-run` 安装。
    它只 enable 这台机器在用的 11 个单元，其余装上但保持 disabled 或 static。
 3. 用 `core/README.md` 的命令构建核心，`mihomo -t -d /etc/mihomo` 通过后再启动。

@@ -28,7 +28,7 @@ set -eu
 umask 077
 state_dir=/run/mihomo-healthcheck
 install -d -m 700 "$state_dir"
-lan_ip=${GATEWAY_LAN_IP:-127.0.0.1}
+lan_ip=127.0.0.1
 mixed_port=${MIHOMO_MIXED_PORT:-7890}
 egress_every=${EGRESS_EVERY:-300}
 egress_url=${EGRESS_URL:-https://www.gstatic.com/generate_204}
@@ -87,9 +87,15 @@ ok() { [ "$tun_ok" = 1 ] && [ "$redirect_ok" = 1 ] && [ "$filter_ok" = 1 ] && [ 
 # (core -> outbound -> node -> internet) works, which the packet counter alone
 # cannot. SOCKS5 hostname mode also proves the proxied DNS path.
 egress_probe() {
-  code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' \
-    --socks5-hostname "$lan_ip:$mixed_port" "$egress_url" 2>/dev/null || true)
-  [ "$code" = 204 ] && echo ok || echo fail
+  # Probe loopback first: the core binds `*`, so this works regardless of which
+  # LAN ports are up. A stale gateway address used to turn a healthy core into a
+  # permanent "degraded" whenever the LAN link was unplugged.
+  for host in 127.0.0.1 "$lan_ip"; do
+    code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' \
+      --socks5-hostname "$host:$mixed_port" "$egress_url" 2>/dev/null || true)
+    [ "$code" = 204 ] && { echo ok; return; }
+  done
+  echo fail
 }
 
 # mosdns owns :5335 (its config's listen address). mihomo has no ordering on it,
