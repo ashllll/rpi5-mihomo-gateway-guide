@@ -204,6 +204,43 @@ def native_group_nodes(config: dict, name: str) -> set[str]:
             if any(re.fullmatch(pattern, node["name"]) for pattern in patterns)}
 
 
+def check_renamed_pattern_pools(directory: Path) -> None:
+    directory.mkdir()
+    renamed = [name.replace('01', '02') if name.startswith('Example | ')
+               else name + ' generation-2' for name in ALL_NODES]
+    patterns = {
+        'media_patterns': [r'^Example \| (HK|JP) 02$'],
+        'ai_patterns': [r'^Example \| JP 02$'],
+        'auto_patterns': [r'^Example \| HK 02$'],
+        'developer_patterns': [r'^Example \| TW 02$'],
+        'tw_fixed_patterns': [r'^Example \| TW 02$'],
+    }
+    source, manifest = build_fixture(directory, dict(MANIFEST_OVERLAY, **patterns), renamed)
+    current = yaml.safe_load(source.read_text())
+    current['proxy-groups'].append({'name': 'Custom Selection', 'type': 'select',
+                                    'proxies': ['Example | TW 01']})
+    source.write_text(yaml.safe_dump(current))
+    policy = yaml.safe_load(manifest.read_text())
+    policy['selections'] = {'Custom Selection': {'type': 'select', 'members': ['Streaming'],
+                                               'patterns': [r'^Example \| TW 02$']}}
+    manifest.write_text(yaml.safe_dump(policy))
+    output = directory / 'renamed.yaml'
+    result = run_overlay(source, manifest, output)
+    check(result.returncode == 0, f'renamed pattern pools failed: {result.stderr}')
+    if result.returncode:
+        return
+    config = yaml.safe_load(output.read_text())
+    check(group_proxies(config, 'Streaming') == ['Example | HK 02', 'Example | JP 02'],
+          'media patterns did not replace stale node labels')
+    check(group_proxies(config, 'TW Fixed IP') == ['Example | TW 02'],
+          'fixed pool patterns did not follow the fresh node generation')
+    check(group_proxies(config, 'Custom Selection') == ['Streaming', 'Example | TW 02'],
+          'custom selector kept stale members or lost an authorized group reference')
+    names = {node['name'] for node in config['proxies']} | {group['name'] for group in config['proxy-groups']} | {'DIRECT', 'REJECT'}
+    check(all(member in names for group in config['proxy-groups'] for member in group.get('proxies', [])),
+          'renamed generation left a dangling node/group reference')
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
@@ -450,6 +487,7 @@ def main() -> int:
             not (directory / "overlay-empty.yaml").exists(),
             "failed run still wrote an output file",
         )
+        check_renamed_pattern_pools(directory / 'renamed-patterns')
 
     if FAILURES:
         print("policy overlay checks FAILED")

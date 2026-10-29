@@ -303,6 +303,26 @@ def overlay_labels(capabilities: dict, key: str) -> list[str]:
     return [str(item) for item in value if str(item).strip()]
 
 
+def pool_nodes(nodes: set[str], capabilities: dict, key: str) -> list[str]:
+    """Resolve one node pool from deployment patterns.
+
+    Node names change on every subscription generation, so pools are expressed
+    as regular expressions over the current node set.  A legacy label list
+    (``overlay.<key>_nodes``) is still honoured as a fallback so an older
+    manifest keeps generating a valid configuration.
+    """
+    overlay = capabilities.get("overlay", {})
+    patterns = overlay.get(f"{key}_patterns") if isinstance(overlay, dict) else None
+    if isinstance(patterns, list) and patterns:
+        matched = [
+            name for name in nodes
+            if matches_any(name, [str(pattern) for pattern in patterns])
+            and name not in {"DIRECT", "REJECT"}
+        ]
+        return sorted(matched)
+    return ordered_existing(overlay_labels(capabilities, f"{key}_nodes"), nodes)
+
+
 def bulk_capable_nodes(nodes: set[str], capabilities: dict) -> tuple[list[str], list[str], list[str]]:
     bulk = capabilities.get("roles", {}).get("bulk_download", {})
     if not isinstance(bulk, dict):
@@ -363,7 +383,6 @@ def main() -> None:
     capabilities = resolve_route_tables(load_capabilities(), route_defaults)
     secondary_nodes = sorted(name for name in nodes if name.startswith("BWB | "))
     infra_nodes = sorted(name for name in nodes if name.startswith("InfraAPI | "))
-    non_glados_nodes = unique([*infra_nodes, *secondary_nodes])
     stt_download_nodes, bywave_download_nodes, glados_download_nodes = bulk_capable_nodes(
         nodes, capabilities
     )
@@ -382,11 +401,11 @@ def main() -> None:
     download_nodes = unique([*stt_model_nodes, *bywave_model_nodes, *glados_model_nodes])
     github_control_nodes = unique([*bywave_github_nodes, *stt_github_nodes])
 
-    # Media, AI and default pools keep a deployment-defined preference order
-    # (`overlay.media_nodes`, `overlay.ai_nodes`, `overlay.auto_nodes`,
-    # `overlay.developer_nodes`, `overlay.tw_fixed_nodes`).  Labels that the
-    # subscription no longer publishes are dropped; empty lists are valid.
-    media_nodes = ordered_existing(overlay_labels(capabilities, "media_nodes"), nodes)
+    # Every pool is expressed as a pattern over the freshly merged node set
+    # (`overlay.media_patterns`, `overlay.ai_patterns`, `overlay.auto_patterns`,
+    # `overlay.developer_patterns`, `overlay.tw_fixed_patterns`), so a refresh
+    # that renames every node keeps working.
+    media_nodes = pool_nodes(nodes, capabilities, "media")
     streaming_nodes = media_nodes
     social_nodes = media_nodes
     telegram_nodes = media_nodes
@@ -407,29 +426,12 @@ def main() -> None:
     # The AI candidate order is static: deployment-selected nodes lead, then
     # eligible subscription nodes.  Mihomo fallback uses this order without
     # runtime scoring or reordering.
-    ai_nodes = ordered_existing(overlay_labels(capabilities, "ai_nodes"), nodes)
+    ai_nodes = pool_nodes(nodes, capabilities, "ai")
     ai_nodes = unique([*ai_nodes, *ai_source_nodes])
 
-    auto_nodes = ordered_existing(
-        [
-            *overlay_labels(capabilities, "auto_nodes"),
-            *secondary_nodes,
-            *infra_nodes,
-        ],
-        nodes,
-    )
-    developer_nodes = ordered_existing(
-        [
-            *overlay_labels(capabilities, "developer_nodes"),
-            *secondary_nodes,
-            *infra_nodes,
-        ],
-        nodes,
-    )
-    tw_fixed_nodes = ordered_existing(
-        overlay_labels(capabilities, "tw_fixed_nodes"),
-        nodes,
-    )
+    auto_nodes = unique([*pool_nodes(nodes, capabilities, "auto"), *secondary_nodes, *infra_nodes])
+    developer_nodes = unique([*pool_nodes(nodes, capabilities, "developer"), *secondary_nodes, *infra_nodes])
+    tw_fixed_nodes = pool_nodes(nodes, capabilities, "tw_fixed")
     for name, candidates in (
         ("Auto", auto_nodes),
         ("Developer", developer_nodes),
@@ -538,6 +540,30 @@ def main() -> None:
         },
     )
     replace_group(groups, "TW Fixed IP", {"type": "select", "proxies": tw_fixed_nodes})
+
+    # Hand-curated selectors are rebuilt from patterns for the same reason the
+    # pools are: a refresh renames every node, and a selector left holding the
+    # previous generation's names is exactly what made regeneration fail.
+    selections = capabilities.get("selections", {})
+    if isinstance(selections, dict):
+        known_groups = {group.get("name") for group in groups}
+        for name, spec in selections.items():
+            if not isinstance(spec, dict):
+                continue
+            patterns = [str(pattern) for pattern in spec.get("patterns", [])]
+            matched = [node for node in sorted(nodes)
+                       if matches_any(node, patterns)] if patterns else []
+            referenced = [str(item) for item in spec.get("members", [])
+                          if str(item) in known_groups]
+            members = unique([*referenced, *matched])
+            if not members:
+                continue
+            entry = {"type": str(spec.get("type", "select")), "proxies": members}
+            if any(group.get("name") == name for group in groups):
+                replace_group(groups, name, entry)
+            else:
+                upsert_group(groups, name, entry)
+
 
     # Provider child groups remain available, while service routes test the
     # combined authorized leaf nodes through one shared, lightweight URLTest.

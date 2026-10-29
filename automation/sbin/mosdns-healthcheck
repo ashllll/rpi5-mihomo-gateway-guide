@@ -25,40 +25,125 @@ dns_a_answer() {
     awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }'
 }
 
-check_mosdns() {
+probe_mosdns() {
   cn_answer=$(dns_a_answer 127.0.0.1 5335 baidu.com || true)
   proxy_answer=$(dns_a_answer 127.0.0.1 5335 openai.com || true)
-  metrics_ok=false
-  curl --fail --silent --max-time 2 http://127.0.0.1:9091/metrics >/dev/null 2>&1 &&
-    metrics_ok=true
-  [ -n "$cn_answer" ] &&
-    ! is_fake_ip "$cn_answer" &&
-    [ -n "$proxy_answer" ] &&
-    is_fake_ip "$proxy_answer" &&
-    [ "$metrics_ok" = true ]
+  metrics_ok=0
+  curl --fail --silent --max-time 2 http://127.0.0.1:9091/metrics >/dev/null 2>&1 && metrics_ok=1
+
+  cn_ok=0; proxy_ok=0
+  [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer" && cn_ok=1
+  [ -n "$proxy_answer" ] && is_fake_ip "$proxy_answer" && proxy_ok=1
+  alive=0
+  if [ -n "$cn_answer" ] || [ -n "$proxy_answer" ] || [ "$metrics_ok" = 1 ]; then alive=1; fi
 }
 
+unit_state=$(systemctl is-active mosdns.service 2>/dev/null || true)
+now=$(date +%s)
+mode=failed
 action=none
-if check_mosdns; then
+probe_mosdns
+active=0
+transitional=0
+case "$unit_state" in
+  active) active=1 ;;
+  activating|reloading|deactivating) transitional=1 ;;
+esac
+
+if [ "$transitional" = 1 ]; then
+  if [ "$alive" = 1 ]; then mode=degraded; fi
+  printf '0\n' >"$state_dir/fail_streak"
+elif [ "$cn_ok" = 1 ] && [ "$proxy_ok" = 1 ] && [ "$metrics_ok" = 1 ] && [ "$active" = 1 ]; then
   mode=healthy
+  printf '0\n' >"$state_dir/fail_streak"
+elif [ "$alive" = 1 ] && [ "$active" = 1 ]; then
+  # Any responsive signal proves the process is alive; a broken split-DNS path
+  # is degraded service and must not cause restart churn.
+  mode=degraded
+  printf '0\n' >"$state_dir/fail_streak"
 else
-  action=restart
-  logger -t mosdns-healthcheck "mosdns probe failed; restarting service"
-  systemctl restart mosdns.service || true
-  sleep 2
-  if check_mosdns; then
-    mode=recovered
+  if [ "$active" = 0 ]; then
+    restart_due=1
   else
-    mode=failed
-    action=fallback
-    logger -t mosdns-healthcheck "mosdns remains unhealthy; selecting fallback DNS mode"
-    if [ -x /usr/local/sbin/mihomo-alert ]; then
-      /usr/local/sbin/mihomo-alert --health "mosdns probes failed; DNS fallback mode selected" mosdns-fallback || true
+    streak=$(( $(cat "$state_dir/fail_streak" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "$streak" >"$state_dir/fail_streak"
+    restart_due=0
+    [ "$streak" -lt 3 ] || restart_due=1
+  fi
+
+  restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
+  if [ "$restart_due" = 1 ] && [ $(( now - restarted_at )) -ge 3600 ]; then
+    printf '%s\n' "$now" >"$state_dir/restarted_at"
+    action=restart
+    logger -t mosdns-healthcheck "mosdns inactive or all probes failed; requesting bounded restart"
+    systemctl restart mosdns.service || true
+    sleep 2
+    probe_mosdns
+    unit_state=$(systemctl is-active mosdns.service 2>/dev/null || true)
+    active=0; transitional=0
+    case "$unit_state" in
+      active) active=1 ;;
+      activating|reloading|deactivating) transitional=1 ;;
+    esac
+    if [ "$active" = 1 ] && [ "$cn_ok" = 1 ] && [ "$proxy_ok" = 1 ] && [ "$metrics_ok" = 1 ]; then
+      mode=recovered
+      printf '0\n' >"$state_dir/fail_streak"
+    elif { [ "$active" = 1 ] || [ "$transitional" = 1 ]; } && [ "$alive" = 1 ]; then
+      mode=degraded
+      printf '0\n' >"$state_dir/fail_streak"
+    else
+      mode=failed
+      action=fallback
     fi
   fi
 fi
 
+# Always reselect safely: mosdns with working domestic answers remains useful
+# even if fake-IP or the metrics endpoint is unavailable.
+if [ "$mode" = failed ] || [ "$mode" = degraded ]; then
+  logger -t mosdns-healthcheck "mosdns $mode; selecting safe DNS mode"
+fi
 /usr/local/sbin/mihomo-dns-mode auto || true
 
-printf '%s mode=%s action=%s\n' "$(date -Is)" "$mode" "$action" >"$status_file"
+printf '%s mode=%s action=%s cn=%s proxy=%s metrics=%s active=%s unit=%s alive=%s\n' \
+  "$(date -Is)" "$mode" "$action" "$cn_ok" "$proxy_ok" "$metrics_ok" "$active" "${unit_state:-unknown}" "$alive" >"$status_file"
+
+alert=/usr/local/sbin/mihomo-alert
+if [ -x "$alert" ]; then
+  last_notified=$(cat "$state_dir/last_notified" 2>/dev/null || echo '')
+  pending_file=$state_dir/pending_notification
+  desired_state=; desired_key=; desired_message=
+  case "$mode" in
+    degraded)
+      if [ "$last_notified" != degraded ]; then
+        desired_state=degraded; desired_key=mosdns-degraded
+        desired_message="MosDNS DNS分支降级：cn=$cn_ok proxy_fake=$proxy_ok metrics=$metrics_ok；保持可用分支"
+      fi ;;
+    failed)
+      if [ "$last_notified" != failed ]; then
+        desired_state=failed; desired_key=mosdns-failed
+        desired_message='MosDNS已停止或国内DNS、代理fake-IP与metrics均无响应；已请求DNS安全回退'
+      fi ;;
+    healthy|recovered)
+      case "$last_notified" in
+        failed|degraded)
+          desired_state=healthy; desired_key=mosdns-recovery
+          desired_message="MosDNS DNS探测已恢复：cn=$cn_ok proxy_fake=$proxy_ok metrics=$metrics_ok" ;;
+      esac ;;
+  esac
+  if [ -n "$desired_state" ]; then
+    printf '%s\t%s\t%s\n' "$desired_state" "$desired_key" "$desired_message" >"$pending_file.tmp"
+    mv "$pending_file.tmp" "$pending_file"
+  else
+    : >"$pending_file"
+  fi
+  if [ -s "$pending_file" ]; then
+    IFS="$(printf '\t')" read -r pending_state pending_key pending_message <"$pending_file" || true
+    if [ -n "${pending_state:-}" ] && "$alert" --health "$pending_message" "$pending_key"; then
+      printf '%s\n' "$pending_state" >"$state_dir/last_notified.tmp"
+      mv "$state_dir/last_notified.tmp" "$state_dir/last_notified"
+      : >"$pending_file"
+    fi
+  fi
+fi
 [ "$mode" != failed ]

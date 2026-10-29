@@ -51,6 +51,13 @@ if [ "$GATEWAY_ROOT" = "/" ] && [ "$(id -u)" != 0 ]; then
 fi
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$GATEWAY_ROOT" = "/" ] && [ "$dry_run" = false ]; then
+  exec 8>/run/lock/mihomo-maintenance.lock
+  flock -n 8 || { echo 'gateway maintenance is busy' >&2; exit 1; }
+fi
+
+# Verify all bytes and the previous installed baseline before the first write.
+python3 "$here/check-release.py" --root "$GATEWAY_ROOT"
 
 say() {
   if [ "$dry_run" = true ]; then
@@ -109,6 +116,10 @@ find "$here/systemd" -type f -print | while IFS= read -r unit; do
   install_file "$unit" "/etc/systemd/system/$relative" 0644
 done
 
+for setting in "$here"/etc/systemd/journald.conf.d/*.conf; do
+  install_file "$setting" "/etc/systemd/journald.conf.d/$(basename "$setting")" 0644
+done
+
 # NetworkManager moves the management Wi-Fi source route.  0700 is what the
 # dispatcher API requires: root-owned and executable, no group/other write.
 if [ -d "$root/etc/NetworkManager" ]; then
@@ -150,6 +161,7 @@ install_default "$here/etc/mihomo/config.local.yaml" /etc/mihomo/config.local.ya
 
 install_default "$here/env/automation.env.example" /etc/mihomo-automation.env.example 0600
 install_default "$here/env/mihomo-alert.env.example" /etc/mihomo-alert.env.example 0600
+install_default "$here/env/health-probes.conf.example" /etc/mihomo/health-probes.conf.example 0644
 install_default "$here/env/reconcile-targets.conf.example" /etc/mihomo/reconcile-targets.conf.example 0644
 
 # dnsmasq reads /etc/dnsmasq-upstreams.conf, which mihomo-dns-mode rewrites on
@@ -162,6 +174,10 @@ if [ ! -e "$root/etc/dnsmasq-upstreams.conf" ]; then
     mkdir -p -- "$root/etc"
     install -m 0644 -- "$here/etc/dnsmasq/upstreams.conf" "$root/etc/dnsmasq-upstreams.conf"
   fi
+fi
+
+if [ "$dry_run" = false ]; then
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --record
 fi
 
 if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]; then

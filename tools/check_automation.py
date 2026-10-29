@@ -57,12 +57,14 @@ ALERT_SCRIPTS = {"mihomo-alert", "mihomo-watch"}
 
 from publication_privacy import AUTOMATION_PATTERNS, NODE_PATTERNS, matching_labels
 
-# The subscription validator has to recognise the provider's announcement
-# entries; those strings are the only non-ASCII content allowed in the layer.
+# These scripts recognise provider announcements or send Chinese operator
+# notifications. Node-label patterns are still checked in every file.
 CJK_ALLOWED = {
     "sbin/mihomo-subscription-candidate",
+    "sbin/mihomo-subscription-normalize",
     "sbin/mihomo-alert",
     "sbin/mihomo-healthcheck",
+    "sbin/mosdns-healthcheck",
     "sbin/mihomo-watch",
 }
 
@@ -105,6 +107,7 @@ SBIN_SCRIPTS = (
     "mihomo-reconcile-policy",
     "mihomo-social-quality",
     "mihomo-subscription-candidate",
+    "mihomo-subscription-normalize",
     "mihomo-update-rules",
     "mihomo-update-subscription",
     "mihomo-watch",
@@ -150,7 +153,7 @@ def read_source(path: Path) -> str:
 
 def shipped_files() -> list[Path]:
     """Everything install.sh copies to the gateway (excludes docs and the optional tree."""
-    skipped = {"install.sh"}
+    skipped = {"install.sh", "check-release.py", "release-manifest.json"}
     return [
         path
         for path in automation_files()
@@ -228,6 +231,10 @@ NOT_DEPLOYMENT_PARAMETERS = {
     "IP4_ADDRESS_0",
     "IP4_GATEWAY",
     "MOSDNS_UPDATE_DRY_RUN",
+    # Generated and overwritten by the updater for descendant lifetime checks.
+    # These identify this invocation; operators must not configure them.
+    "MIHOMO_UPDATE_OWNER_PID",
+    "MIHOMO_UPDATE_OWNER_START",
 }
 
 SHELL_VAR = re.compile(r'\$\{([A-Z_][A-Z0-9_]*):[-=]')
@@ -320,17 +327,29 @@ def check_environment_documentation() -> None:
 def overlay_manifest_keys(source: str) -> set[str]:
     """Read literal manifest keys from Python calls regardless of formatting."""
     keys = set()
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        if node.func.id != "overlay_labels":
+        if node.func.id not in {"overlay_labels", "pool_nodes"}:
             continue
-        key = node.args[1] if len(node.args) > 1 else next(
+        position = 2 if node.func.id == "pool_nodes" else 1
+        key = node.args[position] if len(node.args) > position else next(
             (item.value for item in node.keywords if item.arg == "key"), None
         )
+        if node.func.id == "overlay_labels" and isinstance(key, ast.JoinedStr):
+            owner = parents.get(node)
+            while owner is not None and not isinstance(owner, ast.FunctionDef):
+                owner = parents.get(owner)
+            # Only this known adapter may form a dynamic legacy key. Its actual
+            # callers below still have to supply literal pool names.
+            template = ast.parse('f"{key}_nodes"', mode='eval').body
+            if owner is not None and owner.name == "pool_nodes" and ast.dump(key) == ast.dump(template):
+                continue
         if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
             raise ValueError("overlay_labels requires a literal manifest key for coverage checks")
-        keys.add(key.value)
+        keys.add(key.value + "_nodes" if node.func.id == "pool_nodes" else key.value)
     return keys
 
 
@@ -490,6 +509,7 @@ def expected_install_map(root: Path) -> set[Path]:
         else:
             fail(f"install.sh has no destination rule for {relative}")
     expected.add(Path("etc/dnsmasq-upstreams.conf"))
+    expected.add(Path("var/lib/mihomo-automation/installed-manifest.json"))
     return expected
 
 

@@ -3,43 +3,197 @@
 set -eu
 umask 077
 
-# Deployment parameters.  See automation/env/automation.env.example; copy it to
-# /etc/mihomo-automation.env and adjust the values before the first run.
-if [ -r /etc/mihomo-automation.env ]; then
-  . /etc/mihomo-automation.env
+case "${1:-}" in
+  '') mode=normal ;;
+  --repair-stale) mode=repair-stale; [ "$#" -eq 1 ] || { echo 'usage: mihomo-reconcile-policy [--repair-stale]' >&2; exit 2; } ;;
+  *) echo 'usage: mihomo-reconcile-policy [--repair-stale]' >&2; exit 2 ;;
+esac
+
+: "${MIHOMO_AUTOMATION_ENV_FILE:=/etc/mihomo-automation.env}"
+if [ -r "$MIHOMO_AUTOMATION_ENV_FILE" ]; then
+  . "$MIHOMO_AUTOMATION_ENV_FILE"
 fi
 
 : "${MIHOMO_CONTROLLER_PORT:=9090}"
 : "${MIHOMO_RECONCILE_TARGETS:=/etc/mihomo/reconcile-targets.conf}"
+: "${MIHOMO_RECONCILE_SECRET_FILE:=/etc/mihomo/secrets/dashboard.secret}"
+: "${MIHOMO_RECONCILE_LOCK_FILE:=/run/lock/mihomo-reconcile-policy.lock}"
+: "${MIHOMO_RECONCILE_TIMEOUT_SECONDS:=15}"
+case "$MIHOMO_RECONCILE_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*|0) echo 'MIHOMO_RECONCILE_TIMEOUT_SECONDS must be a positive integer' >&2; exit 2 ;;
+esac
+if [ "${#MIHOMO_RECONCILE_TIMEOUT_SECONDS}" -gt 2 ] || \
+  [ "$MIHOMO_RECONCILE_TIMEOUT_SECONDS" -gt 30 ]; then
+  echo 'MIHOMO_RECONCILE_TIMEOUT_SECONDS must be in 1..30' >&2
+  exit 2
+fi
+case "$MIHOMO_CONTROLLER_PORT" in
+  ''|*[!0-9]*) echo 'MIHOMO_CONTROLLER_PORT must be a port number' >&2; exit 2 ;;
+esac
+[ "$MIHOMO_CONTROLLER_PORT" -ge 1 ] && [ "$MIHOMO_CONTROLLER_PORT" -le 65535 ] || {
+  echo 'MIHOMO_CONTROLLER_PORT must be in 1..65535' >&2
+  exit 2
+}
 
 controller="http://127.0.0.1:${MIHOMO_CONTROLLER_PORT}"
-secret_file=/etc/mihomo/secrets/dashboard.secret
 targets_file=$MIHOMO_RECONCILE_TARGETS
+secret_file=$MIHOMO_RECONCILE_SECRET_FILE
+reconcile_lock_file=$MIHOMO_RECONCILE_LOCK_FILE
+maintenance_lock_file=/run/lock/mihomo-maintenance.lock
+deadline=$(( $(date +%s) + MIHOMO_RECONCILE_TIMEOUT_SECONDS ))
 
-test -s "$secret_file"
-test -s "$targets_file"
+log() {
+  logger -t mihomo-reconcile-policy "$1" >/dev/null 2>&1 || true
+}
+
+remaining_seconds() {
+  remaining=$(( deadline - $(date +%s) ))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
+if [ "$mode" = normal ] && [ ! -s "$targets_file" ]; then
+  log 'reconcile targets are unavailable'
+  exit 1
+fi
+if [ ! -s "$secret_file" ]; then
+  log 'controller credentials are unavailable'
+  exit 1
+fi
 secret=$(cat "$secret_file")
+if [ -z "$secret" ]; then
+  log 'controller credentials are unavailable'
+  exit 1
+fi
+
+mkdir -p "$(dirname "$reconcile_lock_file")"
+exec 9>"$reconcile_lock_file"
+if ! flock -n 9; then
+  exit 0
+fi
+if [ "$mode" = repair-stale ]; then
+  mkdir -p "$(dirname "$maintenance_lock_file")"
+  exec 8>"$maintenance_lock_file"
+  if ! flock -n 8; then
+    log 'maintenance is active; stale group repair deferred'
+    exit 0
+  fi
+fi
+work_dir=$(mktemp -d)
+response_file=$work_dir/response
+trap 'rm -rf "$work_dir"' EXIT
+trap 'exit 1' HUP INT TERM
 
 api() {
+  remaining=$(remaining_seconds) || return 1
+  request_timeout=3
+  [ "$remaining" -lt "$request_timeout" ] && request_timeout=$remaining
+  connect_timeout=1
+  [ "$request_timeout" -lt "$connect_timeout" ] && connect_timeout=$request_timeout
   curl --fail --silent --show-error \
-    --connect-timeout 3 --max-time 10 \
-    -H "Authorization: Bearer $secret" "$@"
+    --connect-timeout "$connect_timeout" --max-time "$request_timeout" \
+    -H "Authorization: Bearer $secret" "$@" 2>/dev/null
+}
+
+api_get() {
+  endpoint=$1
+  remaining=$(remaining_seconds) || return 1
+  request_timeout=3
+  [ "$remaining" -lt "$request_timeout" ] && request_timeout=$remaining
+  connect_timeout=1
+  [ "$request_timeout" -lt "$connect_timeout" ] && connect_timeout=$request_timeout
+  if http_status=$(curl --silent --show-error \
+    --connect-timeout "$connect_timeout" --max-time "$request_timeout" \
+    --output "$response_file" --write-out '%{http_code}' \
+    -H "Authorization: Bearer $secret" "$endpoint" 2>/dev/null); then
+    case "$http_status" in
+      2[0-9][0-9]) cat "$response_file" ;;
+      404) return 4 ;;
+      *) return 1 ;;
+    esac
+  else
+    return 1
+  fi
 }
 
 ready=false
-attempt=1
-while [ "$attempt" -le 10 ]; do
-  if api "$controller/version" >/dev/null 2>&1; then
+while remaining_seconds >/dev/null 2>&1; do
+  if api "$controller/version" >/dev/null; then
     ready=true
     break
   fi
+  remaining_seconds >/dev/null 2>&1 || break
   sleep 1
-  attempt=$((attempt + 1))
 done
-
 if [ "$ready" != true ]; then
-  logger -t mihomo-reconcile-policy "Mihomo controller is not ready"
+  log 'Mihomo controller is not ready'
   exit 1
+fi
+
+repair_stale_fallbacks() {
+  if ! proxies=$(api "$controller/proxies"); then
+    log 'controller proxy listing failed'
+    return 1
+  fi
+  if ! printf '%s' "$proxies" | jq -e '.proxies | type == "object"' >/dev/null 2>&1; then
+    log 'controller proxy listing has an unknown structure'
+    return 1
+  fi
+  if ! groups=$(printf '%s' "$proxies" | jq -r \
+    '.proxies | to_entries[] | select(.value.type == "Fallback") | .key | @uri'); then
+    log 'controller proxy listing has an unknown structure'
+    return 1
+  fi
+
+  while IFS= read -r encoded_group; do
+    [ -n "$encoded_group" ] || continue
+    endpoint="$controller/proxies/$encoded_group"
+    if state=$(api_get "$endpoint"); then
+      :
+    else
+      api_result=$?
+      if [ "$api_result" -eq 4 ]; then
+        continue
+      fi
+      log 'controller group read failed during stale cleanup'
+      return 1
+    fi
+    if ! printf '%s' "$state" | jq -e '.type == "Fallback"' >/dev/null 2>&1; then
+      continue
+    fi
+    if ! printf '%s' "$state" | jq -e \
+      '(.all | type == "array") and all(.all[]; type == "string") and (.fixed == null or (.fixed | type == "string"))' \
+      >/dev/null 2>&1; then
+      log 'controller fallback has an unknown structure; skipped'
+      continue
+    fi
+    fixed=$(printf '%s' "$state" | jq -r 'if (.fixed | type) == "string" then .fixed else "" end')
+    [ -n "$fixed" ] || continue
+    if printf '%s' "$state" | jq -e --arg fixed "$fixed" \
+      '.all | index($fixed) != null' >/dev/null 2>&1; then
+      continue
+    fi
+    if ! api -X DELETE "$endpoint" >/dev/null; then
+      log 'controller stale-group cleanup request failed'
+      return 1
+    fi
+    if ! verified=$(api "$endpoint"); then
+      log 'controller stale-group cleanup read-back failed'
+      return 1
+    fi
+    if ! printf '%s' "$verified" | jq -e \
+      '.type == "Fallback" and (.fixed == null or .fixed == "")' >/dev/null 2>&1; then
+      log 'controller stale-group cleanup did not clear the override'
+      return 1
+    fi
+  done <<EOF
+$groups
+EOF
+}
+
+repair_stale_fallbacks
+if [ "$mode" = repair-stale ]; then
+  exit 0
 fi
 
 select_group() {
@@ -47,33 +201,45 @@ select_group() {
   target=$2
   encoded=$(printf %s "$group" | jq -sRr @uri)
   endpoint="$controller/proxies/$encoded"
-  state=$(api "$endpoint")
+  if state=$(api_get "$endpoint"); then
+    :
+  else
+    api_result=$?
+    if [ "$api_result" -eq 4 ]; then
+      log 'configured selector group is missing; skipped'
+      return 0
+    fi
+    log 'controller selector read failed'
+    return 1
+  fi
 
-  if [ "$(printf %s "$state" | jq -r '.type')" != Selector ]; then
-    logger -t mihomo-reconcile-policy "$group is not a selector; skipped"
+  if [ "$(printf %s "$state" | jq -r '.type // empty')" != Selector ]; then
+    logger -t mihomo-reconcile-policy "$group is not a selector; skipped" || true
     return 0
   fi
 
   if ! printf %s "$state" | jq -e --arg target "$target" \
-    '.all | index($target) != null' >/dev/null; then
-    logger -t mihomo-reconcile-policy "$group does not contain $target"
-    return 1
+    '.all | index($target) != null' >/dev/null 2>&1; then
+    logger -t mihomo-reconcile-policy "$group does not contain $target" || true
+    return 0
   fi
 
-  current=$(printf %s "$state" | jq -r '.now')
+  current=$(printf %s "$state" | jq -r '.now // empty')
   if [ "$current" = "$target" ]; then
     return 0
   fi
 
   payload=$(jq -cn --arg name "$target" '{name:$name}')
-  api -X PUT -H 'Content-Type: application/json' \
-    --data "$payload" "$endpoint" >/dev/null
-  logger -t mihomo-reconcile-policy "$group changed from $current to $target"
+  if ! api -X PUT -H 'Content-Type: application/json' \
+    --data "$payload" "$endpoint" >/dev/null; then
+    log 'controller selector update failed'
+    return 1
+  fi
+  logger -t mihomo-reconcile-policy "$group changed from $current to $target" || true
 }
 
-# Apply one `<group>=<target>` line per entry from $MIHOMO_RECONCILE_TARGETS.
-# Groups that are missing, are not selectors or do not contain the target are
-# reported and skipped, so the file can cover several deployment shapes.
+# Apply one `<group>=<target>` line per entry. Runtime Fallback stale fixes
+# are cleared first; repair-only mode above never reads or applies this file.
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     ''|\#*) continue ;;
@@ -81,15 +247,15 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
     *=*) ;;
     *)
-      logger -t mihomo-reconcile-policy "ignoring malformed target line"
+      log 'ignoring malformed target line'
       continue
       ;;
   esac
   group=$(printf '%s' "${line%%=*}" | sed 's/[[:space:]]*$//')
   target=$(printf '%s' "${line#*=}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   if [ -z "$group" ] || [ -z "$target" ]; then
-    logger -t mihomo-reconcile-policy "ignoring empty target line"
+    log 'ignoring empty target line'
     continue
   fi
-  select_group "$group" "$target" || true
+  select_group "$group" "$target"
 done <"$targets_file"

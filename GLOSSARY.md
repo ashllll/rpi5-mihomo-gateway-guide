@@ -21,6 +21,8 @@ _避免_：限速、流量整形。
 **门禁**：判定“可以放流量”的一组内核状态，而不是进程存活。启动门禁由
 `mihomo-healthcheck --startup-check` 检查 TUN、`inet mihomo`、`inet rp_filter`、`ip rule 9000`；
 常态门禁每分钟复检并写 `/run/mihomo-healthcheck/status`。
+外部代理出口不参与启动门禁；出口失败记 `business=degraded`，保留核心运行并告警。
+`degraded` 不表示所有业务正常，也不表示应切换全局 DIRECT；`egress=unknown` 表示尚未探测当前核心出口。
 
 **包装器（预算 broker）**：`mihomo-measurement-budget`。`mihomo-measurement-budget.service`
 （无参数）常驻建 `/run/mihomo-measurements`（0700）与 `budget.sock`（0600）；drop-in 把
