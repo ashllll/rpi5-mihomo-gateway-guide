@@ -62,6 +62,10 @@ def check_case(directory, native, scenario):
     if native and scenario != 'absent':
         old_group = next(group for group in previous['proxy-groups'] if group['name'] == 'STT')
         assert 'use' in old_group and 'filter' in old_group
+        if scenario == 'provider-health':
+            old_group.pop('url')
+            old_group.pop('expected-status')
+            write_yaml(current, previous)
 
     if scenario == 'custom-provider':
         custom_group = next(group for group in previous['proxy-groups'] if group['name'] == 'STT')
@@ -79,7 +83,7 @@ def check_case(directory, native, scenario):
         policy['selections'] = {'Custom': {'type': 'select', 'members': ['Auto']}}
     write_yaml(capabilities, policy)
     incoming = copy.deepcopy(previous['proxies'])
-    if scenario in ('rename', 'unrelated-selection', 'absent', 'custom-provider'):
+    if scenario in ('rename', 'unrelated-selection', 'absent', 'custom-provider', 'provider-health'):
         for node in incoming:
             if node['name'].startswith('STT | '):
                 node['name'] += ' generation-2'
@@ -110,6 +114,9 @@ def check_case(directory, native, scenario):
         if scenario != 'explicit':
             assert groups['STT']['hidden'] is True and groups['STT']['icon'] == legacy['icon']
             assert groups['STT']['type'] == ('fallback' if native and scenario != 'custom-provider' else 'select')
+            if native and scenario == 'provider-health':
+                assert groups['STT']['url'] == legacy['url']
+                assert str(groups['STT']['expected-status']) == '204'
             if scenario == 'custom-provider':
                 assert groups['STT']['use'] == ['user-stt']
                 assert groups['STT']['filter'] == '^Example.*'
@@ -132,9 +139,9 @@ def main():
     with tempfile.TemporaryDirectory() as raw:
         for native in (False, True):
             for scenario in ('rename', 'delete', 'explicit', 'absent', 'empty',
-                             'unrelated-selection', 'custom-provider'):
+                             'unrelated-selection', 'custom-provider', 'provider-health'):
                 check_case(Path(raw) / f'{native}-{scenario}', native, scenario)
-    print('Legacy STT migration checks passed (14 scenarios, repeated refreshes)')
+    print('Legacy STT migration checks passed (16 scenarios, repeated refreshes)')
 
 
 if __name__ == '__main__':

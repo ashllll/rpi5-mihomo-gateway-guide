@@ -555,6 +555,9 @@ def main() -> None:
                 owned = measurement["owned_group_members"](
                     group, config.get("proxy-providers", {}), nodes)
                 if owned is not None:
+                    health = config["proxy-providers"][group["use"][0]].get("health-check", {})
+                    group.setdefault("url", health.get("url"))
+                    group.setdefault("expected-status", health.get("expected-status", "*"))
                     group.pop("use", None)
                     group.pop("filter", None)
                 group["proxies"] = list(stt_download_nodes)
