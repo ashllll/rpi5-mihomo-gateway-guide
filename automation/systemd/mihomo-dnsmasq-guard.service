@@ -1,9 +1,10 @@
 [Unit]
-Description=Probe the LAN resolver and restart dnsmasq when it stops answering
+Description=Observe the configured client DNS path and recover only its resolver
 Documentation=file:///usr/local/share/doc/mihomo-gateway/README.md
 After=dnsmasq.service
 
 [Service]
+EnvironmentFile=-/etc/mihomo-automation.env
 Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-dnsmasq-guard
 RuntimeDirectory=mihomo-dnsmasq-guard

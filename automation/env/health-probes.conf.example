@@ -1,0 +1,7 @@
+# label|path (proxy/direct)|accepted HTTP status codes|URL
+# Up to six small requests per sample; labels describe transport only, not login.
+# Install deliberately after verifying the site's routing of each target.
+ai|proxy|401|https://api.openai.com/v1/models
+github|proxy|200|https://github.com/robots.txt
+video|proxy|204|https://www.youtube.com/generate_204
+domestic|direct|200|https://www.baidu.com/

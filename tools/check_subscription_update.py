@@ -46,18 +46,24 @@ if name == 'curl':
 elif name == 'systemctl':
     with (root / 'calls').open('a') as stream:
         stream.write(' '.join(args) + '\n')
-    if args[0] == 'reload':
+    if args[0] in {'reload', 'restart'}:
         if mode == 'reload' and not (root / 'reload-failed').exists():
             fault()
             (root / 'reload-failed').touch()
             sys.exit(1)
         (root / 'reloaded').touch()
+        if mode in {'write', 'signal'} and os.environ.get('SUB_TEST_POST_APPLY') and not (root / 'post-apply-failed').exists():
+            fault()
+            (root / 'post-apply-failed').touch()
+            if mode == 'signal':
+                os.kill(int(os.environ['SUB_TEST_UPDATER_PID']), signal.SIGTERM)
+            sys.exit(1)
     if args[0] == 'is-active' and mode == 'inactive' and (root / 'reloaded').exists() and not (root / 'inactive-failed').exists():
         fault()
         (root / 'inactive-failed').touch()
         sys.exit(1)
 elif name == 'mihomo':
-    if mode == 'validation' or (mode == 'installed-validation' and '-f' not in args):
+    if mode == 'validation' or (mode in {'installed-validation', 'rollback'} and '-f' not in args):
         fault()
         sys.exit(1)
 elif name == 'install':
@@ -74,12 +80,12 @@ elif name == 'install':
             sys.exit(1)
     else:
         source, target = map(Path, cleaned[-2:])
-        if target == root / 'etc/config.yaml' and source.name == 'config.yaml' and source.parent.name.startswith('mihomo-subscription.'):
-            if mode in {'write', 'signal', 'rollback'}:
+        if (target == root / 'etc/config.yaml' or target.name.startswith('config.yaml.tmp.')) and source.name == 'config.yaml' and source.parent.name.startswith('mihomo-subscription.'):
+            if mode in {'write', 'signal'} and not os.environ.get('SUB_TEST_POST_APPLY'):
                 fault()
                 target.write_text('partial write\n')
                 if mode == 'signal':
-                    os.kill(os.getppid(), signal.SIGTERM)
+                    os.kill(int(os.environ['SUB_TEST_UPDATER_PID']), signal.SIGTERM)
                 sys.exit(1)
         if mode == 'rollback' and ('backups' in source.parts or source.name == 'rollback.yaml'):
             sys.exit(1)
@@ -91,6 +97,8 @@ elif name == 'flock' and mode == 'locked':
     sys.exit(1)
 elif name == 'xargs':
     sys.stdin.read()
+elif name == 'find' and '-printf' not in args:
+    sys.exit(subprocess.call(['/usr/bin/find', *args]))
 '''
 
 
@@ -124,11 +132,12 @@ def check_case(mode):
                     proxy['server'] = 'old.example.invalid'
                 (root / 'cache' / download.name).write_text(yaml.safe_dump(old))
             entries.append(f'{source_id}|{download}|1\n')
-        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy'):
+        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy', 'mihomo-healthcheck'):
             command = root / 'bin' / name
             command.write_text(f'#!{sys.executable}\n' + STUB)
             command.chmod(0o755)
-        for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay', 'mihomo-measurement-policy'):
+        for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay', 'mihomo-measurement-policy',
+                     'mihomo-subscription-normalize'):
             command = root / 'bin' / name
             code = (REPO / 'automation/sbin' / name).read_text().split('\n', 1)[1]
             command.write_text(f'#!{sys.executable}\n' + code)
@@ -139,6 +148,10 @@ def check_case(mode):
                            SUB_TEST_MODE=('health' if mode == 'revoke-invalid-policy' else mode.removeprefix('revoke-')),
                            SUB_TEST_INSTALL=shutil.which('install'), PYTHONDONTWRITEBYTECODE='1')
         if mode.startswith('revoke-'):
+            # Policy rollback must be exercised after atomic apply. Plain
+            # pre-rename write failures leave the original config untouched.
+            if mode in {'revoke-write', 'revoke-signal'}:
+                environment['SUB_TEST_POST_APPLY'] = '1'
             cap = yaml.safe_load(capabilities.read_text())
             cap['measurement'] = {'enabled': True, 'native_budget': True, 'native_interval_seconds': 900,
                 'accounts': {'fixture': {'names': ALL_NODES, 'native_probes_per_hour': 10000,
@@ -172,12 +185,12 @@ def check_case(mode):
                          ('/run/lock', str(root / 'lock')), ('/var/tmp', str(root)), ('/usr/local/sbin', str(root / 'bin'))):
             script = script.replace(old, new)
         updater = root / 'update.sh'
-        updater.write_text(script)
+        updater.write_text(script.replace('\n', '\nexport SUB_TEST_UPDATER_PID=$$\n', 1))
         result = subprocess.run(['sh', str(updater), *(['--force'] if mode == 'force' else [])],
                                 env=environment, capture_output=True, text=True, timeout=45)
         success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked'}
         assert (result.returncode == 0) == success, (mode, result.stderr)
-        rolled_back = mode in {'write', 'signal', 'installed-validation', 'reload', 'inactive', 'health'} or mode.startswith('revoke-')
+        rolled_back = mode in {'installed-validation', 'reload', 'inactive', 'health'} or mode.startswith('revoke-')
         if rolled_back and mode != 'revoke-invalid-policy':
             assert yaml.safe_load(current.read_text()) == yaml.safe_load(expected_rollback.read_text()), (mode, 'rollback ignored current policy')
         elif (not success and mode != 'rollback' and mode != 'revoke-invalid-policy') or mode in {'unchanged', 'locked'}:
@@ -194,16 +207,17 @@ def check_case(mode):
         if mode == 'cached':
             assert {p.name: p.read_bytes() for p in (root / 'cache').iterdir()} == cache_before
         calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
-        if mode in {'validation', 'backup', 'no-cache', 'unchanged', 'locked'}:
+        if mode in {'validation', 'backup', 'no-cache', 'unchanged', 'locked', 'write', 'signal'}:
             assert 'reload' not in calls, (mode, calls)
         if mode in {'success', 'cached', 'retained', 'force'}:
-            assert 'reload mihomo' in calls and isinstance(yaml.safe_load(current.read_text()), dict)
+            assert 'restart mihomo' in calls and isinstance(yaml.safe_load(current.read_text()), dict)
+            assert 'reload mihomo' not in calls
         if mode.startswith('revoke-'):
             final = yaml.safe_load(current.read_text())
             assert native_group_nodes(final, 'GLaDOS Download') == {'REJECT'}, (mode, 'revoked child revived')
             assert 'GLaDOS | D1 Eligible' not in native_group_nodes(final, 'Download'), (mode, 'revoked aggregate member revived')
             if mode == 'revoke-invalid-policy':
-                assert calls.count('reload mihomo') == 1, calls
+                assert calls.count('restart mihomo') == 1, calls
 
 
 if __name__ == '__main__':

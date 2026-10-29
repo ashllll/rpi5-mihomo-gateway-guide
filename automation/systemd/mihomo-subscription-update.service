@@ -7,6 +7,10 @@ After=network-online.target mihomo.service
 EnvironmentFile=-/etc/mihomo-automation.env
 Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-update-subscription
+# The updater enforces its own deadline and runs the rollback trap on expiry.
+# Leave extra stop time so systemd can deliver TERM and allow local recovery.
+TimeoutStartSec=2100
+TimeoutStopSec=300
 Nice=10
 IOSchedulingClass=idle
 UMask=0077

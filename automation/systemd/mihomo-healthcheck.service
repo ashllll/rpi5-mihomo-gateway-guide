@@ -8,6 +8,7 @@ After=network-online.target mihomo.service
 EnvironmentFile=-/etc/mihomo-automation.env
 Type=oneshot
 ExecStart=/usr/local/sbin/mihomo-healthcheck
+ExecStartPost=-/usr/local/sbin/mihomo-reconcile-policy --repair-stale
 Nice=10
 IOSchedulingClass=idle
 UMask=0077

@@ -11,11 +11,6 @@ elif [ "$#" -ne 0 ]; then
   exit 2
 fi
 
-exec 8>/run/lock/mihomo-maintenance.lock
-if ! flock -n 8; then
-  exit 0
-fi
-
 exec 9>/run/lock/mihomo-update-subscription.lock
 if ! flock -n 9; then
   exit 0
@@ -26,6 +21,8 @@ url_file=/etc/mihomo/secrets/subscription.url
 extra_urls_dir=/etc/mihomo/secrets/subscriptions.d
 extra_cache_root=/var/lib/mihomo-extra-subscriptions
 backup_root=/var/lib/mihomo-subscription-backups
+pending_file=$backup_root/transaction.pending
+failed_candidate_file=$backup_root/failed-candidate
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
@@ -43,6 +40,318 @@ if [ -n "${MIHOMO_ROUTE_DEFAULTS:-}" ]; then
 else
   unset MIHOMO_ROUTE_DEFAULTS
 fi
+MIHOMO_UPDATE_OWNER_PID=$$
+MIHOMO_UPDATE_OWNER_START=$(python3 -c 'import os, subprocess, sys
+pid=int(sys.argv[1])
+try:
+    with open("/proc/%d/stat" % pid, encoding="ascii") as stream:
+        print(stream.read().rsplit(")", 1)[1].split()[19])
+except (OSError, IndexError, ValueError):
+    result=subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=True, text=True, stdout=subprocess.PIPE)
+    print(result.stdout.strip())' "$MIHOMO_UPDATE_OWNER_PID")
+if [ -z "$MIHOMO_UPDATE_OWNER_START" ]; then
+  echo "Unable to establish updater process identity" >&2
+  exit 1
+fi
+export MIHOMO_UPDATE_OWNER_PID MIHOMO_UPDATE_OWNER_START
+
+# Hash the inputs that determine the candidate and its policy. Downloads and
+# offline preparation happen without the maintenance lock; this snapshot is
+# checked again after acquiring that lock, immediately before changing config.
+snapshot_inputs() {
+  exec 8>&- 9>&-
+  {
+    mihomo_bin=$(command -v mihomo 2>/dev/null || true)
+    for input in \
+      "$config" \
+      /etc/mihomo-automation.env \
+      /etc/mihomo/secrets/subscription.url \
+      "${MIHOMO_CAPABILITIES:-/etc/mihomo/adaptive/capabilities.yaml}" \
+      "${MIHOMO_ROUTE_DEFAULTS:-/etc/mihomo/adaptive/route-defaults.yaml}" \
+      "${MIHOMO_RECONCILE_TARGETS:-/etc/mihomo/reconcile-targets.conf}" \
+      /usr/local/sbin/mihomo-policy-overlay \
+      /usr/local/sbin/mihomo-subscription-candidate \
+      /usr/local/sbin/mihomo-subscription-normalize \
+      /usr/local/sbin/mihomo-reconcile-policy \
+      /usr/local/sbin/mihomo-measurement-policy \
+      "$mihomo_bin"
+    do
+      [ -n "$input" ] || continue
+      if [ -f "$input" ]; then
+        sha256sum "$input"
+      else
+        printf 'missing  %s\n' "$input"
+      fi
+    done
+    if [ -d /etc/mihomo/secrets/subscriptions.d ]; then
+      find /etc/mihomo/secrets/subscriptions.d -type f -print | LC_ALL=C sort |
+        while IFS= read -r input; do sha256sum "$input"; done
+    fi
+    if [ -d "$extra_cache_root" ]; then
+      find "$extra_cache_root" -type f -print | LC_ALL=C sort |
+        while IFS= read -r input; do sha256sum "$input"; done
+    else
+      printf 'missing  %s\n' "$extra_cache_root"
+    fi
+  } | sha256sum | awk '{print $1}'
+}
+
+snapshot_policy_inputs() {
+  exec 8>&- 9>&-
+  {
+    mihomo_bin=$(command -v mihomo 2>/dev/null || true)
+    for input in \
+      /etc/mihomo-automation.env \
+      /etc/mihomo/secrets/subscription.url \
+      "${MIHOMO_CAPABILITIES:-/etc/mihomo/adaptive/capabilities.yaml}" \
+      "${MIHOMO_ROUTE_DEFAULTS:-/etc/mihomo/adaptive/route-defaults.yaml}" \
+      "${MIHOMO_RECONCILE_TARGETS:-/etc/mihomo/reconcile-targets.conf}" \
+      /usr/local/sbin/mihomo-policy-overlay \
+      /usr/local/sbin/mihomo-subscription-candidate \
+      /usr/local/sbin/mihomo-subscription-normalize \
+      /usr/local/sbin/mihomo-reconcile-policy \
+      /usr/local/sbin/mihomo-measurement-policy \
+      "$mihomo_bin"
+    do
+      [ -n "$input" ] || continue
+      if [ -f "$input" ]; then sha256sum "$input"; else printf 'missing  %s\n' "$input"; fi
+    done
+    if [ -d /etc/mihomo/secrets/subscriptions.d ]; then
+      find /etc/mihomo/secrets/subscriptions.d -type f -print | LC_ALL=C sort |
+        while IFS= read -r input; do sha256sum "$input"; done
+    fi
+  } | sha256sum | awk '{print $1}'
+}
+
+file_sha256() {
+  exec 8>&- 9>&-
+  sha256sum "$1" | awk '{print $1}'
+}
+
+sync_path() {
+  if [ "${cleanup_mode:-false}" = true ]; then
+    run_cleanup_bounded python3 -c 'import os, sys; p=sys.argv[1]; fd=os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd); d=os.open(os.path.dirname(p), os.O_RDONLY); os.fsync(d); os.close(d)' "$1"
+  elif remaining=$(remaining_seconds); then
+    run_bounded "$remaining" python3 -c 'import os, sys; p=sys.argv[1]; fd=os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd); d=os.open(os.path.dirname(p), os.O_RDONLY); os.fsync(d); os.close(d)' "$1"
+  else
+    run_cleanup_bounded python3 -c 'import os, sys; p=sys.argv[1]; fd=os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd); d=os.open(os.path.dirname(p), os.O_RDONLY); os.fsync(d); os.close(d)' "$1"
+  fi
+}
+
+sync_directory() {
+  directory=$1
+  if [ "${cleanup_mode:-false}" = true ]; then
+    run_cleanup_bounded python3 -c 'import os, sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$directory"
+  elif remaining=$(remaining_seconds); then
+    run_bounded "$remaining" python3 -c 'import os, sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$directory"
+  else
+    run_cleanup_bounded python3 -c 'import os, sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$directory"
+  fi
+}
+
+sync_tree() {
+  sync_program='import os, sys
+root=sys.argv[1]
+for current, dirs, files in os.walk(root, topdown=False):
+    for name in files:
+        path=os.path.join(current, name)
+        if os.path.islink(path): continue
+        fd=os.open(path, os.O_RDONLY); os.fsync(fd); os.close(fd)
+    fd=os.open(current, os.O_RDONLY); os.fsync(fd); os.close(fd)'
+  if [ "${cleanup_mode:-false}" = true ]; then
+    run_cleanup_bounded python3 -c "$sync_program" "$1"
+  elif remaining=$(remaining_seconds); then
+    run_bounded "$remaining" python3 -c "$sync_program" "$1"
+  else
+    run_cleanup_bounded python3 -c "$sync_program" "$1"
+  fi
+}
+
+atomic_install_config() {
+  source_file=$1
+  destination=$2
+  temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+  if ! install -o root -g root -m 600 "$source_file" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  sync_path "$temporary" || { rm -f "$temporary"; return 1; }
+  if ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  sync_path "$destination"
+}
+
+write_pending() {
+  phase=$1
+  pending_backup=$2
+  baseline_sha=$3
+  candidate_sha=$4
+  cache_before=$5
+  cache_after=$6
+  restore_sha=${7:-}
+  temporary=$pending_file.tmp.$$
+  printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "$phase" "$pending_backup" "$baseline_sha" "$candidate_sha" \
+    "$cache_before" "$cache_after" "$restore_sha" >"$temporary"
+  chmod 600 "$temporary"
+  sync_path "$temporary" || { rm -f "$temporary"; return 1; }
+  mv -f "$temporary" "$pending_file"
+  sync_path "$pending_file"
+}
+
+clear_pending() {
+  rm -f "$pending_file"
+  sync_directory "$backup_root"
+}
+
+: "${MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS:=21600}"
+case "$MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS" in
+  ''|*[!0-9]*)
+    echo "MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+
+: "${MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS:=1800}"
+case "$MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*|0)
+    echo "MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+deadline_epoch=$(($(date +%s) + MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS))
+: "${MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS:=240}"
+case "$MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS" in
+  ''|*[!0-9]*|0)
+    echo "MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+
+remaining_seconds() {
+  now=$(date +%s)
+  remaining=$((deadline_epoch - now))
+  [ "$remaining" -gt 0 ] || return 1
+  printf '%s\n' "$remaining"
+}
+
+# Bound one child operation, not the updater shell: timeout returns control to
+# this process so its transaction trap can recover before systemd's hard cap.
+run_bounded() {
+  limit=$1
+  shift
+  python3 -c 'import os, signal, subprocess, sys, time
+for fd in (8, 9):
+    try: os.close(fd)
+    except OSError: pass
+owner_pid = int(os.environ.get("MIHOMO_UPDATE_OWNER_PID", "-1"))
+expected_start = os.environ.get("MIHOMO_UPDATE_OWNER_START", "")
+def owner_identity(pid):
+    try:
+        with open("/proc/%d/stat" % pid, encoding="ascii") as stream:
+            fields = stream.read().rsplit(")", 1)[1].split()
+        return fields[19], fields[0]
+    except (OSError, IndexError, ValueError):
+        try:
+            start = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+            return start, state[:1]
+        except (OSError, subprocess.CalledProcessError):
+            return None
+def owner_alive():
+    if owner_pid <= 0 or not expected_start:
+        return False
+    try: os.kill(owner_pid, 0)
+    except ProcessLookupError: return False
+    except PermissionError: pass
+    identity = owner_identity(owner_pid)
+    return identity is not None and identity[0] == expected_start and identity[1] != "Z"
+if not owner_alive():
+    sys.exit(125)
+process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+class Interrupted(Exception): pass
+def terminate_group():
+    try: os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError: pass
+    try: process.wait(timeout=1)
+    except subprocess.TimeoutExpired: pass
+    try: os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    process.wait()
+def interrupted(signum, frame):
+    raise Interrupted(signum)
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, interrupted)
+deadline = time.monotonic() + float(sys.argv[1])
+try:
+    while True:
+        if not owner_alive():
+            terminate_group()
+            sys.exit(125)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_group()
+            sys.exit(124)
+        try:
+            result = process.wait(timeout=min(0.2, remaining))
+            terminate_group()
+            sys.exit(result)
+        except subprocess.TimeoutExpired:
+            continue
+except Interrupted as interrupted_signal:
+    terminate_group()
+    sys.exit(128 + interrupted_signal.args[0])' "$limit" "$@"
+}
+
+run_cleanup_bounded() {
+  now=$(date +%s)
+  if [ -z "${cleanup_deadline_epoch:-}" ]; then
+    cleanup_deadline_epoch=$((now + MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS))
+  fi
+  remaining=$((cleanup_deadline_epoch - now))
+  [ "$remaining" -gt 0 ] || return 124
+  run_bounded "$remaining" "$@"
+}
+
+candidate_fingerprint() {
+  exec 8>&- 9>&-
+  {
+    cat "$remote"
+    while IFS='|' read -r source_id selected fresh; do
+      [ -n "$source_id" ] || continue
+      printf '\nsource:%s\n' "$source_id"
+      cat "$selected"
+    done <"$extra_manifest"
+    printf '\npolicy:%s\n' "$(snapshot_policy_inputs)"
+  } | sha256sum | awk '{print $1}'
+}
+
+failed_candidate_is_cooled() {
+  [ -r "$failed_candidate_file" ] || return 1
+  read -r failed_at failed_hash <"$failed_candidate_file" || return 1
+  case "$failed_at" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$failed_hash" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
+  [ "$failed_hash" = "$current_fingerprint" ] || return 1
+  now=$(date +%s)
+  [ "$now" -ge "$failed_at" ] || return 1
+  [ $((now - failed_at)) -lt "$MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS" ]
+}
+
+remember_failed_candidate() {
+  current_fingerprint=$(candidate_fingerprint)
+  install -d -o root -g root -m 700 "$backup_root"
+  temporary=$failed_candidate_file.tmp.$$
+  printf '%s %s\n' "$(date +%s)" "$current_fingerprint" >"$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$failed_candidate_file"
+}
+
 : "${MIHOMO_MIXED_PORT:=7890}"
 proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mihomo-subscription.XXXXXX)
@@ -54,24 +363,135 @@ extra_work_dir=$work_dir/extras
 extra_manifest=$work_dir/extras.manifest
 backup_dir=
 update_started=false
+cache_promotion_started=false
+baseline_config=$work_dir/baseline.yaml
 
 rollback() {
+  cleanup_mode=true
   # Restore old nodes through the current policy so a rollback cannot regrant roles.
   rollback_config=$work_dir/rollback.yaml
-  /usr/local/sbin/mihomo-policy-overlay "$backup_dir/config.yaml" "$rollback_config" || return 1
-  mihomo -t -d /etc/mihomo -f "$rollback_config" >/dev/null 2>&1 || return 1
-  install -o root -g root -m 600 "$rollback_config" "$config" || return 1
-  if ! systemctl reload mihomo 2>/dev/null || ! systemctl is-active --quiet mihomo; then
-    systemctl restart mihomo
+  run_cleanup_bounded \
+    /usr/local/sbin/mihomo-policy-overlay "$backup_dir/config.yaml" "$rollback_config" || return 1
+  run_cleanup_bounded \
+    mihomo -t -d /etc/mihomo -f "$rollback_config" >/dev/null 2>&1 || return 1
+  restore_sha=$(file_sha256 "$rollback_config") || return 1
+  write_pending restoring "$backup_dir" "$baseline_sha" "$candidate_sha" \
+    "$cache_before" "$cache_after" "$restore_sha" || return 1
+  atomic_install_config "$rollback_config" "$config" || return 1
+  run_cleanup_bounded systemctl restart mihomo || return 1
+  run_cleanup_bounded systemctl is-active --quiet mihomo || return 1
+  run_cleanup_bounded \
+    /usr/local/sbin/mihomo-healthcheck --observe-only || return 1
+  clear_pending
+}
+
+restore_cache_tree() {
+  cleanup_mode=true
+  source_tree=$1
+  temporary_tree=$extra_cache_root.restore.$$
+  old_tree=$extra_cache_root.old.$$
+  [ -d "$source_tree" ] || return 1
+  rm -rf "$temporary_tree" "$old_tree" || return 1
+  cp -a "$source_tree" "$temporary_tree" || return 1
+  if [ -e "$extra_cache_root" ]; then
+    mv "$extra_cache_root" "$old_tree" || return 1
   fi
+  if ! mv "$temporary_tree" "$extra_cache_root"; then
+    [ -e "$old_tree" ] && mv "$old_tree" "$extra_cache_root"
+    return 1
+  fi
+  sync_tree "$extra_cache_root" || return 1
+  sync_path "$extra_cache_root" || return 1
+  rm -rf "$old_tree"
+}
+
+tree_sha256() {
+  if [ -d "$1" ]; then
+    find "$1" -type f -print | LC_ALL=C sort | while IFS= read -r input; do sha256sum "$input"; done | sha256sum | awk '{print $1}'
+  else
+    printf 'missing\n' | sha256sum | awk '{print $1}'
+  fi
+}
+
+recover_pending() {
+  [ -s "$pending_file" ] || return 0
+  recovered_pending=true
+  if ! flock -n 8; then
+    logger -t mihomo-update-subscription "A pending update recovery is waiting for maintenance"
+    return 1
+  fi
+  IFS='|' read -r phase backup_dir baseline_sha candidate_sha cache_before cache_after restore_sha <"$pending_file" || return 1
+  case "$backup_dir" in
+    "$backup_root"/*) ;;
+    *) logger -t mihomo-update-subscription "Pending update record has an invalid backup path"; return 1 ;;
+  esac
+  case "$phase" in
+    accepted)
+      current_sha=$(file_sha256 "$config") || return 1
+      if [ "$current_sha" != "$candidate_sha" ]; then
+        logger -t mihomo-update-subscription "Accepted update recovery found a config conflict; preserving pending record"
+        return 1
+      fi
+      if ! restore_cache_tree "$cache_after"; then
+        restore_cache_tree "$cache_before" || true
+        logger -t mihomo-update-subscription "Accepted core remains active; extra subscription cache recovery is pending"
+        return 1
+      fi
+      clear_pending
+      logger -t mihomo-update-subscription "Accepted core retained; extra subscription cache recovery completed"
+      ;;
+    prepared|restoring)
+      current_sha=$(file_sha256 "$config") || return 1
+      if [ "$phase" = prepared ] && [ "$candidate_sha" != "$baseline_sha" ] && \
+        [ "$current_sha" = "$baseline_sha" ]; then
+        clear_pending
+        return 0
+      fi
+      if [ "$current_sha" = "$candidate_sha" ] || [ "$current_sha" = "$baseline_sha" ] || \
+        { [ "$phase" = restoring ] && [ -n "$restore_sha" ] && [ "$current_sha" = "$restore_sha" ]; }; then
+        if ! rollback; then
+          logger -t mihomo-update-subscription "Pre-acceptance recovery failed; pending record and backup preserved"
+          return 1
+        fi
+      else
+        logger -t mihomo-update-subscription "Pending update recovery found a config conflict; preserving pending record"
+        return 1
+      fi
+      ;;
+    *)
+      logger -t mihomo-update-subscription "Pending update record has an unknown phase"
+      return 1
+      ;;
+  esac
 }
 
 cleanup() {
   result=$?
   trap - EXIT HUP INT TERM
+  if [ "$cache_promotion_started" = true ]; then
+    result=1
+    if ! restore_cache_tree "$cache_before"; then
+      logger -t mihomo-update-subscription \
+        "Accepted core remains active; cache rollback failed and pending recovery is preserved" || true
+    fi
+  fi
   if [ "$update_started" = true ]; then
     result=1
-    if rollback; then
+    pending_phase=
+    pending_baseline=
+    if [ -s "$pending_file" ]; then
+      IFS='|' read -r pending_phase pending_backup pending_baseline pending_candidate _ <"$pending_file" || true
+    fi
+    if [ "$pending_phase" = accepted ]; then
+      update_started=false
+      logger -t mihomo-update-subscription \
+        "Accepted core remains active; interrupted cache finalization will be recovered next run" || true
+    elif [ "$pending_phase" = prepared ] && [ "$pending_candidate" != "$pending_baseline" ] && \
+      [ "$(file_sha256 "$config" 2>/dev/null || true)" = "$pending_baseline" ]; then
+      clear_pending || true
+      update_started=false
+    elif rollback; then
+      update_started=false
       logger -t mihomo-update-subscription "Subscription update failed; previous nodes restored under current policy" || true
     else
       logger -t mihomo-update-subscription "Subscription rollback failed; manual recovery required: $backup_dir" || true
@@ -83,6 +503,25 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
+install -d -o root -g root -m 700 "$backup_root"
+# Recover a killed transaction locally before any download, then capture a
+# fresh baseline while still holding the same short maintenance lock.
+exec 8>/run/lock/mihomo-maintenance.lock
+if ! flock -n 8; then
+  exit 0
+fi
+if ! recover_pending; then
+  exit 1
+fi
+if [ "${recovered_pending:-false}" = true ]; then
+  exec 8>&-
+  exit 0
+fi
+cp -p "$config" "$baseline_config"
+install -d -o root -g root -m 700 "$extra_cache_root"
+input_snapshot=$(snapshot_inputs)
+exec 8>&-
+
 test -s "$url_file"
 subscription_url=$(cat "$url_file")
 
@@ -91,12 +530,23 @@ subscription_url=$(cat "$url_file")
 # /etc/mihomo-automation.env only when yours does.  Empty means "primary only".
 backup_url=${SUBSCRIPTION_BACKUP_URL:-}
 
+normalize() {
+  remaining=$(remaining_seconds) || return 1
+  run_bounded "$remaining" /usr/local/sbin/mihomo-subscription-normalize "$1" "$2"
+}
+
 download_to() {
   url=$1
   output=$2
   shift 2
-  curl --fail --location --silent --show-error \
-    --retry 3 --retry-all-errors --connect-timeout 15 --max-time 240 \
+  remaining=$(remaining_seconds) || return 1
+  max_time=240
+  [ "$remaining" -lt "$max_time" ] && max_time=$remaining
+  connect_timeout=15
+  [ "$remaining" -lt "$connect_timeout" ] && connect_timeout=$remaining
+  run_bounded "$remaining" curl --fail --location --silent --show-error \
+    --retry 3 --retry-all-errors --retry-max-time "$remaining" \
+    --connect-timeout "$connect_timeout" --max-time "$max_time" \
     -A mihomo/1.19.28 "$@" --output "$output" "$url"
 }
 
@@ -118,7 +568,8 @@ download_primary() {
 }
 
 primary_fresh=false
-if systemctl is-active --quiet mihomo; then
+if remaining=$(remaining_seconds) && \
+  run_bounded "$remaining" systemctl is-active --quiet mihomo; then
   if download_primary --proxy "$proxy" || download_primary; then
     primary_fresh=true
   fi
@@ -128,12 +579,19 @@ else
   fi
 fi
 
-if [ "$primary_fresh" = true ]; then
+if [ "$primary_fresh" = true ] && normalize "$remote" "$remote.normalized"; then
+  mv "$remote.normalized" "$remote"
   printf 'fresh\n' >"$primary_state"
+elif [ "$primary_fresh" = true ]; then
+  # Malformed or truncated provider output must not replace the current nodes.
+  cp -p "$baseline_config" "$remote"
+  printf 'retained\n' >"$primary_state"
+  logger -t mihomo-update-subscription \
+    "Primary subscription payload could not be normalized; retaining current primary nodes"
 else
   # Keep the current primary nodes available when the provider endpoint is
   # unavailable, while still allowing independent extra sources to refresh.
-  cp -p "$config" "$remote"
+  cp -p "$baseline_config" "$remote"
   printf 'retained\n' >"$primary_state"
   logger -t mihomo-update-subscription \
     "Primary subscription unavailable; retaining current primary nodes"
@@ -143,10 +601,10 @@ test -s "$remote"
 test "$(wc -c < "$remote")" -le 10485760
 
 extra_is_valid() {
-  /usr/local/sbin/mihomo-subscription-candidate validate-extra "$1"
+  remaining=$(remaining_seconds) || return 1
+  run_bounded "$remaining" /usr/local/sbin/mihomo-subscription-candidate validate-extra "$1"
 }
 
-install -d -o root -g root -m 700 "$extra_cache_root"
 install -d -m 700 "$extra_work_dir"
 : >"$extra_manifest"
 
@@ -164,20 +622,27 @@ if [ -d "$extra_urls_dir" ]; then
     esac
 
     extra_url=$(cat "$extra_url_file")
+    raw=$extra_work_dir/$source_id.raw
     downloaded=$extra_work_dir/$source_id.yaml
     cached=$extra_cache_root/$source_id.yaml
     fresh=0
+    rm -f "$raw" "$downloaded"
 
-    if systemctl is-active --quiet mihomo; then
-      download_to "$extra_url" "$downloaded" --proxy "$proxy" || \
-        download_to "$extra_url" "$downloaded" || true
+    if remaining=$(remaining_seconds) && \
+      run_bounded "$remaining" systemctl is-active --quiet mihomo; then
+      download_to "$extra_url" "$raw" --proxy "$proxy" || \
+        download_to "$extra_url" "$raw" || true
     else
-      download_to "$extra_url" "$downloaded" || true
+      download_to "$extra_url" "$raw" || true
     fi
 
-    if [ -s "$downloaded" ] && \
-      [ "$(wc -c < "$downloaded")" -le 10485760 ] && \
-      extra_is_valid "$downloaded"; then
+    normalized=false
+    if [ -s "$raw" ] && [ "$(wc -c < "$raw")" -le 10485760 ] && \
+      normalize "$raw" "$downloaded"; then
+      normalized=true
+    fi
+
+    if [ "$normalized" = true ] && extra_is_valid "$downloaded"; then
       selected=$downloaded
       fresh=1
     elif [ -s "$cached" ] && extra_is_valid "$cached"; then
@@ -195,8 +660,16 @@ if [ -d "$extra_urls_dir" ]; then
   done
 fi
 
-/usr/local/sbin/mihomo-subscription-candidate prepare \
-  "$config" "$remote" "$extra_manifest" "$candidate" "$status"
+remaining=$(remaining_seconds) || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit during preparation"
+  exit 1
+}
+run_bounded "$remaining" /usr/local/sbin/mihomo-subscription-candidate prepare \
+  "$baseline_config" "$remote" "$extra_manifest" "$candidate" "$status"
+remaining_seconds >/dev/null || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit during preparation"
+  exit 1
+}
 
 if [ "$(cat "$status")" = unchanged ] && [ "$force" != true ]; then
   if [ "$(cat "$primary_state")" = fresh ]; then
@@ -208,76 +681,158 @@ if [ "$(cat "$status")" = unchanged ] && [ "$force" != true ]; then
   exit 0
 fi
 
-if ! mihomo -t -d /etc/mihomo -f "$candidate" >/dev/null 2>&1; then
+current_fingerprint=$(candidate_fingerprint)
+if [ "$force" != true ] && failed_candidate_is_cooled; then
+  logger -t mihomo-update-subscription \
+    "Previously failed subscription candidate is cooling down; use --force to retry"
+  exit 0
+fi
+
+remaining=$(remaining_seconds) || exit 1
+if ! run_bounded "$remaining" mihomo -t -d /etc/mihomo -f "$candidate" >/dev/null 2>&1; then
   logger -t mihomo-update-subscription "Downloaded subscription failed candidate validation"
+  remember_failed_candidate
+  exit 1
+fi
+
+# Serialize only the state-changing part with maintenance operations. Refuse
+# to install if config, policy, or subscription sources changed while fetching.
+exec 8>/run/lock/mihomo-maintenance.lock
+if ! flock -n 8; then
+  logger -t mihomo-update-subscription "Maintenance is active; candidate discarded"
+  exit 0
+fi
+if [ "$(snapshot_inputs)" != "$input_snapshot" ]; then
+  logger -t mihomo-update-subscription \
+    "Configuration or subscription inputs changed during download; candidate discarded"
+  exit 1
+fi
+if ! remaining_seconds >/dev/null; then
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
   exit 1
 fi
 
 stamp=$(date +%Y%m%d-%H%M%S)
-backup_dir=$backup_root/$stamp
+backup_dir=$backup_root/$stamp-$$
 install -d -o root -g root -m 700 "$backup_dir"
-cp -a "$config" "$backup_dir/config.yaml"
+cp -a "$baseline_config" "$backup_dir/config.yaml"
+cache_before=$backup_dir/cache-before
+cache_after=$backup_dir/cache-after
+cp -a "$extra_cache_root" "$cache_before"
+cp -a "$extra_cache_root" "$cache_after"
+while IFS='|' read -r source_id selected fresh; do
+  [ -n "$source_id" ] || continue
+  if [ "$fresh" = 1 ]; then
+    install -o root -g root -m 600 "$selected" "$cache_after/$source_id.yaml"
+  fi
+done <"$extra_manifest"
+sync_tree "$backup_dir"
+if ! remaining_seconds >/dev/null; then
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  exit 1
+fi
+baseline_sha=$(file_sha256 "$baseline_config")
+candidate_sha=$(file_sha256 "$candidate")
+write_pending prepared "$backup_dir" "$baseline_sha" "$candidate_sha" \
+  "$cache_before" "$cache_after"
+if ! remaining_seconds >/dev/null; then
+  clear_pending
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  exit 1
+fi
 update_started=true
-install -o root -g root -m 600 "$candidate" "$config"
+atomic_install_config "$candidate" "$config"
 
-if ! mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
+remaining=$(remaining_seconds) || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after config apply"
+  remember_failed_candidate
+  exit 1
+}
+if ! run_bounded "$remaining" mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
   logger -t mihomo-update-subscription "Installed configuration failed validation"
+  remember_failed_candidate
   exit 1
 fi
 
-if ! systemctl reload mihomo; then
-  logger -t mihomo-update-subscription "Mihomo reload failed after subscription update"
+remaining=$(remaining_seconds) || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before reload"
+  remember_failed_candidate
+  exit 1
+}
+if ! run_bounded "$remaining" systemctl restart mihomo; then
+  logger -t mihomo-update-subscription "Mihomo restart failed after subscription update"
+  remember_failed_candidate
   exit 1
 fi
 
-sleep 2
-if ! systemctl is-active --quiet mihomo; then
+remaining=$(remaining_seconds) || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after reload"
+  remember_failed_candidate
+  exit 1
+}
+sleep_for=2
+[ "$remaining" -lt "$sleep_for" ] && sleep_for=$remaining
+sleep "$sleep_for"
+remaining=$(remaining_seconds) || {
+  logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after reload"
+  remember_failed_candidate
+  exit 1
+}
+if ! run_bounded "$remaining" systemctl is-active --quiet mihomo; then
   logger -t mihomo-update-subscription "Mihomo became inactive after subscription update"
+  remember_failed_candidate
   exit 1
 fi
 
-if ! /usr/local/sbin/mihomo-reconcile-policy; then
+if remaining=$(remaining_seconds); then
+  if ! run_bounded "$remaining" /usr/local/sbin/mihomo-reconcile-policy; then
+    logger -t mihomo-update-subscription \
+      "Subscription loaded, but selector reconciliation will be retried by the health timer"
+  fi
+else
   logger -t mihomo-update-subscription \
-    "Subscription loaded, but selector reconciliation will be retried by the health timer"
+    "Subscription update exceeded its configured time limit during reconciliation"
 fi
+
+critical_probe_code() {
+  exec 8>&- 9>&-
+  target=$1
+  remaining=$(remaining_seconds) || return 1
+  max_time=20
+  [ "$remaining" -lt "$max_time" ] && max_time=$remaining
+  connect_timeout=8
+  [ "$remaining" -lt "$connect_timeout" ] && connect_timeout=$remaining
+  if code=$(run_bounded "$remaining" curl --silent --output /dev/null \
+    --connect-timeout "$connect_timeout" --max-time "$max_time" \
+    --write-out '%{http_code}' --proxy "$proxy" "$target" 2>/dev/null); then
+    printf '%s' "$code"
+  else
+    printf '000'
+  fi
+}
 
 critical_paths_healthy() {
-  [ "$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://www.gstatic.com/generate_204 2>/dev/null || true)" = 204 ] || return 1
-  github_control_code=$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack' \
-    2>/dev/null || true)
+  [ "$(critical_probe_code https://www.gstatic.com/generate_204)" = 204 ] || return 1
+  github_control_code=$(critical_probe_code \
+    'https://github.com/github/gitignore.git/info/refs?service=git-upload-pack')
   case "$github_control_code" in
     2??|3??) ;;
     *) return 1 ;;
   esac
-  codeload_code=$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://codeload.github.com/github/gitignore/zip/refs/heads/main 2>/dev/null || true)
+  codeload_code=$(critical_probe_code \
+    https://codeload.github.com/github/gitignore/zip/refs/heads/main)
   case "$codeload_code" in
     2??|3??) ;;
     *) return 1 ;;
   esac
-  [ "$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://www.youtube.com/generate_204 2>/dev/null || true)" = 204 ] || return 1
-  [ "$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://x.com/robots.txt 2>/dev/null || true)" = 200 ] || return 1
-  [ "$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://core.telegram.org/ 2>/dev/null || true)" = 200 ] || return 1
+  [ "$(critical_probe_code https://www.youtube.com/generate_204)" = 204 ] || return 1
+  [ "$(critical_probe_code https://x.com/robots.txt)" = 200 ] || return 1
+  [ "$(critical_probe_code https://core.telegram.org/)" = 200 ] || return 1
   # This endpoint is deliberately routed through Download.  HTTP 401 is the
   # expected unauthenticated Docker Registry response and proves that the
   # non-GLaDOS bulk path is usable before a new configuration is accepted.
-  [ "$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://registry-1.docker.io/v2/ 2>/dev/null || true)" = 401 ] || return 1
-  model_code=$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-    --write-out '%{http_code}' --proxy "$proxy" \
-    https://huggingface.co/gpt2/resolve/main/config.json 2>/dev/null || true)
+  [ "$(critical_probe_code https://registry-1.docker.io/v2/)" = 401 ] || return 1
+  model_code=$(critical_probe_code https://huggingface.co/gpt2/resolve/main/config.json)
   case "$model_code" in
     2??|3??) ;;
     *) return 1 ;;
@@ -290,8 +845,7 @@ critical_paths_healthy() {
     https://claude.ai/ \
     https://gemini.google.com/
   do
-    code=$(curl --silent --output /dev/null --connect-timeout 8 --max-time 20 \
-      --write-out '%{http_code}' --proxy "$proxy" "$target" 2>/dev/null || true)
+    code=$(critical_probe_code "$target")
     case "$code" in
       2??|3??|401|403)
         ai_successes=$((ai_successes + 1))
@@ -309,25 +863,47 @@ while [ "$attempt" -le 5 ]; do
     healthy=true
     break
   fi
-  sleep 2
+  remaining=$(remaining_seconds) || break
+  sleep_for=2
+  [ "$remaining" -lt "$sleep_for" ] && sleep_for=$remaining
+  sleep "$sleep_for"
   attempt=$((attempt + 1))
 done
 
 if [ "$healthy" != true ]; then
-  logger -t mihomo-update-subscription "A critical service path failed after subscription update"
+  if remaining_seconds >/dev/null; then
+    logger -t mihomo-update-subscription "A critical service path failed after subscription update"
+  else
+    logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit; restoring the previous config"
+  fi
+  remember_failed_candidate
   exit 1
 fi
+write_pending accepted "$backup_dir" "$baseline_sha" "$candidate_sha" \
+  "$cache_before" "$cache_after"
 update_started=false
+rm -f "$failed_candidate_file"
 
 # Only promote freshly downloaded extra subscriptions after the merged
 # configuration has loaded and passed all critical path checks.
+cache_promotion_started=true
 while IFS='|' read -r source_id selected fresh; do
   [ -n "$source_id" ] || continue
   if [ "$fresh" = 1 ]; then
     install -o root -g root -m 600 \
-      "$selected" "$extra_cache_root/$source_id.yaml"
+      "$cache_after/$source_id.yaml" "$extra_cache_root/$source_id.yaml" || {
+        restore_cache_tree "$cache_before" || true
+        cache_promotion_started=false
+        logger -t mihomo-update-subscription \
+          "Accepted core remains active; extra subscription cache commit is incomplete: $source_id"
+        exit 1
+      }
   fi
 done <"$extra_manifest"
+sync_tree "$extra_cache_root"
+sync_path "$extra_cache_root"
+cache_promotion_started=false
+clear_pending
 
 # Keep the newest 20 known-good snapshots.
 find "$backup_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \

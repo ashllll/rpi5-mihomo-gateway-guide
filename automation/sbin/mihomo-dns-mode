@@ -12,8 +12,7 @@ if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
 
-# dnsmasq answers on the LAN address, so the post-switch verification below
-# queries that address rather than loopback.
+# dnsmasq answers on loopback for these host-side checks.
 dns_query() {
   server=$1
   port=$2
@@ -31,11 +30,7 @@ is_fake_ip() {
 
 mosdns_is_healthy() {
   cn_answer=$(dns_query 127.0.0.1 5335 baidu.com | tail -n 1 || true)
-  proxy_answer=$(dns_query 127.0.0.1 5335 openai.com | tail -n 1 || true)
-  [ -n "$cn_answer" ] &&
-    ! is_fake_ip "$cn_answer" &&
-    [ -n "$proxy_answer" ] &&
-    is_fake_ip "$proxy_answer"
+  [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer"
 }
 
 mihomo_is_healthy() {
@@ -88,7 +83,11 @@ case "$requested_mode" in
 esac
 
 exec 9>"$lock"
-flock 9
+if [ "$requested_mode" = auto ]; then
+  flock -w 1 9 || exit 1
+else
+  flock 9
+fi
 
 mode=$requested_mode
 if [ "$mode" = auto ]; then
@@ -102,7 +101,7 @@ if [ "$mode" = auto ]; then
 elif [ "$mode" = mosdns ]; then
   healthy=false
   attempt=1
-  while [ "$attempt" -le 40 ]; do
+  while [ "$attempt" -le 4 ]; do
     if mosdns_is_healthy; then
       healthy=true
       break
@@ -163,30 +162,37 @@ if ! reload_dnsmasq; then
 fi
 
 verified=false
-attempt=1
-while [ "$attempt" -le 12 ]; do
-  case "$mode" in
-    mosdns)
-      cn_answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
-      proxy_answer=$(dns_query "127.0.0.1" 53 openai.com | tail -n 1 || true)
-      if [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer" &&
-         [ -n "$proxy_answer" ] && is_fake_ip "$proxy_answer"; then
-        verified=true
-      fi
-      ;;
-    mihomo)
-      answer=$(dns_query "127.0.0.1" 53 openai.com | tail -n 1 || true)
-      [ -n "$answer" ] && is_fake_ip "$answer" && verified=true
-      ;;
-    direct)
-      answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
-      [ -n "$answer" ] && ! is_fake_ip "$answer" && verified=true
-      ;;
-  esac
-  [ "$verified" = true ] && break
-  attempt=$((attempt + 1))
-  sleep 0.25
-done
+if [ "$mode" = direct ]; then
+  # Direct is the last-resort resolver and must remain selectable during a WAN
+  # outage. Sample once for diagnostics, but never wait for internet recovery.
+  answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
+  [ -n "$answer" ] && ! is_fake_ip "$answer" && verified=true
+else
+  attempt=1
+  max_attempts=4
+  [ "$requested_mode" != auto ] || max_attempts=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    case "$mode" in
+      mosdns)
+        cn_answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
+        if [ -n "$cn_answer" ] && ! is_fake_ip "$cn_answer"; then
+          verified=true
+        fi
+        ;;
+      mihomo)
+        answer=$(dns_query "127.0.0.1" 53 openai.com | tail -n 1 || true)
+        [ -n "$answer" ] && is_fake_ip "$answer" && verified=true
+        ;;
+      direct)
+        answer=$(dns_query "127.0.0.1" 53 baidu.com | tail -n 1 || true)
+        [ -n "$answer" ] && ! is_fake_ip "$answer" && verified=true
+        ;;
+    esac
+    [ "$verified" = true ] && break
+    attempt=$((attempt + 1))
+    sleep 0.25
+  done
+fi
 
 if [ "$verified" != true ] && [ "$mode" != direct ]; then
   if [ "$had_previous" = true ]; then

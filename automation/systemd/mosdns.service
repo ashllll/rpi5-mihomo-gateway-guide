@@ -1,8 +1,8 @@
 [Unit]
 Description=mosdns split DNS forwarder
 Documentation=https://github.com/IrineSistiana/mosdns
-Wants=network-online.target mihomo.service
-After=network-online.target mihomo.service
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 EnvironmentFile=-/etc/mihomo-automation.env
@@ -10,8 +10,8 @@ Type=simple
 DynamicUser=true
 WorkingDirectory=/etc/mosdns
 ExecStart=/usr/local/bin/mosdns start -c /etc/mosdns/config.yaml -d /etc/mosdns
-ExecStartPost=+/usr/local/sbin/mihomo-dns-mode mosdns
-ExecStopPost=+/usr/local/sbin/mihomo-dns-mode auto
+ExecStartPost=-+/usr/local/sbin/mihomo-dns-mode auto
+ExecStopPost=-+/usr/local/sbin/mihomo-dns-mode auto
 Restart=on-failure
 RestartSec=3s
 TimeoutStartSec=20s

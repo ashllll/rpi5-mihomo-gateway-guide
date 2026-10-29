@@ -56,6 +56,17 @@ def main():
         pass
     else:
         raise AssertionError('dynamic manifest key silently skipped')
+    assert overlay_manifest_keys('''
+def pool_nodes(nodes, capabilities, key):
+    return overlay_labels(capabilities, f"{key}_nodes")
+pool_nodes(nodes, caps, "ai")
+''') == {'ai_nodes'}
+    try:
+        overlay_manifest_keys('pool_nodes(nodes, caps, variable)')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('dynamic pool key silently skipped')
     print('Privacy coverage and checker formatting regressions passed')
 
 

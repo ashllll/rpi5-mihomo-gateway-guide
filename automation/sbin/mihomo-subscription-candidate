@@ -40,13 +40,18 @@ def merge_sources(current_path: Path, subscription_path: Path, manifest_path: Pa
     if not isinstance(current, dict) or not isinstance(subscription, dict):
         raise SystemExit("configuration root must be a mapping")
 
+    # Upstream shape is whatever the airport publishes: a full clash profile or
+    # a bare proxy list normalized from base64.  Only the node set is taken from
+    # the subscription; the group skeleton always comes from the running config
+    # so a subscription that ships airport-branded groups cannot rename or drop
+    # the deployment's own topology.
     proxies = subscription.get("proxies")
-    groups = subscription.get("proxy-groups")
+    groups = current.get("proxy-groups")
     if not isinstance(proxies, list) or not proxies:
         raise SystemExit("subscription does not contain proxies")
     if not isinstance(groups, list) or not groups:
-        raise SystemExit("subscription does not contain proxy-groups")
-    if len(proxies) > 2000 or len(groups) > 200:
+        raise SystemExit("current configuration does not contain proxy-groups")
+    if len(proxies) > 2000:
         raise SystemExit("subscription exceeds safety limits")
 
     with open(manifest_path, encoding="utf-8") as manifest:
@@ -90,84 +95,17 @@ def merge_sources(current_path: Path, subscription_path: Path, manifest_path: Pa
                 if proxy.get(field) in rename:
                     proxy[field] = rename[proxy[field]]
         proxies.extend(real_proxies)
-    retained_prefixes = tuple(dict.fromkeys((*extra_prefixes, "STT | ", "ByWave | ", "BWB | ", "InfraAPI | ")))
-    static_glados = [copy.deepcopy(proxy) for proxy in current.get("proxies", []) or [] if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and not proxy["name"].startswith(retained_prefixes) and proxy["name"] not in {"DIRECT", "REJECT"}]
-    existing_names = {proxy.get("name") for proxy in proxies if isinstance(proxy, dict)}
-    for proxy in static_glados:
-        if proxy.get("name") not in existing_names:
-            proxies.append(proxy)
-            existing_names.add(proxy.get("name"))
+    # A successful refresh fully replaces the node set: the retry branch in
+    # mihomo-update-subscription keeps the current nodes when the provider is
+    # unreachable, so leftovers from an older generation never accumulate here.
     proxy_names = [proxy.get("name") for proxy in proxies]
     if len(proxies) > 4000 or len(set(proxy_names)) != len(proxy_names):
         raise SystemExit("merged subscriptions exceed limits or contain duplicate names")
 
+    # Every group is rebuilt by mihomo-policy-overlay from the freshly merged
+    # node set, so the skeleton only needs to carry the names and static policy
+    # fields forward.  Stale member names must not survive a refresh.
     groups = copy.deepcopy(groups)
-    for group in groups:
-        url = group.get("url")
-        if url == "http://www.gstatic.com/generate_204":
-            group["url"] = "https://www.gstatic.com/generate_204"
-
-        if group.get("type") in {"url-test", "fallback"}:
-            group["timeout"] = 5000
-            group["max-failed-times"] = 2
-            if group.get("url") == "https://www.gstatic.com/generate_204":
-                group["expected-status"] = "204"
-            if group.get("name") == "Download":
-                allowed_prefixes = ("STT | ", "STT-", "STT ")
-                group["proxies"] = [
-                    proxy for proxy in group.get("proxies", [])
-                    if isinstance(proxy, str) and proxy.startswith(allowed_prefixes)
-                ]
-                stt_nodes = [
-                    proxy.get("name") for proxy in proxies
-                    if isinstance(proxy, dict)
-                    and isinstance(proxy.get("name"), str)
-                    and proxy["name"].startswith("STT | ")
-                ]
-                group["proxies"] = stt_nodes + [
-                    proxy for proxy in group["proxies"] if proxy not in stt_nodes
-                ]
-
-    # Convert the remaining fixed selectors into self-switching groups while
-    # preserving their original member order and a DIRECT last-resort member.
-    automatic_groups = {
-        "Download": {"type": "url-test", "interval": 180, "tolerance": 100},
-        "Apple": {"type": "fallback", "interval": 120},
-        "Microsoft": {"type": "fallback", "interval": 120},
-    }
-    for group in groups:
-        policy = automatic_groups.get(group.get("name"))
-        if policy is None:
-            continue
-        group.update(policy)
-        group["url"] = "https://www.gstatic.com/generate_204"
-        group["timeout"] = 5000
-        group["max-failed-times"] = 2
-        group["expected-status"] = "204"
-
-    stt_nodes = [proxy.get("name") for proxy in proxies if isinstance(proxy, dict) and isinstance(proxy.get("name"), str) and proxy["name"].startswith("STT | ")]
-    if stt_nodes:
-        stt_group = {
-            "name": "STT",
-            "type": "url-test",
-            "proxies": stt_nodes,
-            "url": "https://www.gstatic.com/generate_204",
-            "interval": 180,
-            "tolerance": 80,
-            "lazy": False,
-            "timeout": 6000,
-            "max-failed-times": 2,
-            "expected-status": "204",
-        }
-        # Preserve the position in retained configs so a no-op update stays a no-op.
-        for index, group in enumerate(groups):
-            if group.get("name") == "STT":
-                groups[index] = stt_group
-                break
-        else:
-            groups.append(stt_group)
-    else:
-        groups = [group for group in groups if group.get("name") != "STT"]
 
     merged = copy.deepcopy(current)
     merged["proxies"] = proxies

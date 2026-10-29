@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -121,12 +122,42 @@ def set_native_account(manifest):
     }
 
 
+def check_fresh_generation(directory):
+    directory.mkdir()
+    current, capabilities = build_fixture(directory, MANIFEST_OVERLAY, ALL_NODES)
+    previous = yaml.safe_load(current.read_text())
+    previous['proxy-groups'].append({'name': 'STT', 'type': 'select', 'proxies': ['STT | Bulk 01']})
+    write_yaml(current, previous)
+    renamed = {name: name + ' generation-2' for name in ALL_NODES}
+    policy = yaml.safe_load(capabilities.read_text())
+    policy['overlay'] = {key.replace('_nodes', '_patterns'): ['^' + re.escape(renamed[name]) + '$' for name in names]
+                         for key, names in MANIFEST_OVERLAY.items()}
+    policy['selections'] = {'STT': {'type': 'select', 'patterns': [r'^STT \| ']}}
+    write_yaml(capabilities, policy)
+    subscription = directory / 'bare-fresh.yaml'
+    write_yaml(subscription, {'proxies': [dict(node, name=renamed[node['name']]) for node in previous['proxies']]})
+    extras = directory / 'extras'
+    extras.write_text('')
+    output, status = directory / 'candidate.yaml', directory / 'status'
+    before = current.read_bytes()
+    result = run('prepare', current, subscription, extras, output, status, manifest=capabilities)
+    assert result.returncode == 0, result.stderr
+    candidate = yaml.safe_load(output.read_text())
+    node_names = {node['name'] for node in candidate['proxies']}
+    group_names = {group['name'] for group in candidate['proxy-groups']}
+    assert node_names == set(renamed.values())
+    assert group_proxies(candidate, 'STT') == [renamed['STT | Bulk 01']]
+    assert all(member in node_names | group_names | {'DIRECT', 'REJECT'}
+               for group in candidate['proxy-groups'] for member in group.get('proxies', []))
+    assert current.read_bytes() == before
+
+
 def main():
     # Escaped subscription names must reach validation without YAML folding them.
     with tempfile.TemporaryDirectory() as raw:
         root = Path(raw)
         for enabled in (False, True):
-            for source in ('primary', 'retained', 'extra', 'provider'):
+            for source in ('primary', 'retained', 'retained-active', 'extra', 'provider'):
                 for character in ('\u0085', '\u2028', '\u2029'):
                     case = root / f'{enabled}-{source}-{ord(character)}'
                     case.mkdir()
@@ -145,6 +176,9 @@ def main():
                         primary['proxies'].append(bad)
                     elif source == 'retained':
                         original['proxies'].append(bad)
+                    elif source == 'retained-active':
+                        original['proxies'].append(bad)
+                        primary['proxies'].append(bad)
                     elif source == 'provider':
                         original.setdefault('proxy-providers', {})['user-inline'] = {
                             'type': 'inline', 'payload': [bad]}
@@ -159,6 +193,12 @@ def main():
                     output, status = case / 'output.yaml', case / 'status'
                     result = run('prepare', current, subscription, extras, output, status,
                                  manifest=capabilities)
+                    if source == 'retained':
+                        assert result.returncode == 0, result.stderr
+                        candidate = yaml.safe_load(output.read_text())
+                        assert bad['name'] not in {node['name'] for node in candidate['proxies']}
+                        assert current.read_bytes() == before
+                        continue
                     assert result.returncode != 0, (enabled, source, repr(character))
                     assert 'control characters' in result.stderr, result.stderr
                     assert current.read_bytes() == before
@@ -168,12 +208,13 @@ def main():
         current, capabilities = build_fixture(root, MANIFEST_OVERLAY, ALL_NODES)
         original = yaml.safe_load(current.read_text())
         original['dns'] = {'enable': True, 'listen': '127.0.0.1:1053'}
+        original['proxy-groups'].append({'name': 'STT', 'type': 'select', 'proxies': ['STT | Bulk 01']})
         write_yaml(current, original)
         subscription = root / 'primary.yaml'
         primary = copy.deepcopy(original)
         primary['proxies'] = [node for node in primary['proxies']
                               if not node['name'].startswith(('ByWave | ', 'BWB | ', 'InfraAPI | '))]
-        write_yaml(subscription, primary)
+        write_yaml(subscription, {'proxies': primary['proxies']})
         extras = root / 'sources.manifest'
         entries = []
         for source_id, names in (
@@ -204,8 +245,9 @@ def main():
         names = [node['name'] for node in candidate['proxies']]
         assert len(names) == len(set(names))
         assert set(names) == set(ALL_NODES)
-        stt = group_proxies(candidate, 'STT')
+        stt = group_proxies(candidate, 'STT Download')
         assert stt == ['STT | Bulk 01'], f'foreign retained nodes entered STT: {stt}'
+        assert group_proxies(candidate, 'STT') == ['STT | Bulk 01']
         renamed = next(node for node in candidate['proxies'] if node['name'] == 'BWB | Backup 02')
         assert renamed['dialer-proxy'] == renamed['detour'] == 'BWB | Backup 01'
         assert group_proxies(candidate, 'Streaming') == MANIFEST_OVERLAY['media_nodes']
@@ -213,6 +255,18 @@ def main():
         assert download['type'] == 'select'
         assert 'url' not in download
         assert output.stat().st_mode & 0o777 == 0o600
+
+        # Provider-branded groups cannot replace the gateway's local topology.
+        branded = dict(primary, **{'proxy-groups': [
+            {'name': 'Airport Branded Group', 'type': 'select', 'proxies': [primary['proxies'][0]['name']]},
+        ]})
+        write_yaml(subscription, branded)
+        result = run('prepare', current, subscription, extras, output, status, manifest=capabilities)
+        assert result.returncode == 0, result.stderr
+        branded_candidate = yaml.safe_load(output.read_text())
+        assert branded_candidate['proxy-groups'] == candidate['proxy-groups']
+        assert branded_candidate['dns'] == original['dns']
+        write_yaml(subscription, {'proxies': primary['proxies']})
 
         # Repeated fresh builds and cached extras use the same candidate seam.
         first = output.read_bytes()
@@ -345,6 +399,7 @@ def main():
         assert 'quality-github-release' not in public_candidate.get('proxy-providers', {})
         assert 'quality-x-video' not in public_candidate.get('proxy-providers', {})
         assert public_candidate['proxy-providers']['quality-user-owned'] == user_provider
+        check_fresh_generation(root / 'fresh-generation')
     print('Subscription candidate composition checks passed')
 
 

@@ -1,0 +1,234 @@
+#!/usr/bin/python3
+"""Normalize an upstream subscription file into a clash proxy list.
+
+Airports publish three shapes in practice:
+
+* a clash configuration (``proxies:`` mapping list) -- used as-is;
+* a base64 blob wrapping a clash configuration -- decoded, then used as-is;
+* a base64 blob wrapping one proxy URI per line (anytls://, vmess://, ...) --
+  decoded and converted into clash proxy entries.
+
+Placeholder rows such as ``注：`` announcements are dropped either way.  The
+output is always ``{"proxies": [...]}`` so the rest of the pipeline keeps one
+contract regardless of what the airport returns.
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import re
+import sys
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
+
+import yaml
+
+NOTICE_PREFIXES = ("注：", "注意：", "剩余流量", "套餐到期", "更新订阅", "官网", "过期", "重置")
+IGNORED_TYPES = {"direct", "reject", "reject-drop", "pass", "compatible"}
+
+
+def is_notice(name: str) -> bool:
+    return str(name).strip().startswith(NOTICE_PREFIXES)
+
+
+def b64decode_loose(text: str) -> bytes:
+    compact = "".join(text.split())
+    compact += "=" * (-len(compact) % 4)
+    try:
+        return base64.b64decode(compact, validate=False)
+    except (binascii.Error, ValueError):
+        raise SystemExit("subscription payload is not valid base64")
+
+
+def clash_nodes(payload: dict) -> list[dict]:
+    proxies = payload.get("proxies")
+    if not isinstance(proxies, list):
+        raise SystemExit("subscription does not contain a proxy list")
+    return [proxy for proxy in proxies if isinstance(proxy, dict)]
+
+
+def parse_anytls(uri: str) -> dict:
+    parts = urlsplit(uri)
+    if not parts.hostname or not parts.port:
+        raise ValueError("anytls entry is missing server or port")
+    query = parse_qs(parts.query)
+    insecure = query.get("insecure", ["0"])[0].lower() in {"1", "true", "yes"}
+    node = {
+        "name": unquote(parts.fragment) or f"{parts.hostname}:{parts.port}",
+        "type": "anytls",
+        "server": parts.hostname,
+        "port": parts.port,
+        "password": unquote(parts.username or ""),
+        "client-fingerprint": query.get("fp", ["chrome"])[0],
+    }
+    if parts.password:
+        node["password"] = unquote(parts.password)
+    if insecure:
+        node["skip-cert-verify"] = True
+    sni = query.get("sni", query.get("peer", [""]))[0]
+    if sni:
+        node["sni"] = sni
+    alpn = query.get("alpn", [""])[0]
+    if alpn:
+        node["alpn"] = [item for item in alpn.split(",") if item]
+    return node
+
+
+def parse_vmess(uri: str) -> dict:
+    payload = json.loads(b64decode_loose(uri[len("vmess://"):]).decode("utf-8"))
+    network = str(payload.get("net") or "tcp")
+    node = {
+        "name": str(payload.get("ps") or payload.get("add")),
+        "type": "vmess",
+        "server": payload["add"],
+        "port": int(payload["port"]),
+        "uuid": payload["id"],
+        "alterId": int(payload.get("aid") or 0),
+        "cipher": str(payload.get("scy") or "auto"),
+        "network": network,
+        "udp": True,
+    }
+    if str(payload.get("tls") or "") in {"tls", "reality"}:
+        node["tls"] = True
+        if payload.get("sni") or payload.get("host"):
+            node["servername"] = str(payload.get("sni") or payload.get("host"))
+    if network == "ws":
+        options: dict = {"path": str(payload.get("path") or "/")}
+        host = payload.get("host")
+        if host:
+            options["headers"] = {"Host": str(host)}
+        node["ws-opts"] = options
+    elif network == "grpc":
+        node["grpc-opts"] = {"grpc-service-name": str(payload.get("path") or "")}
+    return node
+
+
+def parse_ss(uri: str) -> dict:
+    body = uri[len("ss://"):]
+    fragment = ""
+    if "#" in body:
+        body, fragment = body.split("#", 1)
+    query = ""
+    if "?" in body:
+        body, query = body.split("?", 1)
+    if "@" not in body:
+        body = b64decode_loose(body).decode("utf-8")
+    credentials, endpoint = body.rsplit("@", 1)
+    if ":" not in credentials:
+        credentials = b64decode_loose(credentials).decode("utf-8")
+    method, password = credentials.split(":", 1)
+    host, port = endpoint.rsplit(":", 1)
+    node = {
+        "name": unquote(fragment) or host,
+        "type": "ss",
+        "server": host.strip("[]"),
+        "port": int(port),
+        "cipher": method,
+        "password": password,
+        "udp": True,
+    }
+    if parse_qs(query).get("plugin"):
+        node["plugin"] = parse_qs(query)["plugin"][0]
+    return node
+
+
+def parse_trojan(uri: str) -> dict:
+    parts = urlsplit(uri)
+    query = parse_qs(parts.query)
+    node = {
+        "name": unquote(parts.fragment) or parts.hostname,
+        "type": "trojan",
+        "server": parts.hostname,
+        "port": parts.port,
+        "password": unquote(parts.username or ""),
+        "udp": True,
+    }
+    if query.get("sni"):
+        node["sni"] = query["sni"][0]
+    if query.get("allowInsecure", query.get("insecure", ["0"]))[0].lower() in {"1", "true"}:
+        node["skip-cert-verify"] = True
+    return node
+
+
+PARSERS = {
+    "anytls": parse_anytls,
+    "vmess": parse_vmess,
+    "ss": parse_ss,
+    "trojan": parse_trojan,
+}
+
+
+def uri_nodes(text: str) -> list[dict]:
+    nodes: list[dict] = []
+    skipped: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        raw_scheme = line.split("://", 1)[0] if "://" in line else ""
+        scheme = raw_scheme.lower() if re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]{0,15}", raw_scheme) else "unknown"
+        parser = PARSERS.get(scheme)
+        if parser is None:
+            skipped.append("unsupported URI scheme")
+            continue
+        try:
+            nodes.append(parser(line))
+        except Exception:
+            # Parser exceptions can embed URI components such as passwords or
+            # tokens; report only the validated scheme and a generic category.
+            skipped.append(f"malformed {scheme} entry")
+    if skipped:
+        print(f"skipped {len(skipped)} unusable entries: {skipped[:5]}", file=sys.stderr)
+    return nodes
+
+
+def normalize(raw: bytes) -> list[dict]:
+    text = raw.decode("utf-8", "replace").strip()
+    if not text:
+        raise SystemExit("subscription payload is empty")
+    if "://" not in text:
+        try:
+            decoded = b64decode_loose(text).decode("utf-8")
+        except (SystemExit, UnicodeDecodeError):
+            decoded = ""
+        if decoded and "://" not in decoded and "proxies:" in decoded:
+            text = decoded
+        elif decoded and "://" in decoded:
+            text = decoded
+    try:
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("proxies"):
+        nodes = clash_nodes(payload)
+    else:
+        nodes = uri_nodes(text)
+    usable = [node for node in nodes if node.get("name") and node.get("type")
+              and str(node["type"]).lower() not in IGNORED_TYPES and not is_notice(node["name"])]
+    if not usable:
+        raise SystemExit("subscription does not contain usable proxy nodes")
+    seen: set[str] = set()
+    for node in usable:
+        name = str(node["name"])
+        candidate, index = name, 2
+        while candidate in seen:
+            candidate, index = f"{name} #{index}", index + 1
+        node["name"] = candidate
+        seen.add(candidate)
+    return usable
+
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: mihomo-subscription-normalize INPUT OUTPUT")
+    source, destination = Path(sys.argv[1]), Path(sys.argv[2])
+    nodes = normalize(source.read_bytes())
+    with destination.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump({"proxies": nodes}, stream, allow_unicode=True,
+                       sort_keys=False, default_flow_style=False, width=4096)
+    print(f"normalized {len(nodes)} nodes")
+
+
+if __name__ == "__main__":
+    main()

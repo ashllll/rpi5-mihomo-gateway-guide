@@ -1,37 +1,21 @@
 #!/bin/sh
-# Passive observer for the mihomo gateway. Reads kernel state; the one active
-# check (egress, at most every 5 minutes) goes through the proxy port and is
-# ordinary traffic, not a measurement probe, so it never spends budget.
+# Observe local Mihomo forwarding structure; public egress is a separate signal.
 #
-#   (no args)          timer mode: restart a dead process, then observe
-#   --observe-only     same probe, no lock and no restart; exit 1 when failed
-#   --startup-check N  wait up to N seconds for TUN + hooks + egress through the
-#                      proxy (default: 20, or 75 in the first 5 minutes of boot)
-#   --egress           run the egress probe now and print the result
-#   --state            print the last recorded status line (exit 1 when it is red)
-#
-# The startup-check mode exists because `mihomo -t` validates the config but
-# cannot prove the TUN device or its nftables hooks exist: on 2026-10-25 a core
-# built without gVisor started cleanly, passed `-t`, and black-holed every
-# proxied connection while domestic traffic kept working.
-#
-# The redirect check looks for the rule, not just the table. `nft list table`
-# still succeeds when the chains are empty, and a partial reload leaves exactly
-# that: a green probe over a kernel that redirects nothing. The live
-# implementation only asked for the table, which is the blind spot fixed here.
-#
-# Startup mode also proves egress. The 2026-10-25 core had TUN, redirect and
-# route all in place and still black-holed every proxied connection, so kernel
-# state alone would have passed a gateway that routes nothing. One proxied
-# request inside the same window is the cheapest proof the whole chain works.
+#   (no args)          timer mode: recover a stopped core and observe
+#   --observe-only     same observation without lock or recovery
+#   --startup-check N wait for TUN + redirect + filter + policy route
+#   --egress           strictly test proxied public egress now
+#   --state            print the last recorded status line
 set -eu
 umask 077
 state_dir=/run/mihomo-healthcheck
 install -d -m 700 "$state_dir"
-lan_ip=127.0.0.1
 mixed_port=${MIHOMO_MIXED_PORT:-7890}
 egress_every=${EGRESS_EVERY:-300}
 egress_url=${EGRESS_URL:-https://www.gstatic.com/generate_204}
+probes_file=${EGRESS_PROBES_FILE:-/etc/mihomo/health-probes.conf}
+alert_failures=${EGRESS_ALERT_FAILURES:-1}
+recovery_successes=${EGRESS_RECOVERY_SUCCESSES:-1}
 alert=/usr/local/sbin/mihomo-alert
 
 usage='usage: mihomo-healthcheck [--observe-only|--startup-check [seconds]|--egress|--state]'
@@ -43,8 +27,6 @@ case "${1:-}" in
   --startup-check)
     mode=startup
     if [ "${2:-}" = '' ]; then
-      # A cold boot can be slower than a restart. The gate still has to pass -
-      # the longer window only avoids a false red while interfaces settle.
       if [ "$(cut -d. -f1 /proc/uptime)" -lt 300 ]; then wait_s=75; else wait_s=20; fi
     else
       wait_s=$2
@@ -53,20 +35,25 @@ case "${1:-}" in
   *) echo "$usage" >&2; exit 2 ;;
 esac
 
+if [ "$mode" = timer ]; then
+for threshold in "$alert_failures" "$recovery_successes"; do
+  case "$threshold" in ''|*[!0-9]*) exit 2 ;; esac
+  [ "$threshold" -ge 1 ] || exit 2
+done
+fi
+
 if [ "$mode" = state ]; then
-  # Read-only view of the last sample, for callers with no journal access. A red
-  # sample must not exit 0.
   [ -s "$state_dir/status" ] || { echo 'no status recorded'; exit 1; }
   cat "$state_dir/status"
   case "$(cat "$state_dir/status")" in *business=failed*) exit 1 ;; esac
   exit 0
 fi
 
+maintenance=0
 if [ "$mode" = timer ]; then
-  # The subscription updater holds the same lock while it rewrites config and
-  # restarts the core, so skipping one tick is correct.
+  # The subscription updater shares this lock while rewriting config/restarting.
   exec 8>/run/lock/mihomo-maintenance.lock
-  flock -n 8 || exit 0
+  flock -n 8 || maintenance=1
 fi
 
 started=$(systemctl show mihomo -p ActiveEnterTimestamp --value 2>/dev/null || true)
@@ -74,54 +61,92 @@ started=$(systemctl show mihomo -p ActiveEnterTimestamp --value 2>/dev/null || t
 probe() {
   tun_ok=0; redirect_ok=0; filter_ok=0; route_ok=0
   ip link show Mihomo >/dev/null 2>&1 && tun_ok=1
-  # Require the redirect rule itself; the table outlives a partial reload.
   nft list table inet mihomo 2>/dev/null | grep -q 'redirect to :' && redirect_ok=1
   nft list table inet rp_filter >/dev/null 2>&1 && filter_ok=1
   ip rule show 2>/dev/null | grep -q '^9000:' && route_ok=1
   cur=$(nft list table inet mihomo 2>/dev/null \
     | awk '/counter packets/{sub(/.*counter packets /,"");sub(/ .*/,"");s+=$1} END{print s+0}')
 }
-ok() { [ "$tun_ok" = 1 ] && [ "$redirect_ok" = 1 ] && [ "$filter_ok" = 1 ] && [ "$route_ok" = 1 ]; }
+kernel_ok() {
+  [ "$tun_ok" = 1 ] && [ "$redirect_ok" = 1 ] &&
+    [ "$filter_ok" = 1 ] && [ "$route_ok" = 1 ]
+}
+base_business() {
+  case "$mode_name" in
+    process-inactive|process-stopping) business=failed; return ;;
+  esac
+  if kernel_ok; then
+    if [ -n "$prev_packets" ] && [ "$cur" -gt "$prev_packets" ]; then business=verified
+    else business=idle
+    fi
+  else
+    business=failed
+  fi
+}
 
-# Egress proof: a 204 fetched through the proxy port shows the whole chain
-# (core -> outbound -> node -> internet) works, which the packet counter alone
-# cannot. SOCKS5 hostname mode also proves the proxied DNS path.
-egress_probe() {
-  # Probe loopback first: the core binds `*`, so this works regardless of which
-  # LAN ports are up. A stale gateway address used to turn a healthy core into a
-  # permanent "degraded" whenever the LAN link was unplugged.
-  for host in 127.0.0.1 "$lan_ip"; do
-    code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' \
-      --socks5-hostname "$host:$mixed_port" "$egress_url" 2>/dev/null || true)
-    [ "$code" = 204 ] && { echo ok; return; }
-  done
+invalid_profile() {
+  printf 'configuration=fail reason=invalid-profile\n' >"$details"
+  mv "$details" "$state_dir/paths"
   echo fail
 }
 
-# mosdns owns :5335 (its config's listen address). mihomo has no ordering on it,
-# so right after a cold boot the resolver can still be binding; scanning the
-# listen table is the cheap way to tell "not up yet" from "up and broken".
-dns_ready() {
-  command -v ss >/dev/null 2>&1 || return 0
-  ss -ltn 2>/dev/null | grep -qE '[:.]5335([[:space:]]|$)'
+egress_probe() {
+  records="primary|proxy|204|$egress_url"
+  [ ! -r "$probes_file" ] || records=$(cat "$probes_file")
+  passed=0; sampled=0
+  details=$state_dir/paths.$$
+  : >"$details"
+  while IFS='|' read -r label path expected target extra; do
+    case "$label" in ''|\#*) continue ;; *[!A-Za-z0-9_.-]*) invalid_profile; return ;; esac
+    case "$expected" in ''|*[!0-9,]*) invalid_profile; return ;; esac
+    case "$target" in http://*|https://*) ;; *) invalid_profile; return ;; esac
+    sampled=$((sampled + 1))
+    [ "$sampled" -le 6 ] && [ -z "$extra" ] || { invalid_profile; return; }
+    transfer_ok=1
+    case "$path" in
+      proxy) code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' --socks5-hostname "127.0.0.1:$mixed_port" "$target" 2>/dev/null) || transfer_ok=0 ;;
+      direct) code=$(curl -sS -m 6 -o /dev/null -w '%{http_code}' --noproxy '*' "$target" 2>/dev/null) || transfer_ok=0 ;;
+      *) invalid_profile; return ;;
+    esac
+    result=fail
+    if [ "$transfer_ok" = 1 ] && [ -n "$code" ]; then
+      case ",$expected," in *",$code,"*) result=ok; passed=$((passed + 1)) ;; esac
+    fi
+    printf '%s=%s status=%s path=%s\n' "$label" "$result" "$code" "$path" >>"$details"
+  done <<EOF
+$records
+EOF
+  mv "$details" "$state_dir/paths"
+  if [ "$passed" -eq 0 ]; then echo fail
+  elif [ "$passed" -eq "$sampled" ]; then echo ok
+  else echo partial
+  fi
+}
+
+record_sample() {
+  failures=0; successes=0
+  case "$egress" in
+    ok) successes=$(( $(cat "$state_dir/egress_successes" 2>/dev/null || echo 0) + 1 )) ;;
+    fail|partial) failures=$(( $(cat "$state_dir/egress_failures" 2>/dev/null || echo 0) + 1 )) ;;
+  esac
+  printf '%s\n' "$failures" >"$state_dir/egress_failures"
+  printf '%s\n' "$successes" >"$state_dir/egress_successes"
 }
 
 probe
-gate_fail=0
 if [ "$mode" = startup ]; then
   deadline=$(( $(date +%s) + wait_s ))
-  while ! ok; do
+  while ! kernel_ok; do
     [ "$(date +%s)" -ge "$deadline" ] && break
     sleep 1
     probe
   done
-  if ok; then
-    while [ "$(date +%s)" -lt "$deadline" ] && ! dns_ready; do sleep 1; done
-    egress=$(egress_probe)
-    printf '%s\n' "$egress" >"$state_dir/egress"
-    printf '%s\n' "$(date +%s)" >"$state_dir/egress_at"
-    [ "$egress" = ok ] || gate_fail=1
-  fi
+  # A previous core's egress success says nothing about this startup. Leave
+  # the external check to the timer without blocking the local structure gate.
+  printf 'unknown\n' >"$state_dir/egress"
+  printf '0\n' >"$state_dir/egress_at"
+  printf '0\n' >"$state_dir/egress_failures"
+  printf '0\n' >"$state_dir/egress_successes"
 fi
 
 if [ "$mode" = egress ]; then
@@ -132,94 +157,151 @@ if [ "$mode" = egress ]; then
   [ "$result" = ok ]
 fi
 
-prev_business=$(sed -n 's/.*business=\([a-z]*\).*/\1/p' "$state_dir/status" 2>/dev/null | head -1 || true)
-prev=$(cat "$state_dir/packets" 2>/dev/null || echo '')
+prev_packets=$(cat "$state_dir/packets" 2>/dev/null || echo '')
 printf '%s\n' "$cur" >"$state_dir/packets"
-# Informational only: a fatal line from an earlier run must never fail a fresh
-# start, so journal text is recorded but is not part of the decision.
 fatal=$(journalctl -u mihomo --since "$started" -o cat 2>/dev/null \
   | grep -m1 -E 'gVisor is not included|Start TUN listening error|parse config error' || true)
 
 mode_name=process-running
 action=none
-state=$(systemctl is-active mihomo 2>/dev/null || true)
-# An ExecStartPost probe runs while the unit is still "activating", which is a
-# healthy state and must not be reported as an inactive process.
-case "$state" in
-  active|activating|reloading) ;;
-  *)
-  mode_name=process-inactive
-  if [ "$mode" = timer ]; then
-    logger -t mihomo-healthcheck "Mihomo is inactive; requesting restart"
-    systemctl restart mihomo
-    action=restart
-    systemctl is-active --quiet mihomo && mode_name=process-restarted
-  fi
-  ;;
+process_state=$(systemctl is-active mihomo 2>/dev/null || true)
+case "$process_state" in
+  active) ;;
+  activating) mode_name=process-activating ;;
+  reloading) mode_name=process-reloading ;;
+  deactivating) mode_name=process-stopping ;;
+  *) mode_name=process-inactive ;;
 esac
+base_business
 
-if [ "$mode_name" = process-inactive ]; then
-  # Kernel state can outlive a dying process for a moment; a gateway without a
-  # core is down no matter what the tables say.
-  business=failed
-elif ok; then
-  if [ -n "$prev" ] && [ "$cur" -gt "$prev" ]; then business=verified; else business=idle; fi
-else
-  business=failed
-fi
-# Hooks in place are not a route: a startup probe that cannot fetch through the
-# proxy means the gateway is down, whatever the kernel tables say.
-[ "$gate_fail" = 1 ] && business=failed
-
-# Timer mode owns the egress sample; it costs one proxied request, no budget.
 egress=$(cat "$state_dir/egress" 2>/dev/null || echo unknown)
-if [ "$mode" = timer ] && [ "$business" != failed ]; then
+if [ "$mode" = timer ] && [ "$maintenance" = 0 ] && [ "$business" != failed ]; then
   last_at=$(cat "$state_dir/egress_at" 2>/dev/null || echo 0)
   if [ $(( $(date +%s) - last_at )) -ge "$egress_every" ]; then
     egress=$(egress_probe)
+    record_sample
     printf '%s\n' "$(date +%s)" >"$state_dir/egress_at"
     printf '%s\n' "$egress" >"$state_dir/egress"
   fi
 fi
-# A failed egress sample after a healthy one is a gateway fault, not a slow probe.
-if [ "$business" = verified ] && [ "$egress" = fail ]; then business=degraded; fi
+[ "$business" = failed ] || { { [ "$egress" != fail ] && [ "$egress" != partial ]; } || business=degraded; }
 
-# Self-heal a black-holed core: the process can stay up and the kernel tables can
-# exist while every proxied connection is dropped (the 2026-10-25 incident). Three
-# consecutive `failed` samples from the timer restart it, at most once an hour, so
-# a genuinely broken upstream cannot become a restart loop; the alert still fires.
-# Deliberately not `degraded`: one failed egress sample is cached for five minutes,
-# so restarting on it would turn a transient probe hiccup into dropped connections.
-if [ "$mode" = timer ] && [ "$mode_name" != process-inactive ]; then
-  case "$business" in
-    failed) streak=$(( $(cat "$state_dir/fail_streak" 2>/dev/null || echo 0) + 1 )) ;;
-    *) streak=0 ;;
+# A stopped core gets an immediate bounded recovery attempt. A running core with
+# broken local forwarding structure needs three observations before restarting.
+if [ "$mode" = timer ] && [ "$maintenance" = 0 ]; then
+  case "$mode_name" in
+    process-inactive) restart_due=1 ;;
+    process-stopping|process-activating|process-reloading)
+      printf '0\n' >"$state_dir/fail_streak"
+      restart_due=0 ;;
+    *)
+      if [ "$business" = failed ]; then
+        streak=$(( $(cat "$state_dir/fail_streak" 2>/dev/null || echo 0) + 1 ))
+        printf '%s\n' "$streak" >"$state_dir/fail_streak"
+        restart_due=0
+        [ "$streak" -lt 3 ] || restart_due=1
+      else
+        printf '0\n' >"$state_dir/fail_streak"
+        restart_due=0
+      fi
+      ;;
   esac
-  printf '%s\n' "$streak" >"$state_dir/fail_streak"
-  restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
-  if [ "$streak" -ge 3 ] && [ $(( $(date +%s) - restarted_at )) -ge 3600 ]; then
-    logger -t mihomo-healthcheck "gateway evidence red for ${streak} samples; restarting mihomo"
-    printf '%s\n' "$(date +%s)" >"$state_dir/restarted_at"
-    printf '0\n' >"$state_dir/fail_streak"
-    systemctl restart mihomo
-    action=restart
+
+  if [ "$restart_due" = 1 ]; then
+    now=$(date +%s)
+    restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
+    if [ $(( now - restarted_at )) -ge 3600 ]; then
+      logger -t mihomo-healthcheck "gateway process or forwarding structure failed; requesting restart"
+      printf '%s\n' "$now" >"$state_dir/restarted_at"
+      action=restart
+      if systemctl restart mihomo; then
+        if systemctl is-active --quiet mihomo; then
+          mode_name=process-restarted
+          probe
+          mode_name=process-restarted
+          base_business
+        else
+          mode_name=process-inactive
+          business=failed
+        fi
+      else
+        process_state=$(systemctl is-active mihomo 2>/dev/null || true)
+        case "$process_state" in
+          active)
+            probe
+            mode_name=process-running
+            base_business ;;
+          activating) mode_name=process-activating; base_business ;;
+          reloading) mode_name=process-reloading; base_business ;;
+          deactivating) mode_name=process-stopping; business=failed ;;
+          *) mode_name=process-inactive; business=failed ;;
+        esac
+      fi
+      # The old core's cached egress result cannot verify the restarted core.
+      printf 'unknown\n' >"$state_dir/egress"
+      printf '0\n' >"$state_dir/egress_at"
+      egress=unknown
+      printf '0\n' >"$state_dir/egress_failures"
+      printf '0\n' >"$state_dir/egress_successes"
+      [ "$business" = failed ] || { { [ "$egress" != fail ] && [ "$egress" != partial ]; } || business=degraded; }
+    fi
   fi
 fi
 
-printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s fatal=%s\n' \
+printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s maintenance=%s fatal=%s\n' \
   "$(date -Is)" "$mode_name" "$action" "$business" "$tun_ok" "$redirect_ok" "$filter_ok" "$route_ok" \
-  "$egress" "$cur" "${fatal:-none}" >"$state_dir/status"
+  "$egress" "$cur" "$maintenance" "${fatal:-none}" >"$state_dir/status"
 
-# Transitions only: a stable fault must not spam the phone, and recovery is sent
-# once. Start failures are covered by the unit's OnFailure, not by this probe.
-if [ "$mode" = timer ] && [ -x "$alert" ]; then
-  case "${prev_business}:${business}" in
-    failed:verified|failed:idle|failed:degraded|degraded:verified)
-      "$alert" --health "网关已恢复：business=$business egress=$egress" health || true ;;
-    verified:failed|idle:failed|degraded:failed|verified:degraded)
-      "$alert" --health "网关异常：business=$business egress=$egress packets=$cur" health || true ;;
+# Notify only from the timer. Keep a pending edge until delivery succeeds so a
+# temporary notifier outage cannot erase it when the gateway later recovers.
+if [ "$mode" = timer ] && [ "$maintenance" = 0 ] && [ -x "$alert" ]; then
+  last_notified=$(cat "$state_dir/last_notified" 2>/dev/null || echo '')
+  pending_file=$state_dir/pending_notification
+  desired_state=; desired_key=; desired_message=
+  case "$business:$egress" in
+    failed:*)
+      if [ "$last_notified" != failed ]; then
+        desired_state=failed; desired_key=mihomo-failed
+        desired_message="网关核心或本地转发结构失败：business=failed packets=$cur"
+      fi ;;
+    degraded:fail|degraded:partial)
+      if [ "$last_notified" != degraded ] && [ "$(cat "$state_dir/egress_failures" 2>/dev/null || echo 0)" -ge "$alert_failures" ]; then
+        desired_state=degraded; desired_key=mihomo-degraded
+        desired_message="出站路径抽样异常（$egress）；保留核心及现有 DIRECT 规则。$(tr '\n' ';' <"$state_dir/paths" 2>/dev/null || true)"
+      fi ;;
+    idle:ok|verified:ok)
+      if [ "$(cat "$state_dir/egress_successes" 2>/dev/null || echo 0)" -ge "$recovery_successes" ]; then
+      case "$last_notified" in
+        failed)
+          desired_state=healthy; desired_key=mihomo-recovery
+          desired_message="核心与本地转发结构已恢复：business=$business egress=ok" ;;
+        degraded)
+          desired_state=healthy; desired_key=mihomo-egress-recovery
+          desired_message="代理出口探测已恢复：business=$business egress=ok" ;;
+      esac
+      fi ;;
+    idle:unknown|verified:unknown)
+      if [ "$last_notified" = failed ]; then
+        desired_state=healthy; desired_key=mihomo-recovery
+        desired_message='核心与本地转发结构已恢复；代理出口尚未探测，egress=unknown'
+      fi ;;
   esac
+  if [ -n "$desired_state" ]; then
+    printf '%s\t%s\t%s\n' "$desired_state" "$desired_key" "$desired_message" >"$pending_file.tmp"
+    mv "$pending_file.tmp" "$pending_file"
+  else
+    : >"$pending_file"
+  fi
+  if [ -s "$pending_file" ]; then
+    IFS="$(printf '\t')" read -r pending_state pending_key pending_message <"$pending_file" || true
+    if [ -n "${pending_state:-}" ] && "$alert" --health "$pending_message" "$pending_key"; then
+      printf '%s\n' "$pending_state" >"$state_dir/last_notified.tmp"
+      mv "$state_dir/last_notified.tmp" "$state_dir/last_notified"
+      : >"$state_dir/pending_notification"
+    fi
+  fi
 fi
 
+[ "$maintenance" = 1 ] && exit 0
 [ "$business" = failed ] && exit 1
 exit 0
