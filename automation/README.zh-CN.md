@@ -260,6 +260,7 @@ python3 tools/validate_public.py    # 发布结构、隐私模式（含订阅节
 python3 tools/check_image.py        # 恢复镜像的自检与拒绝写入磁盘
 python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池顺序、备份池、幂等性、空 manifest 时 fail-closed
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
+python3 tools/check_legacy_stt.py  # 旧清单 STT 改名/删除迁移、原生计量归属与重复刷新
 python3 tools/check_subscription_update.py  # 完整订阅更新：21 种离线场景，包括原子切换前后故障、撤权、重启与缓存保护
 python3 tools/check_update_transaction.py  # 真实CLI事务：锁、并发输入、时限、崩溃恢复、缓存持久顺序与规范化
 python3 tools/check_client_dns_guard.py    # 客户端UDP/TCP、实际DNS上游、合法答案、维护互斥与恢复预算

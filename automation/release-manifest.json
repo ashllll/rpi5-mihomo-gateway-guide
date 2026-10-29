@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "ebbfc40c1de96b40cb35df512497b16a5b3587df0b74d5e5d09eee220cfa1bf9",
+  "release_id": "8132b8faf9f0b486a6a2acc633165b1152a9e41adc025868b6026fa80bc7fbd9",
   "files": [
     {
       "source": "check-release.py",
@@ -193,7 +193,7 @@
     {
       "source": "sbin/mihomo-policy-overlay",
       "target": "/usr/local/sbin/mihomo-policy-overlay",
-      "sha256": "5f89377c07e1e2a2f8a2c4a760e70769c62e8550f32b554976a39b8efc588e23",
+      "sha256": "378a9bd3e323eb5b6a555ed31b712052d5d255145115041a958de1d18afbd020",
       "mode": 493
     },
     {
