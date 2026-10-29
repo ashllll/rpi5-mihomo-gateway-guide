@@ -47,6 +47,7 @@ def check_case(directory, native, scenario):
     legacy = {'name': 'STT', 'type': 'fallback',
               'proxies': ['STT | Bulk 01', 'STT | Bulk 02'],
               'url': 'https://www.gstatic.com/generate_204',
+              'expected-status': 204,
               'interval': 180, 'lazy': True, 'hidden': True,
               'icon': 'https://example.invalid/stt.svg'}
     if scenario != 'absent':
