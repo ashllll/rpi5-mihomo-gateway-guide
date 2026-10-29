@@ -31,6 +31,12 @@ trap cleanup EXIT HUP INT TERM
 fetch() {
   output=$1
   url=$2
+  # Direct first: the host's own traffic bypasses the tunnel, so a direct
+  # fetch bills no proxy traffic. Fall back to the mixed port when blocked.
+  curl --fail --location --silent --show-error \
+    --connect-timeout 3 --max-time 30 \
+    --proto '=https' --tlsv1.2 \
+    --output "$output" "$url" ||
   curl --fail --location --silent --show-error \
     --proxy "$proxy" \
     --connect-timeout 10 --max-time 180 \

@@ -1,0 +1,494 @@
+{
+  "format": 1,
+  "release_id": "ebbfc40c1de96b40cb35df512497b16a5b3587df0b74d5e5d09eee220cfa1bf9",
+  "files": [
+    {
+      "source": "check-release.py",
+      "target": null,
+      "sha256": "8e123ec68788631bd6f60cde4192b0be5cedd271a423551e82c37b536921e460"
+    },
+    {
+      "source": "env/automation.env.example",
+      "target": null,
+      "sha256": "4b404d0f9d22ad13a9bc705099098fba33c82e7ee91b038f4fff961e3e046e17"
+    },
+    {
+      "source": "env/health-probes.conf.example",
+      "target": null,
+      "sha256": "252f65b3d11751f3a17a45f3365f750374b495638543bcc219aabf0442ad0bee"
+    },
+    {
+      "source": "env/mihomo-alert.env.example",
+      "target": null,
+      "sha256": "a53d51a2838bb93bb45640548ed3a4cf60adf8dc8651df36e418183e31d72138"
+    },
+    {
+      "source": "env/reconcile-targets.conf.example",
+      "target": null,
+      "sha256": "b5af7a2f7ce3104979ed532ed4a96a271fabecf7af81fd37661872e037f4e27b"
+    },
+    {
+      "source": "etc/NetworkManager/dispatcher.d/90-wifi-management-routing",
+      "target": "/etc/NetworkManager/dispatcher.d/90-wifi-management-routing",
+      "sha256": "4fd70ae221f538e0d8017e1b6c62e7ef1a37f252993e414eb9449825b2550271",
+      "mode": 448,
+      "when_directory": "etc/NetworkManager"
+    },
+    {
+      "source": "etc/dnsmasq-upstreams.direct",
+      "target": null,
+      "sha256": "7d5a372fcf029c1a281322aaffed2ca3f0ee94c4fcd731d78ce4e5ed67f286ab"
+    },
+    {
+      "source": "etc/dnsmasq-upstreams.mihomo",
+      "target": null,
+      "sha256": "076041d0dd5b481b1ba00b45c772a7ab51bf24410e739e6d8bc91c9dc4ca3160"
+    },
+    {
+      "source": "etc/dnsmasq-upstreams.mosdns",
+      "target": null,
+      "sha256": "2ddc29f38d7a47593d99ef0d57240db39718514d555c971db7db53a010d188f3"
+    },
+    {
+      "source": "etc/dnsmasq/README.md",
+      "target": null,
+      "sha256": "f97cd360b1713db5c1e6b882b55cb917a9192b7befbc729c811a9d214fab7d42"
+    },
+    {
+      "source": "etc/dnsmasq/resolver.conf",
+      "target": null,
+      "sha256": "23ec379f773b0f72bdecb2e91c56fb8efd8e1a67eff53c5709e9b02dd8dac0f3"
+    },
+    {
+      "source": "etc/dnsmasq/upstreams.conf",
+      "target": null,
+      "sha256": "6bf103d4fcfd8ef033b23eb818eb8508bcbb28741031a78ed4d3b7832e09e2c9"
+    },
+    {
+      "source": "etc/dnsmasq/vlan-pilot.conf",
+      "target": null,
+      "sha256": "44ca66c7bbca025e0d0c76632f13b5bd5e491cf80418419e16ea795ecd5d7c56"
+    },
+    {
+      "source": "etc/mihomo/README.md",
+      "target": null,
+      "sha256": "6f7ecbda35020dafa2c73416fb48a971ca1b1e142ee7feaa7433bc132bf2ab7d"
+    },
+    {
+      "source": "etc/mihomo/config.local.yaml",
+      "target": null,
+      "sha256": "605567171cc638656e52a360ebdba902e9613eadef7bfd362c3837b7ec42f2bc"
+    },
+    {
+      "source": "etc/mosdns/config.yaml",
+      "target": null,
+      "sha256": "8b909235752581a3e52d4b52beb7327079afd6b2d8bd92a7a8dcfee9ff9524b1"
+    },
+    {
+      "source": "etc/mosdns/rules/custom-direct.txt",
+      "target": null,
+      "sha256": "f93d688f220daedc4dba44bc175f86d16fc6a5bd02bbcca3bcbf6be509e67c22"
+    },
+    {
+      "source": "etc/mosdns/rules/custom-proxy.txt",
+      "target": null,
+      "sha256": "caaf3a876394e0530970b9ae5e70194fc7b2ea9866ee9f084d0935803e198be2"
+    },
+    {
+      "source": "etc/nftables.conf",
+      "target": null,
+      "sha256": "5078490e59d8ae0df8516927ac69a3eab55282f4862c6cee2a22a2ea31591327"
+    },
+    {
+      "source": "etc/nftables.d/ucg-pc-link.nft",
+      "target": null,
+      "sha256": "710e8ec929695ef056112f44cf47f866db2f71daaed1788db432f09669654238"
+    },
+    {
+      "source": "etc/nftables.d/vlan-pilot.nft",
+      "target": null,
+      "sha256": "e898378bb6d925833f4c6ae16cb6dba0f1316eec69ceccd75a1239bb8fb0505b"
+    },
+    {
+      "source": "etc/systemd/journald.conf.d/90-gateway-persistent.conf",
+      "target": "/etc/systemd/journald.conf.d/90-gateway-persistent.conf",
+      "sha256": "804492f5f918a228709042cc9823786f5d89402b76e23b8a8f07ceabd13e219b",
+      "mode": 420
+    },
+    {
+      "source": "install.sh",
+      "target": null,
+      "sha256": "b9e2fab2fe3804182101eedc3646b7c590cf621d3b6c76f3f0a68cc8c9fdcfb4"
+    },
+    {
+      "source": "policy/capabilities.yaml",
+      "target": null,
+      "sha256": "936922b567468cd9bc6549c145261d79ac14bd142a382b9b8c107103a6f45d51"
+    },
+    {
+      "source": "policy/route-defaults.yaml",
+      "target": null,
+      "sha256": "0da181b64dac18113aef6e7853aecf1f3710b43d47dd9ef7f845262ed58df16f"
+    },
+    {
+      "source": "sbin/dnsmasq-safe-start",
+      "target": "/usr/local/sbin/dnsmasq-safe-start",
+      "sha256": "5975926b6ed0fa688e6e3a7aefb3d7aa448a26632dc2535571da523dda92b256",
+      "mode": 493
+    },
+    {
+      "source": "sbin/homeassistant-access-guard",
+      "target": "/usr/local/sbin/homeassistant-access-guard",
+      "sha256": "e92ee0328d3395c3bd8903bf7f7ad2a90ea62d709d3b720a524e880d46684051",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-alert",
+      "target": "/usr/local/sbin/mihomo-alert",
+      "sha256": "28960b430f7ab6edf825ea138bf03170b801653fac64a7db24e45a361b753b83",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-core-swap",
+      "target": "/usr/local/sbin/mihomo-core-swap",
+      "sha256": "18ceec31958e3e42583dff6582cff7155d81a1f72e88fbc45c357a9446f9a1aa",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-dns-mode",
+      "target": "/usr/local/sbin/mihomo-dns-mode",
+      "sha256": "33630218f2c8b4459fcacb6e7678975de4b2987c1ba53e945effb1ddd87dc337",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-dnsmasq-guard",
+      "target": "/usr/local/sbin/mihomo-dnsmasq-guard",
+      "sha256": "34a8b7ebc17b9596dc99c067ab6de3b09e99067909de92730b99588456f4a837",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-download-quality",
+      "target": "/usr/local/sbin/mihomo-download-quality",
+      "sha256": "a0c798893c7d5b717fd33b5220d626de8d5bf1604539158af259a26c7fdec138",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-healthcheck",
+      "target": "/usr/local/sbin/mihomo-healthcheck",
+      "sha256": "239ea36bd4d4d6491c8d3c5263391a6140a903b0175c98ac64d152546832bf47",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-measurement-budget",
+      "target": "/usr/local/sbin/mihomo-measurement-budget",
+      "sha256": "3c1355e4583399127327381e99c81b09fcfa165a1e9ed26176af25266132359d",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-measurement-policy",
+      "target": "/usr/local/sbin/mihomo-measurement-policy",
+      "sha256": "e8658465ab8df40d534b272dc4717a71d8b2d671abd333cee051bdf820242b3e",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-policy-overlay",
+      "target": "/usr/local/sbin/mihomo-policy-overlay",
+      "sha256": "5f89377c07e1e2a2f8a2c4a760e70769c62e8550f32b554976a39b8efc588e23",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-reconcile-policy",
+      "target": "/usr/local/sbin/mihomo-reconcile-policy",
+      "sha256": "573237137d1a52ed4236fd4454ab7616e81e1cc2817d3f3ee875ef212867c1e3",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-social-quality",
+      "target": "/usr/local/sbin/mihomo-social-quality",
+      "sha256": "af910737715bcc1b6e781b0b744bd831e398fc6768898c32825ba9c2afb2ae4e",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-subscription-candidate",
+      "target": "/usr/local/sbin/mihomo-subscription-candidate",
+      "sha256": "8e94896b5f3485b03dff946027395e5749bc9d0250951ce4b8e3ee18fc440855",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-subscription-normalize",
+      "target": "/usr/local/sbin/mihomo-subscription-normalize",
+      "sha256": "403c6781afefef03527a38bf9250e3ab76ced3c283d93400bebe06e02353a817",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-update-rules",
+      "target": "/usr/local/sbin/mihomo-update-rules",
+      "sha256": "470e7548efbcf7c918bce233ae8a4106ae835f09af48f8b12e4925a421767348",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-update-subscription",
+      "target": "/usr/local/sbin/mihomo-update-subscription",
+      "sha256": "9a90c5e63f102768e299221bcdd7b79f6bffe90dff85ce55a127294aa8b480bd",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-watch",
+      "target": "/usr/local/sbin/mihomo-watch",
+      "sha256": "0c9ebd99ba947bf6a55b64eb33a00056619dc01ca5740acd3aa2a325ad689672",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-emergency-direct",
+      "target": "/usr/local/sbin/mosdns-emergency-direct",
+      "sha256": "48aa53af2b893db9c7a397da3e2f5bb304a10dfbdb9b9f907ab0e6de40bf6149",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-healthcheck",
+      "target": "/usr/local/sbin/mosdns-healthcheck",
+      "sha256": "dc1c68eca970bfea8a8f5b40dda00db3a7e4437146a1714fa1e41170e247a4c2",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-resume-auto",
+      "target": "/usr/local/sbin/mosdns-resume-auto",
+      "sha256": "ddd7c315496bf6d2659927a721475412afec5e61ec47e0698bc7eb62838289f4",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-rollout-rollback",
+      "target": "/usr/local/sbin/mosdns-rollout-rollback",
+      "sha256": "9cf0dc860bae625195b7404364ab2ef4b0c5f6d6bb8bb42c30a47695ca00f1e5",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-update-binary",
+      "target": "/usr/local/sbin/mosdns-update-binary",
+      "sha256": "d51a768e4218c5bc2737e8f11733c06a25c07d6dffbf629e7f1f62aaad98ce7c",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-update-rules",
+      "target": "/usr/local/sbin/mosdns-update-rules",
+      "sha256": "8eab0ef7655d59a4730d3121e07d0221929d1c5a8b29bff7cf88f149c54a0600",
+      "mode": 493
+    },
+    {
+      "source": "systemd/dnsmasq-vlan-pilot.service",
+      "target": "/etc/systemd/system/dnsmasq-vlan-pilot.service",
+      "sha256": "fee7bc3465d6bfea91d3a3092719c9410505d5eda8e70db2e57ad7f9ec9ffae2",
+      "mode": 420
+    },
+    {
+      "source": "systemd/dnsmasq.service.d/boot-safe.conf",
+      "target": "/etc/systemd/system/dnsmasq.service.d/boot-safe.conf",
+      "sha256": "103d17e9d7f39ad25d9a3af99c8690b5253f29c8c36d629bc9f652a18ef69c9d",
+      "mode": 420
+    },
+    {
+      "source": "systemd/dnsmasq.service.d/restart.conf",
+      "target": "/etc/systemd/system/dnsmasq.service.d/restart.conf",
+      "sha256": "a461b3cdf8cff1a22e2732dda4f985340c4df890ee4b05bd65d2bb00fa8cfe78",
+      "mode": 420
+    },
+    {
+      "source": "systemd/homeassistant-access-guard.service",
+      "target": "/etc/systemd/system/homeassistant-access-guard.service",
+      "sha256": "6d87b3c3f173be8cd2ce6101bd66bec80e2287aa5a70bf3e0618c664e0edfaeb",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-alert@.service",
+      "target": "/etc/systemd/system/mihomo-alert@.service",
+      "sha256": "20c3522b592cdb8ded08f62343795b2a61cd8659c01f155274584704157b5c16",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-dnsmasq-guard.service",
+      "target": "/etc/systemd/system/mihomo-dnsmasq-guard.service",
+      "sha256": "b232260180d6152458c29f2f4e2df385a80f51dab4940763fe30ea4141b4cb24",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-dnsmasq-guard.timer",
+      "target": "/etc/systemd/system/mihomo-dnsmasq-guard.timer",
+      "sha256": "f0fe43871e65cb2142d7965a9b6d983019b49d54a4a1dafbad9e99cca7cc43d1",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-download-quality.service",
+      "target": "/etc/systemd/system/mihomo-download-quality.service",
+      "sha256": "b8d92c9bca8f4b8974a278222b69bab98a2c5399a654801846b46eb3608c4671",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-download-quality.timer",
+      "target": "/etc/systemd/system/mihomo-download-quality.timer",
+      "sha256": "cee5778a1b90b7f21daf9a1e5caef8352d5be4d06a255eeb118d67cb5c49d265",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-healthcheck.service",
+      "target": "/etc/systemd/system/mihomo-healthcheck.service",
+      "sha256": "92fdf0e728b9858ef1beff92b138b32779c81c7f26f406d0a5b2f8ffbc3ac22b",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-healthcheck.timer",
+      "target": "/etc/systemd/system/mihomo-healthcheck.timer",
+      "sha256": "7dbe7f0ff6d920f020d272f09394d1bb649c0fe513d116d1dfb2e9e35477add4",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-measurement-budget.service",
+      "target": "/etc/systemd/system/mihomo-measurement-budget.service",
+      "sha256": "065237f76d02d66f68d17b04693cd951756fb7e3f5821403e29aeb3a4a464f5a",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-rules-update.service",
+      "target": "/etc/systemd/system/mihomo-rules-update.service",
+      "sha256": "b4d7e103786481909b0d7a950c1014bd3c0b890ed11a9199b83c7ade306e911f",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-rules-update.service.d/hardening.conf",
+      "target": "/etc/systemd/system/mihomo-rules-update.service.d/hardening.conf",
+      "sha256": "057fa6aae89486dc18ac349df2a1a8119ef241bf1b4bf7b7de8cd45692f85f29",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-rules-update.timer",
+      "target": "/etc/systemd/system/mihomo-rules-update.timer",
+      "sha256": "71ecb08f5fd1811e47c6574c8299fd73203eb307e9f3dcec048c00fe7903ef03",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-social-quality.service",
+      "target": "/etc/systemd/system/mihomo-social-quality.service",
+      "sha256": "5552b8f9e83771cc0ce74f57b19968fdc375a33ec6bafe26f4278cb58f7f7e99",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-social-quality.timer",
+      "target": "/etc/systemd/system/mihomo-social-quality.timer",
+      "sha256": "08da3ddbbe60472e7fea2513298350b5c91ba3212c3615d34559de4044c7405f",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-subscription-update.service",
+      "target": "/etc/systemd/system/mihomo-subscription-update.service",
+      "sha256": "600e3bd0a952f31cacf06adf527f378e7e945a429f756cb6f71f53252994bc1a",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-subscription-update.service.d/hardening.conf",
+      "target": "/etc/systemd/system/mihomo-subscription-update.service.d/hardening.conf",
+      "sha256": "17e486181c0068a532539669be64acef07d53531e9f81c3ddb7fe637a0964fe9",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-subscription-update.timer",
+      "target": "/etc/systemd/system/mihomo-subscription-update.timer",
+      "sha256": "0dbcbca73d774987f9e4faa3f6a23bf0a55efc8b078c48efa81defe332468601",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-watch.service",
+      "target": "/etc/systemd/system/mihomo-watch.service",
+      "sha256": "23163f382a9661c2f9e8442933108f3add3cff0dabfaa6d5cb8e67dbeb76083f",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-watch.timer",
+      "target": "/etc/systemd/system/mihomo-watch.timer",
+      "sha256": "3f90e1ee9831727243deb5be9655613314a92f824e906c77a033277b58f30ff7",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service",
+      "target": "/etc/systemd/system/mihomo.service",
+      "sha256": "bbaa94f5e87a4aa851ebe8fb748e7b7b9ad49cbf3ff27d421e139bb6c6835a64",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/dns-failover.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/dns-failover.conf",
+      "sha256": "08605caa0aa88d326deed348529885a0122e5f245c0e856407e385cac7ecaa4d",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/hardening.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/hardening.conf",
+      "sha256": "cedd4d68501c92b605917973af4dd637cffbc5af45f258b1fab0da3002a49c0d",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/measurement-budget.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/measurement-budget.conf",
+      "sha256": "e26895744eb6d88e96c1a1c608e1f34ad52b86aa7dcf9603c5f7cc078594b07b",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/ucg-link.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/ucg-link.conf",
+      "sha256": "7efe1131bf3918d56dbfd41f9a71d2e74c43d2a059ded08b3562c9fb729d7a74",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/zz-alert.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/zz-alert.conf",
+      "sha256": "1ad7cbd444a5de9fc77751bca50740a0c9d69736f4607e96f2d0fa5a6646f043",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/zz-startup-probe.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/zz-startup-probe.conf",
+      "sha256": "489442b9df9c7dde2a6f9d56e4f04a72522d6cba0c1893be1d3a20dd79bd6876",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-binary-update.service",
+      "target": "/etc/systemd/system/mosdns-binary-update.service",
+      "sha256": "87f48dee4b53b8a81cabcab9c9465a0d12e3e5bd4757def450f954142eccf177",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-binary-update.timer",
+      "target": "/etc/systemd/system/mosdns-binary-update.timer",
+      "sha256": "8707403da9ce140531ae8ade79038d0947ba5560093c02db36e7364b6381d37c",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-healthcheck.service",
+      "target": "/etc/systemd/system/mosdns-healthcheck.service",
+      "sha256": "793a81952502e47a06254f1f94bd10b8f0b10165a50de87e8d5ff5a0e6fb8d41",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-healthcheck.timer",
+      "target": "/etc/systemd/system/mosdns-healthcheck.timer",
+      "sha256": "7c1bbcdf7e528ffe8840a3e63ab7bd6add137df617aa1feb69b35e3338b92dd9",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-rules-update.service",
+      "target": "/etc/systemd/system/mosdns-rules-update.service",
+      "sha256": "63603d20ba38ef23eac952eef822432efec2a176fac5b4d3e74a03f78e77cf39",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns-rules-update.timer",
+      "target": "/etc/systemd/system/mosdns-rules-update.timer",
+      "sha256": "3cd348bc6834f7f317791610d509bf579af8b8b89d46bfdc2ef9816ebfb895f4",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mosdns.service",
+      "target": "/etc/systemd/system/mosdns.service",
+      "sha256": "b1f3ec60dbf5c0712bf77fccf4bb162a4f5fa05471a2b47cd258bc9ab0bf867d",
+      "mode": 420
+    }
+  ]
+}

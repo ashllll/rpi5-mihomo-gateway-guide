@@ -122,7 +122,7 @@ def main():
         commands = temp / 'bin'
         commands.mkdir()
         for name, body in {'systemctl': SYSTEMCTL, 'ip': NET, 'nft': NET, 'curl': CURL,
-                           'flock': 'pass\n', 'logger': 'pass\n', 'journalctl': 'pass\n',
+                           'flock': 'pass\n', 'logger': 'pass\n', 'journalctl': 'pass\n', 'alert': 'pass\n',
                            'date': "import sys,datetime;print(str(int(datetime.datetime.now().timestamp())) if '+%s' in sys.argv else datetime.datetime.now().astimezone().isoformat())\n"}.items():
             path = commands / name
             path.write_text(HEADER + body)
@@ -130,6 +130,7 @@ def main():
         # Rebase the root-only state and lock paths onto the temporary tree.
         script = re.sub(r'/run/lock/[A-Za-z0-9._-]+\.lock', str(temp / 'lock'), source)
         script = re.sub(r'(?m)^state_dir=.*$', 'state_dir=' + raw, script)
+        script = re.sub(r'(?m)^alert=.*$', 'alert=' + str(commands / 'alert'), script)
 
         # Healthy: the sample is idle on the first tick and verified once the
         # packet counter advances.

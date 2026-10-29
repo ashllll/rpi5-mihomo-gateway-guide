@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -111,12 +112,15 @@ def check_manifest(manifest: dict) -> int:
     return ceiling
 
 
-def run_mode(manifest: dict, directory: Path, native: bool, ceiling: int) -> None:
+def run_mode(manifest: dict, directory: Path, native: bool, ceiling: int, patterns: bool = False) -> None:
     source, manifest_path = overlay_checks.build_fixture(
         directory, copy.deepcopy(overlay_checks.MANIFEST_OVERLAY), overlay_checks.ALL_NODES
     )
     prepared = copy.deepcopy(manifest)
     prepared["overlay"] = copy.deepcopy(overlay_checks.MANIFEST_OVERLAY)
+    if patterns:
+        prepared['overlay'] = {key.replace('_nodes', '_patterns'): ['^' + re.escape(name) + '$' for name in names]
+                               for key, names in overlay_checks.MANIFEST_OVERLAY.items()}
     if native:
         prepared["measurement"] = {
             "enabled": True,
@@ -139,8 +143,9 @@ def run_mode(manifest: dict, directory: Path, native: bool, ceiling: int) -> Non
         }
     manifest_path.write_text(yaml.safe_dump(prepared, allow_unicode=True), encoding="utf-8")
 
-    first = directory / f"generated-{'native' if native else 'plain'}-1.yaml"
-    second = directory / f"generated-{'native' if native else 'plain'}-2.yaml"
+    kind = ('native' if native else 'plain') + ('-patterns' if patterns else '-legacy')
+    first = directory / f"generated-{kind}-1.yaml"
+    second = directory / f"generated-{kind}-2.yaml"
     for destination in (first, second):
         result = overlay_checks.run_overlay(source, manifest_path, destination)
         check(
@@ -227,8 +232,9 @@ def main() -> int:
     if ceiling:
         with tempfile.TemporaryDirectory(prefix="mihomo-policy-") as raw:
             directory = Path(raw)
-            run_mode(manifest, directory, native=True, ceiling=ceiling)
-            run_mode(manifest, directory, native=False, ceiling=ceiling)
+            for patterns in (False, True):
+                run_mode(manifest, directory, native=True, ceiling=ceiling, patterns=patterns)
+                run_mode(manifest, directory, native=False, ceiling=ceiling, patterns=patterns)
 
     if FAILURES:
         print("mihomo policy checks FAILED")

@@ -20,6 +20,12 @@ jobs:
 
       - name: Validate publication files, overlay and automation layer
         run: |
+          python3 automation/check-release.py
+          python3 tools/check_release_integrity.py
+          python3 tools/check_update_transaction.py
+          python3 tools/check_client_dns_guard.py
+          python3 tools/check_scoped_probes.py
+          python3 tools/check_reconcile_policy.py
           python3 tools/validate_public.py
           python3 tools/check_overlay.py
           python3 tools/check_mihomo_policy.py
@@ -27,6 +33,10 @@ jobs:
           python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
           python3 tools/check_stability.py
+          python3 tools/check_gateway_resilience.py
+          python3 tools/check_dns_resilience.py
+          python3 tools/check_alert_delivery.py
+          python3 tools/check_rollback_recovery.py
           python3 tools/check_dnsmasq_guard.py
           python3 tools/check_measurement_policy.py
           python3 tools/check_native_budget.py
