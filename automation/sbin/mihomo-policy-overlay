@@ -554,6 +554,10 @@ def main() -> None:
             if group.get("name") == "STT":
                 owned = measurement["owned_group_members"](
                     group, config.get("proxy-providers", {}), nodes)
+                if owned is None and group.get("use") and not group.get("proxies"):
+                    # A user provider owns these leaves and filters. Adding a
+                    # proxy list would change its routing/measurement contract.
+                    continue
                 if owned is not None:
                     health = config["proxy-providers"][group["use"][0]].get("health-check", {})
                     group.setdefault("url", health.get("url"))
