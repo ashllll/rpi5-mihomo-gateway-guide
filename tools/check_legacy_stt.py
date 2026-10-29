@@ -62,13 +62,23 @@ def check_case(directory, native, scenario):
         old_group = next(group for group in previous['proxy-groups'] if group['name'] == 'STT')
         assert 'use' in old_group and 'filter' in old_group
 
+    if scenario == 'custom-provider':
+        custom_group = next(group for group in previous['proxy-groups'] if group['name'] == 'STT')
+        custom_group.update(type='select', proxies=['STT | Bulk 01'],
+                            use=['user-stt'], filter='^Example.*')
+        previous.setdefault('proxy-providers', {})['user-stt'] = {
+            'type': 'inline', 'payload': [copy.deepcopy(previous['proxies'][0])],
+            'health-check': {'enable': False, 'interval': 0},
+        }
+        write_yaml(current, previous)
+
     if scenario == 'explicit':
         policy['selections'] = {'STT': {'type': 'select', 'patterns': [r'^STT \| Bulk 02$']}}
     elif scenario == 'unrelated-selection':
         policy['selections'] = {'Custom': {'type': 'select', 'members': ['Auto']}}
     write_yaml(capabilities, policy)
     incoming = copy.deepcopy(previous['proxies'])
-    if scenario in ('rename', 'unrelated-selection', 'absent'):
+    if scenario in ('rename', 'unrelated-selection', 'absent', 'custom-provider'):
         for node in incoming:
             if node['name'].startswith('STT | '):
                 node['name'] += ' generation-2'
@@ -98,7 +108,11 @@ def check_case(directory, native, scenario):
         assert list(groups).index('STT') == 2
         if scenario != 'explicit':
             assert groups['STT']['hidden'] is True and groups['STT']['icon'] == legacy['icon']
-            assert groups['STT']['type'] == ('fallback' if native else 'select')
+            assert groups['STT']['type'] == ('fallback' if native and scenario != 'custom-provider' else 'select')
+            if scenario == 'custom-provider':
+                assert groups['STT']['use'] == ['user-stt']
+                assert groups['STT']['filter'] == '^Example.*'
+                assert candidate['proxy-providers']['user-stt'] == previous['proxy-providers']['user-stt']
         else:
             assert groups['STT']['type'] == 'select'
     assert 'DOMAIN-SUFFIX,tracker.example.invalid,DIRECT' in candidate['rules']
@@ -116,9 +130,10 @@ def check_case(directory, native, scenario):
 def main():
     with tempfile.TemporaryDirectory() as raw:
         for native in (False, True):
-            for scenario in ('rename', 'delete', 'explicit', 'absent', 'empty', 'unrelated-selection'):
+            for scenario in ('rename', 'delete', 'explicit', 'absent', 'empty',
+                             'unrelated-selection', 'custom-provider'):
                 check_case(Path(raw) / f'{native}-{scenario}', native, scenario)
-    print('Legacy STT migration checks passed (12 scenarios, repeated refreshes)')
+    print('Legacy STT migration checks passed (14 scenarios, repeated refreshes)')
 
 
 if __name__ == '__main__':

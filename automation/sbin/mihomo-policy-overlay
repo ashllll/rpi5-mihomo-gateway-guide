@@ -545,6 +545,19 @@ def main() -> None:
     # pools are: a refresh renames every node, and a selector left holding the
     # previous generation's names is exactly what made regeneration fail.
     selections = capabilities.get("selections", {})
+    if isinstance(selections, dict) and "STT" not in selections:
+        # Older manifests have no selector entry for this existing provider
+        # group. Refresh its leaves without changing its strategy or metadata.
+        # Retire only our generated ownership before adding explicit members;
+        # otherwise native measurement sees mixed old/new ownership on refresh.
+        for group in groups:
+            if group.get("name") == "STT":
+                owned = measurement["owned_group_members"](
+                    group, config.get("proxy-providers", {}), nodes)
+                if owned is not None:
+                    group.pop("use", None)
+                    group.pop("filter", None)
+                group["proxies"] = list(stt_download_nodes)
     if isinstance(selections, dict):
         known_groups = {group.get("name") for group in groups}
         for name, spec in selections.items():
