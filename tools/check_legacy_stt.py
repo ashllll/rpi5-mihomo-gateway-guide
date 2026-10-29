@@ -36,6 +36,7 @@ def validate_core(candidate, directory):
 
 def check_case(directory, native, scenario):
     directory.mkdir()
+    provider_only = scenario in ('custom-fallback', 'custom-url-test')
     current, capabilities = build_fixture(directory, MANIFEST_OVERLAY,
                                           [*ALL_NODES, 'STT | Bulk 02'])
     policy = yaml.safe_load(capabilities.read_text())
@@ -77,13 +78,26 @@ def check_case(directory, native, scenario):
         }
         write_yaml(current, previous)
 
+    if provider_only:
+        custom_group = next(group for group in previous['proxy-groups'] if group['name'] == 'STT')
+        custom_group.update(type=scenario.removeprefix('custom-'),
+                            use=['user-stt'], filter=r'^STT \| Bulk 01$')
+        custom_group.pop('proxies', None)
+        user_node = next(node for node in previous['proxies'] if node['name'] == 'STT | Bulk 01')
+        previous.setdefault('proxy-providers', {})['user-stt'] = {
+            'type': 'inline', 'payload': [copy.deepcopy(user_node)],
+            'health-check': {'enable': False, 'interval': 0, 'url': legacy['url'],
+                             'expected-status': 204},
+        }
+        write_yaml(current, previous)
+
     if scenario == 'explicit':
         policy['selections'] = {'STT': {'type': 'select', 'patterns': [r'^STT \| Bulk 02$']}}
     elif scenario == 'unrelated-selection':
         policy['selections'] = {'Custom': {'type': 'select', 'members': ['Auto']}}
     write_yaml(capabilities, policy)
     incoming = copy.deepcopy(previous['proxies'])
-    if scenario in ('rename', 'unrelated-selection', 'absent', 'custom-provider', 'provider-health'):
+    if scenario in ('rename', 'unrelated-selection', 'absent', 'custom-provider', 'provider-health') or provider_only:
         for node in incoming:
             if node['name'].startswith('STT | '):
                 node['name'] += ' generation-2'
@@ -107,13 +121,21 @@ def check_case(directory, native, scenario):
     if scenario == 'absent':
         assert 'STT' not in groups
     else:
-        expected = ({'STT | Bulk 02'} if scenario == 'explicit' else
+        expected = ({'STT | Bulk 01'} if provider_only else
+                    {'STT | Bulk 02'} if scenario == 'explicit' else
                     {node['name'] for node in incoming if node['name'].startswith('STT | ')})
         assert native_group_nodes(candidate, 'STT') == expected
         assert list(groups).index('STT') == 2
         if scenario != 'explicit':
             assert groups['STT']['hidden'] is True and groups['STT']['icon'] == legacy['icon']
-            assert groups['STT']['type'] == ('fallback' if native and scenario != 'custom-provider' else 'select')
+            expected_type = (scenario.removeprefix('custom-') if native and provider_only else
+                             'fallback' if native and scenario != 'custom-provider' else 'select')
+            assert groups['STT']['type'] == expected_type
+            if provider_only:
+                assert not groups['STT'].get('proxies')
+                assert groups['STT']['use'] == ['user-stt']
+                assert groups['STT']['filter'] == r'^STT \| Bulk 01$'
+                assert candidate['proxy-providers']['user-stt'] == previous['proxy-providers']['user-stt']
             if native and scenario == 'provider-health':
                 assert groups['STT']['url'] == legacy['url']
                 assert str(groups['STT']['expected-status']) == '204'
@@ -139,9 +161,10 @@ def main():
     with tempfile.TemporaryDirectory() as raw:
         for native in (False, True):
             for scenario in ('rename', 'delete', 'explicit', 'absent', 'empty',
-                             'unrelated-selection', 'custom-provider', 'provider-health'):
+                             'unrelated-selection', 'custom-provider', 'provider-health',
+                             'custom-fallback', 'custom-url-test'):
                 check_case(Path(raw) / f'{native}-{scenario}', native, scenario)
-    print('Legacy STT migration checks passed (16 scenarios, repeated refreshes)')
+    print('Legacy STT migration checks passed (20 scenarios, repeated refreshes)')
 
 
 if __name__ == '__main__':
