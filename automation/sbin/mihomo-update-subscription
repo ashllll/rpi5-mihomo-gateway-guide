@@ -74,6 +74,8 @@ snapshot_inputs() {
       /usr/local/sbin/mihomo-subscription-normalize \
       /usr/local/sbin/mihomo-reconcile-policy \
       /usr/local/sbin/mihomo-measurement-policy \
+      /usr/local/sbin/mihomo-media-policy \
+      /usr/local/sbin/mihomo-media-guard \
       "$mihomo_bin"
     do
       [ -n "$input" ] || continue
@@ -111,6 +113,8 @@ snapshot_policy_inputs() {
       /usr/local/sbin/mihomo-subscription-normalize \
       /usr/local/sbin/mihomo-reconcile-policy \
       /usr/local/sbin/mihomo-measurement-policy \
+      /usr/local/sbin/mihomo-media-policy \
+      /usr/local/sbin/mihomo-media-guard \
       "$mihomo_bin"
     do
       [ -n "$input" ] || continue
@@ -723,6 +727,15 @@ if [ "$(snapshot_inputs)" != "$input_snapshot" ]; then
 fi
 if ! remaining_seconds >/dev/null; then
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  exit 1
+fi
+
+# A candidate must retain a qualified media route before replacing a live core.
+# This is a read-only projection; startup materializes only current definitions.
+remaining=$(remaining_seconds) || exit 1
+if ! run_bounded "$remaining" /usr/local/sbin/mihomo-media-guard \
+    --config "$candidate" --check-ready --valid-for "$remaining" >/dev/null; then
+  logger -t mihomo-update-subscription "Media admission is not ready; retained the running configuration"
   exit 1
 fi
 

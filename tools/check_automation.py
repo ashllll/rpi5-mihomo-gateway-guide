@@ -69,13 +69,14 @@ CJK_ALLOWED = {
     "sbin/mihomo-watch",
 }
 
-# The recorded gateway's installed set. Thirteen units are enabled; three maintenance
+# The recorded gateway's installed set. Fourteen units are enabled; three maintenance
 # timers ship for completeness but stay off. Keeping both lists literal is the
 # point: a unit silently moving between them is exactly the drift this checker
 # exists to catch.
 ENABLED_UNITS = (
     "mihomo.service",
     "mihomo-measurement-budget.service",
+    "mihomo-media-guard.timer",
     "mihomo-subscription-update.timer",
     "mihomo-healthcheck.timer",
     "mihomo-watch.timer",
@@ -102,8 +103,10 @@ SBIN_SCRIPTS = (
     "mihomo-download-quality",
     "mihomo-dnsmasq-guard",
     "mihomo-healthcheck",
+    "mihomo-media-guard",
     "mihomo-measurement-budget",
     "mihomo-measurement-policy",
+    "mihomo-media-policy",
     "mihomo-policy-overlay",
     "mihomo-reconcile-policy",
     "mihomo-social-quality",
@@ -366,6 +369,40 @@ def check_unit_layout() -> None:
             continue
         check((units / unit).is_file(), f"automation/systemd is missing {unit}")
 
+    media_service_path = units / "mihomo-media-guard.service"
+    media_timer_path = units / "mihomo-media-guard.timer"
+    media_startup_path = units / "mihomo.service.d" / "media-admission.conf"
+    check(media_service_path.is_file(), "automation/systemd is missing mihomo-media-guard.service")
+    check(media_timer_path.is_file(), "automation/systemd is missing mihomo-media-guard.timer")
+    check(media_startup_path.is_file(), "mihomo startup media-admission drop-in is missing")
+    if media_service_path.is_file():
+        media_service = configparser.ConfigParser(interpolation=None)
+        media_service.read(media_service_path)
+        service = media_service["Service"]
+        check(service.get("Type") == "oneshot", "media guard service must be oneshot")
+        check(service.get("EnvironmentFile") == "-/etc/mihomo-automation.env",
+              "media guard service must load the optional automation environment")
+        check(service.get("StateDirectory") == "mihomo-media-admission",
+              "media guard service must use its private state directory")
+        check(service.get("TimeoutStartSec") == "180", "media guard service timeout must be 180 seconds")
+        check({"/etc/mihomo/providers", "/var/lib/mihomo-measurements"}
+              <= set(service.get("ReadWritePaths", "").split()),
+              "media guard service must have provider and measurement-ledger write access")
+    if media_timer_path.is_file():
+        media_timer = configparser.ConfigParser(interpolation=None)
+        media_timer.read(media_timer_path)
+        timer = media_timer["Timer"]
+        check(timer.get("OnBootSec") == "2min", "media guard timer must first run two minutes after boot")
+        check(timer.get("OnUnitInactiveSec") == "1min", "media guard timer must wait one minute after each run")
+        check(not timer.get("OnCalendar"), "media guard timer must not add a calendar schedule")
+        check(timer.get("Unit") == "mihomo-media-guard.service", "media guard timer must target its service")
+    if media_startup_path.is_file():
+        startup = read_source(media_startup_path)
+        check("ExecStartPre=-+/usr/local/sbin/mihomo-media-guard --expire-only" in startup,
+              "media expiration must run as a non-blocking core startup precheck")
+        check("ReadWritePaths=/etc/mihomo/providers" in startup,
+              "mihomo startup hardening must allow provider cache replacement")
+
     scripts = {
         path.name
         for path in (AUTOMATION / "sbin").iterdir()
@@ -455,6 +492,30 @@ def check_manifest() -> None:
         check(measurement.get("enabled") is False, "native URLTests must ship paused")
         check(measurement.get("native_budget") is True, "native URLTests must require budget admission")
         check(measurement.get("accounts") == {}, "capabilities.yaml must not ship account identities")
+    media = manifest.get("media_admission")
+    check(isinstance(media, dict), "capabilities.yaml must declare media_admission defaults")
+    if isinstance(media, dict):
+        check(media.get("enabled") is False, "media admission must ship disabled")
+        for key, expected in {
+            "interval_seconds": 600, "sample_bytes": 1048576, "timeout_seconds": 8,
+            "min_bps": 262144, "recovery_bps": 393216, "bad_samples": 2,
+            "good_samples": 2, "cooldown_seconds": 900, "max_age_seconds": 21600,
+            "samples_per_group": 2,
+        }.items():
+            check(media.get(key) == expected, f"media_admission.{key} default must be {expected}")
+        profiles = media.get("profiles")
+        check(isinstance(profiles, dict) and set(profiles) == {"Social", "Streaming"},
+              "media admission must define only the Social and Streaming profiles")
+        if isinstance(profiles, dict):
+            for name, profile in profiles.items():
+                check(isinstance(profile, dict), f"media_admission.profiles.{name} must be a mapping")
+                if isinstance(profile, dict):
+                    check(profile.get("sample_url") == "https://media.example.invalid/sample.mp4",
+                          f"media_admission.profiles.{name} must use the placeholder MP4 URL")
+                    check(profile.get("expected_content_type") == "video/mp4",
+                          f"media_admission.profiles.{name} must expect video/mp4")
+                    check(profile.get("extra_patterns") == [],
+                          f"media_admission.profiles.{name} must ship no candidate names")
     for key in ("download_routes", "video_routes"):
         check(key not in manifest,
               f"capabilities.yaml must not duplicate the public {key} table")
@@ -635,6 +696,10 @@ def check_installer() -> None:
             enabled == set(ENABLED_UNITS),
             f"installer enables {sorted(enabled)}, expected the enabled set {sorted(ENABLED_UNITS)}",
         )
+        check("mihomo-media-guard.timer" in enabled,
+              "installer must enable the media guard timer")
+        check("systemctl start mihomo-media-guard.timer" not in installer_text,
+              "installer must enable, but not start, the media guard timer")
         dormant = set(
             re.findall(
                 r"([a-z0-9@._-]+\.timer)",

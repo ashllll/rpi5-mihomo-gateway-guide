@@ -4,7 +4,7 @@
 #
 # The layer mirrors one gateway that is actually running: the scripts, units,
 # dnsmasq scopes and MosDNS config are the files from that box with site data
-# stripped out.  Thirteen units are enabled - the state of the recorded gateway -
+# stripped out.  Fourteen units are enabled - the state of the recorded gateway -
 # and everything else is installed but left off, so the tree and the runbook
 # describe a single system instead of two alternatives.
 #
@@ -231,6 +231,7 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
   for unit in \
       mihomo.service \
       mihomo-measurement-budget.service \
+      mihomo-media-guard.timer \
       mihomo-subscription-update.timer \
       mihomo-healthcheck.timer \
       mihomo-watch.timer \

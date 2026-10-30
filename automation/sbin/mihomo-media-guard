@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Bounded media admission; update only owned provider files, never core routing."""
+import argparse
+import copy
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import tempfile
+import time
+from urllib.parse import quote
+
+import yaml
+
+HERE = Path(__file__).resolve().parent
+MEDIA = runpy.run_path(str(HERE / 'mihomo-media-policy'))
+MEASUREMENT = runpy.run_path(str(HERE / 'mihomo-measurement-policy'))
+SAMPLER = runpy.run_path(str(HERE / 'mihomo-download-quality'))
+
+
+def atomic_write(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix='.media-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def provider_path(config_path, name, spec):
+    if not MEDIA['owned_provider'](name, spec):
+        raise ValueError('unowned media provider')
+    path = config_path.parent / spec['path']
+    if path.is_symlink() or path.parent.resolve() != config_path.parent.resolve() / 'providers':
+        raise ValueError('unsafe media provider path')
+    return path
+
+
+def active_providers(config, manifest):
+    selected = MEDIA['settings'](manifest)
+    if selected is None:
+        return {}, None
+    owned = {n: s for n, s in config.get('proxy-providers', {}).items()
+             if MEDIA['owned_provider'](n, s)}
+    if {s['x-media-admission']['group'] for s in owned.values()} != set(selected['profiles']):
+        raise ValueError('media policy requires regenerated configuration')
+    rebuilt = copy.deepcopy(config)
+    for name, spec in owned.items():
+        group = spec['x-media-admission']['group']
+        users = [g for g in config['proxy-groups'] if name in g.get('use', [])]
+        if (len(users) != 1 or users[0]['name'] != group or users[0].get('use') != [name]
+                or users[0].get('proxies') or users[0].get('filter')
+                or users[0].get('type') != 'fallback' or users[0].get('empty-fallback') != 'REJECT'):
+            raise ValueError('media ownership is not exclusive')
+        target = next(g for g in rebuilt['proxy-groups'] if g['name'] == group)
+        target['proxies'] = spec['x-media-admission']['candidates']
+        target.pop('use', None)
+        target.update({k: spec['health-check'][k] for k in ('url', 'timeout', 'expected-status', 'interval')})
+    MEDIA['configure'](rebuilt, manifest)
+    expected = {n: s for n, s in rebuilt['proxy-providers'].items() if MEDIA['owned_provider'](n, s)}
+    if expected != owned:
+        raise ValueError('media generation no longer matches current policy or nodes')
+    return owned, selected
+
+
+def load_state(path):
+    try:
+        data = json.loads(path.read_text())
+        if data.get('version') == 2 and isinstance(data.get('profiles'), dict):
+            return data
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {'version': 2, 'profiles': {}}
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
+
+
+def profile_state(state, group, spec, settings, nodes, now):
+    contract = digest({'version': 1, 'group': group, 'settings': {k: v for k, v in settings.items() if k != 'profiles'},
+                       'profile': {k: v for k, v in settings['profiles'][group].items() if k != 'extra_patterns'},
+                       'health': spec['health-check']})
+    fingerprints = {n['name']: digest(n) for n in nodes}
+    empty = {'contract': contract, 'fingerprints': fingerprints}
+    entry = copy.deepcopy(state.get('profiles', {}).get(group, {}))
+    if not isinstance(entry, dict) or entry.get('contract') != contract:
+        return empty
+    if not isinstance(entry.get('candidates', {}), dict):
+        return empty
+    if any(not MEASUREMENT['finite_number'](entry.get(k, 0)) or entry.get(k, 0) < 0
+           for k in ('cursor', 'next_due')):
+        return empty
+    previous = entry.get('fingerprints', {})
+    if not isinstance(previous, dict):
+        return empty
+    entry['candidates'] = {n: s for n, s in entry.get('candidates', {}).items()
+                           if n in fingerprints and fingerprints[n] == previous.get(n)}
+    for candidate in entry.get('candidates', {}).values():
+        if not isinstance(candidate, dict) or type(candidate.get('admitted')) is not bool:
+            return empty
+        for field in ('good_count', 'bad_count', 'isolated_until', 'last_good', 'good_since'):
+            value = candidate.get(field)
+            if value is not None and (not MEASUREMENT['finite_number'](value) or value < 0):
+                return empty
+        if (candidate.get('last_good') or 0) > now:
+            return empty
+    entry.update(empty)
+    return entry
+
+
+def request(config, path, method='GET'):
+    address = str(config.get('external-controller', '127.0.0.1:9090'))
+    port = address.rsplit(':', 1)[-1]
+    if not port.isdigit() or not 1 <= int(port) <= 65535:
+        raise ValueError('invalid local controller')
+    return SAMPLER['api_request']('127.0.0.1:' + port, str(config.get('secret', '')), path, method)
+
+
+def verify_runtime(config, name, group, expected, refresh=False):
+    endpoint = '/providers/proxies/' + quote(name, safe='')
+    if refresh:
+        request(config, endpoint, 'PUT')
+    provider = request(config, endpoint)
+    actual = [n['name'] for n in provider['proxies']]
+    live = request(config, '/proxies/' + quote(group, safe=''))
+    if actual != (expected or ['REJECT']) or live.get('all') != (expected or ['REJECT']):
+        raise ValueError('media provider readback differs from published membership')
+    if live.get('now') not in (expected or ['REJECT']) or live.get('fixed'):
+        raise ValueError('media group selection is not automatic within admitted pool')
+
+
+def publish(config, path, name, group, payload, names, prepare=False):
+    previous = path.read_bytes() if path.is_file() else provider_payload([])
+    if path.is_file() and previous == payload:
+        if not prepare:
+            try:
+                verify_runtime(config, name, group, names)
+            except Exception:
+                verify_runtime(config, name, group, names, refresh=True)
+        return
+    try:
+        atomic_write(path, payload)
+        if not prepare:
+            verify_runtime(config, name, group, names, refresh=True)
+    except Exception:
+        # Restore only this provider, retaining the last acknowledged admission set.
+        atomic_write(path, previous)
+        if not prepare:
+            old = [n['name'] for n in yaml.safe_load(previous).get('proxies', [])]
+            verify_runtime(config, name, group, old, refresh=True)
+        raise
+
+
+def provider_payload(nodes):
+    # The pinned core rejects an empty file during hot refresh; this cannot dial out.
+    return yaml.safe_dump({'proxies': nodes or [{'name': 'REJECT', 'type': 'reject'}]},
+                          allow_unicode=True).encode()
+
+
+def run_cycle(args, probe=None):
+    inputs = [args.config, args.manifest, Path(__file__), HERE / 'mihomo-media-policy',
+              HERE / 'mihomo-measurement-policy', HERE / 'mihomo-download-quality']
+    baseline = {p: p.read_bytes() for p in inputs}
+    unchanged = lambda: all(p.read_bytes() == contents for p, contents in baseline.items())
+    config = yaml.safe_load(baseline[args.config])
+    manifest = yaml.safe_load(baseline[args.manifest])
+    providers, settings = active_providers(config, manifest)
+    if not providers:
+        return {'status': 'disabled'}
+    state = load_state(args.state)
+    next_state = {'version': 2, 'profiles': {}}
+    probe = probe or SAMPLER['probe_candidate']
+    prepared = []
+    results = []
+    for name, spec in providers.items():
+        meta = spec['x-media-admission']
+        group, generation = meta['group'], meta['generation']
+        profile = settings['profiles'][group]
+        nodes = MEDIA['candidate_nodes'](config, spec)
+        definitions = {node['name']: node for node in nodes}
+        candidates = list(definitions)
+        current = profile_state(state, group, spec, settings, nodes, time.time())
+        due = args.force or time.time() >= current.get('next_due', 0)
+        selected = []
+        if not args.expire_only and not args.check_ready and due:
+            if args.only_node:
+                if not args.prepare or any(n not in candidates for n in args.only_node):
+                    raise ValueError('explicit probe nodes require preparation and current membership')
+                selected = list(dict.fromkeys(args.only_node))[:settings['samples_per_group']]
+            else:
+                if not args.prepare:
+                    live = request(config, '/proxies/' + quote(group, safe=''))
+                    if live.get('fixed'):
+                        raise ValueError('media group has a fixed selection')
+                    if live.get('now') in candidates:
+                        selected.append(live['now'])
+                cursor = int(current.get('cursor', 0)) % len(candidates)
+                for offset in range(len(candidates)):
+                    if len(selected) >= settings['samples_per_group']:
+                        break
+                    candidate = candidates[(cursor + offset) % len(candidates)]
+                    if candidate not in selected:
+                        selected.append(candidate)
+                    if len(selected) >= settings['samples_per_group']:
+                        current['cursor'] = (cursor + offset + 1) % len(candidates)
+                        break
+            samples = []
+            for candidate in selected:
+                if not unchanged():
+                    return {'status': 'inputs-changed'}
+                timeout = settings['timeout_seconds']
+                allowed = MEASUREMENT['reserve_native'](
+                    args.budget, manifest.get('measurement', {}), [definitions[candidate]],
+                    SAMPLER['MAX_REDIRECTS'] + 1, hold_seconds=timeout + 2,
+                    deadline=time.time() + min(timeout, 30), policy_check=unchanged)
+                if not allowed:
+                    result = dict(name=candidate, success=False, error='AdmissionDenied')
+                else:
+                    result = probe(args.mihomo, candidate, candidates, definitions,
+                                   profile['sample_url'], settings['sample_bytes'], timeout,
+                                   config.get('dns', {}).get('default-nameserver') or ['223.5.5.5'],
+                                   expected_content_type=profile['expected_content_type'])
+                samples.append(result)
+                results.append({'group': group, **{k: v for k, v in result.items() if k != 'fingerprint'}})
+            current = MEDIA['update_samples'](current, samples, settings, time.time())
+            current['next_due'] = time.time() + settings['interval_seconds']
+        current['generation'] = generation
+        path = provider_path(args.config, name, spec)
+        try:
+            existing = yaml.safe_load(path.read_text())
+            order = [n['name'] for n in existing['proxies']]
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+            order = []
+        at = time.time() + (args.valid_for if args.check_ready else 0)
+        names = MEDIA['admitted'](current, list(dict.fromkeys(order + candidates)), settings, at)
+        names = [n for n in names if n in definitions]
+        payload = provider_payload([definitions[n] for n in names])
+        next_state['profiles'][group] = current
+        prepared.append((name, group, path, payload, names, current))
+    if args.check_ready:
+        groups = {group: names for _, group, _, _, names, _ in prepared}
+        return {'status': 'ready' if all(groups.values()) and unchanged() else 'not-ready',
+                'groups': groups}
+    if not unchanged():
+        return {'status': 'inputs-changed'}
+    if not args.expire_only:
+        # Sampling facts survive busy maintenance and failed controller publication.
+        atomic_write(args.state, (json.dumps(next_state, allow_nan=False) + '\n').encode())
+    args.lock_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+    with (args.lock_dir / 'mihomo-maintenance.lock').open('a+b') as lock:
+        if not args.expire_only:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {'status': 'maintenance-busy'}
+        # Startup sanitization runs inside the caller's maintenance transaction.
+        if not unchanged():
+            return {'status': 'inputs-changed'}
+        for name, group, path, payload, names, current in prepared:
+            publish(config, path, name, group, payload, names, args.prepare or args.expire_only)
+            current['applied'] = names
+        if not args.expire_only:
+            atomic_write(args.state, (json.dumps(next_state, allow_nan=False) + '\n').encode())
+    return {'status': 'prepared' if args.prepare else 'updated', 'samples': results,
+            'groups': {group: names for _, group, _, _, names, _ in prepared}}
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=Path, default=Path('/etc/mihomo/config.yaml'))
+    parser.add_argument('--manifest', type=Path,
+                        default=Path(os.environ.get('MIHOMO_CAPABILITIES') or '/etc/mihomo/adaptive/capabilities.yaml'))
+    parser.add_argument('--state', type=Path, default=Path('/var/lib/mihomo-media-admission/state.json'))
+    parser.add_argument('--budget', type=Path, default=Path('/var/lib/mihomo-measurements/quality-budget.json'))
+    parser.add_argument('--lock-dir', type=Path, default=Path('/run/lock'))
+    parser.add_argument('--mihomo', type=Path, default=Path('/usr/local/bin/mihomo'))
+    parser.add_argument('--prepare', action='store_true')
+    parser.add_argument('--expire-only', action='store_true')
+    parser.add_argument('--check-ready', action='store_true')
+    parser.add_argument('--valid-for', type=int, default=0)
+    parser.add_argument('--force', action='store_true')
+    parser.add_argument('--only-node', action='append', default=[])
+    args = parser.parse_args(argv)
+    if args.valid_for < 0:
+        parser.error('--valid-for must be nonnegative')
+    return args
+
+
+def main(argv=None):
+    os.umask(0o077)
+    args = parse_args(argv)
+    try:
+        if args.check_ready:
+            result = run_cycle(args)
+            print(json.dumps(result, ensure_ascii=True))
+            return 1 if result['status'] == 'not-ready' else 0
+        args.lock_dir.mkdir(mode=0o755, parents=True, exist_ok=True)
+        with (args.lock_dir / 'mihomo-media-admission.lock').open('a+b') as lock:
+            if not args.expire_only and not args.check_ready:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    print('media admission: cycle already running')
+                    return 0
+            result = run_cycle(args)
+            print(json.dumps(result, ensure_ascii=True))
+            if args.check_ready and result['status'] == 'not-ready':
+                return 1
+        return 0
+    except Exception as error:
+        print('media admission: ' + type(error).__name__)
+        if args.expire_only:
+            # Media policy/cache trouble is never a global startup gate.
+            config = yaml.safe_load(args.config.read_bytes())
+            for name, spec in config.get('proxy-providers', {}).items():
+                if MEDIA['owned_provider'](name, spec):
+                    atomic_write(provider_path(args.config, name, spec), provider_payload([]))
+            return 0
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

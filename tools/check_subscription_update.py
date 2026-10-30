@@ -139,7 +139,8 @@ def check_case(mode):
             command.write_text(f'#!{sys.executable}\n' + STUB)
             command.chmod(0o755)
         for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay', 'mihomo-measurement-policy',
-                     'mihomo-subscription-normalize'):
+                     'mihomo-subscription-normalize', 'mihomo-media-policy', 'mihomo-media-guard',
+                     'mihomo-download-quality'):
             command = root / 'bin' / name
             code = (REPO / 'automation/sbin' / name).read_text().split('\n', 1)[1]
             command.write_text(f'#!{sys.executable}\n' + code)
