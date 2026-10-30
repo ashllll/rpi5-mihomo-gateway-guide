@@ -122,7 +122,7 @@ def set_native_account(manifest):
     }
 
 
-def check_fresh_generation(directory):
+def check_fresh_generation(directory, legacy=False):
     directory.mkdir()
     current, capabilities = build_fixture(directory, MANIFEST_OVERLAY, ALL_NODES)
     previous = yaml.safe_load(current.read_text())
@@ -132,7 +132,8 @@ def check_fresh_generation(directory):
     policy = yaml.safe_load(capabilities.read_text())
     policy['overlay'] = {key.replace('_nodes', '_patterns'): ['^' + re.escape(renamed[name]) + '$' for name in names]
                          for key, names in MANIFEST_OVERLAY.items()}
-    policy['selections'] = {'STT': {'type': 'select', 'patterns': [r'^STT \| ']}}
+    if not legacy:
+        policy['selections'] = {'STT': {'type': 'select', 'patterns': [r'^STT \| ']}}
     write_yaml(capabilities, policy)
     subscription = directory / 'bare-fresh.yaml'
     write_yaml(subscription, {'proxies': [dict(node, name=renamed[node['name']]) for node in previous['proxies']]})
@@ -400,6 +401,7 @@ def main():
         assert 'quality-x-video' not in public_candidate.get('proxy-providers', {})
         assert public_candidate['proxy-providers']['quality-user-owned'] == user_provider
         check_fresh_generation(root / 'fresh-generation')
+        check_fresh_generation(root / 'legacy-fresh-generation', legacy=True)
     print('Subscription candidate composition checks passed')
 
 

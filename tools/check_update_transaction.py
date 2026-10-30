@@ -246,6 +246,34 @@ os.execv(sys.executable, [sys.executable, __ORIGINAL__] + sys.argv[1:])
         calls = (self.directory / 'calls').read_text().splitlines()
         self.assertEqual([line for line in calls if line.startswith(('restart ', 'reload '))], ['restart mihomo'])
 
+    def test_corrected_local_config_is_not_cooled_as_the_previous_failed_candidate(self):
+        current = yaml.safe_load(self.config.read_text())
+        current['tun'] = {'enable': True, 'stack': 'gvisor'}
+        self.config.write_text(yaml.safe_dump(current))
+        failed = self.run_cli(mode='health')
+        self.assertNotEqual(failed.returncode, 0)
+        current = yaml.safe_load(self.config.read_text())
+        self.assertNotEqual(current['proxies'][0]['server'], '203.0.113.20')
+        current['tun']['stack'] = 'system'
+        self.config.write_text(yaml.safe_dump(current))
+        retried = self.run_cli()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        installed = yaml.safe_load(self.config.read_text())
+        self.assertEqual(installed['tun']['stack'], 'system')
+        self.assertEqual(installed['proxies'][0]['server'], '203.0.113.20')
+        self.assertFalse((self.directory / 'backups/failed-candidate').exists())
+
+    def test_same_failed_candidate_stays_cooled_until_forced(self):
+        self.assertNotEqual(self.run_cli(mode='health').returncode, 0)
+        before = self.config.read_bytes()
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertIn('cooling down', (self.directory / 'messages').read_text())
+        forced = self.run_cli('--force')
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(yaml.safe_load(self.config.read_text())['proxies'][0]['server'], '203.0.113.20')
+
     def test_primary_base64_and_extra_uri_inputs_are_normalized_before_prepare_and_cache(self):
         for path in (self.directory / 'downloads').iterdir():
             nodes = yaml.safe_load(path.read_text())['proxies']
