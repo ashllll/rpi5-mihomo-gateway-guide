@@ -123,8 +123,15 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 填写 `capabilities.yaml` 的 `overlay` 段与 `reconcile-targets.conf`；改写 dnsmasq 配置里的文档占位地址；确认 dispatcher 已按 NetworkManager 连接事件生效；
 按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。
 
-安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移；
-校验失败时不会先覆盖文件。安装完成且文件与候选清单一致后，才原子记录新的安装基线。
+安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移。
+安装器持有维护锁，在 `/var/lib/mihomo-automation/.install-pending` 持久保存旧文件与权限后逐文件原子替换；
+可捕获的失败恢复旧文件集合，SIGKILL 等中断遗留的事务由下一次正常安装先恢复，再继续安装。
+恢复会校验日志、快照和当前文件；遇到人工改动或损坏记录时非零退出并保留恢复资料，不绕过漂移检查。
+`--dry-run` 不写入、不执行恢复，存在待恢复事务时只报告并退出。
+
+全部候选文件验证成功后，才提交新的安装清单并退出待恢复状态。systemd 配置在文件提交后执行；
+若 `daemon-reload`、`enable` 或有效单元的 `disable` 失败，安装器非零退出并提示服务配置未完成，已提交文件仍保持新版本。
+文件恢复不等于运行中服务回滚；断电恢复和真实服务时序需要单独实机验收。
 发布维护者在审查最终文件后生成清单，再验证；部署者不要用重生成清单或手工 `--record` 绕过差异：
 
 ```sh
@@ -150,7 +157,7 @@ sudo python3 automation/check-release.py --root /  # 只读核对已安装基线
 | `SUBSCRIPTION_BACKUP_URL` | 空 | 供应商文档提供的镜像链接；留空时只用 `subscription.url` 单链接 |
 | `MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS` | `1800` | 一次更新的工作时限；下载、规范化、校验、重启和验收均使用剩余时间 |
 | `MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS` | `240` | 失败后的独立恢复总时限 |
-| `MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS` | `21600` | 相同失败来源与策略指纹的冷却期；`--force` 可明确重试 |
+| `MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS` | `21600` | 相同失败候选与策略/helper 指纹的冷却期；`--force` 可明确重试 |
 | `DNS_CLIENT_SERVER` / `DNS_CLIENT_PORT` | `127.0.0.1` / `53` | 实际向客户端提供 DNS 的地址与端口；VLAN 部署必须填写真实目标 |
 | `DNS_CLIENT_UNIT` | `dnsmasq` | 该客户端 DNS 实例所属的 systemd 单元，不能误填成另一个解析器 |
 | `DNS_UPSTREAM_SERVER` / `DNS_UPSTREAM_PORT` | `127.0.0.1` / `5335` | 客户端解析器实际使用的上游；直接接 Mihomo DNS 的站点应填写对应监听端口 |
@@ -174,6 +181,15 @@ sudo python3 automation/check-release.py --root /  # 只读核对已安装基线
 
 ## 订阅事务与恢复
 
+订阅输入可为 Clash YAML、Base64 包装的 YAML 或 URI 列表。SS URI 支持 SIP002 尾部斜线、
+百分号编码凭据、URL-safe Base64 和 IPv6；`obfs-local`/`simple-obfs` 映射到 Mihomo `obfs`，
+`v2ray-plugin` 支持 WebSocket 的 `tls`、`mux`、`host`、`path` 参数。不支持或格式错误的插件节点会明确报错并跳过，
+不会退化为无插件节点；没有可用节点时拒绝该来源。真实节点可连接性仍由后续验收确定。
+
+已有 `STT` 组但没有 `selections.STT` 的旧配置，按 `roles.bulk_download.stt_prefix` 对当前节点重建成员，
+保留原有组类型，并继续应用统一的稳定性与测量策略。显式 `selections.STT` 优先；必需来源没有候选时拒绝生成，保留运行配置。
+仅由用户自定义 provider 提供成员的 STT 组保留其 `use` 与 `filter`，不添加显式节点列表；自动生成的计量 provider 按当前成员重新生成。
+
 健康检查 timer 每分钟补偿清理一次失效 Fallback 固定选择，维护锁忙时跳过，API 失败留待下轮重试。
 它只处理非空 `fixed` 已不在该组 `all` 中的状态；有效固定选择和 Selector 保持原样。
 清理使用原生 controller DELETE，并读回确认；此接口清除选择及缓存，不删除节点。
@@ -191,7 +207,8 @@ critical HTTP 验收同时要求 curl 成功退出和预期状态码，半响应
 
 事务记录和恢复快照保存在 `/var/lib/mihomo-subscription-backups/`。被中断的事务在下次调用时先执行本地恢复，
 本次恢复完成后退出，不立即联网重装同一候选；已 `accepted` 的事务只修复缓存，尚未验收的事务恢复旧配置。
-当前配置出现不属于该事务的变化时保留冲突和恢复记录，不覆盖独立修改。相同失败候选在冷却期内跳过，
+当前配置出现不属于该事务的变化时保留冲突和恢复记录，不覆盖独立修改。失败指纹包含规范化的最终候选配置与策略/helper 身份，
+因此继承的 TUN、DNS 或规则发生实质变化时允许重新验证；相同失败候选在冷却期内跳过，
 需要再次尝试时显式使用 `--force`；日志与冷却记录不保存原始 URI 或凭据。
 
 默认工作时限为 1800 秒，恢复另有 240 秒总时限；子进程超时会终止其进程组。
@@ -261,6 +278,7 @@ python3 tools/check_image.py        # 恢复镜像的自检与拒绝写入磁盘
 python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池顺序、备份池、幂等性、空 manifest 时 fail-closed
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
 python3 tools/check_legacy_stt.py  # 旧清单 STT 改名/删除迁移、原生计量归属与重复刷新
+python3 tools/check_subscription_normalize.py  # SS URI 凭据、地址与插件转换，以及拒绝路径
 python3 tools/check_subscription_update.py  # 完整订阅更新：21 种离线场景，包括原子切换前后故障、撤权、重启与缓存保护
 python3 tools/check_update_transaction.py  # 真实CLI事务：锁、并发输入、时限、崩溃恢复、缓存持久顺序与规范化
 python3 tools/check_client_dns_guard.py    # 客户端UDP/TCP、实际DNS上游、合法答案、维护互斥与恢复预算
