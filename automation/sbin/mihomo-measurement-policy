@@ -328,9 +328,15 @@ def rpc_socket(family: int, deadline: float):
             timer.join()
 
 
-def load_budget(path: Path) -> dict:
+def load_budget(path: Path, cache: dict | None = None) -> dict:
     if not path.exists():
         return {'accounts': {}, 'last_reservation_at': 0}
+
+    contents = path.read_bytes()
+    if cache is not None and cache.get('path') == str(path) and cache.get('contents') == contents:
+        # Re-read every byte under flock; another writer or corruption invalidates the cache.
+        state = cache['state']
+        return {**state, 'accounts': dict(state['accounts'])}
 
     def unique_object(pairs):
         result = {}
@@ -340,7 +346,7 @@ def load_budget(path: Path) -> dict:
             result[key] = value
         return result
 
-    state = json.loads(path.read_text(), object_pairs_hook=unique_object)
+    state = json.loads(contents, object_pairs_hook=unique_object)
     if (not isinstance(state, dict) or set(state) != {'accounts', 'last_reservation_at'}
             or not isinstance(state['accounts'], dict)
             or not finite_number(state['last_reservation_at']) or state['last_reservation_at'] < 0):
@@ -360,7 +366,8 @@ def load_budget(path: Path) -> dict:
 
 def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, now: float | None = None,
                    *, hold_seconds: float = 0, deadline: float | None = None,
-                   policy_check=None, monotonic_deadline: float | None = None) -> bool:
+                   policy_check=None, monotonic_deadline: float | None = None,
+                   ledger_cache: dict | None = None) -> bool:
     """Pre-debit native URLTests, preserving the shared account ledger contract."""
     if measurement.get('enabled') is not True or measurement.get('native_budget') is not True:
         return False
@@ -411,7 +418,7 @@ def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, 
             return False
         if not finite_number(now) or now < 0 or not finite_number(now + 3600 + hold_seconds):
             raise ValueError('invalid reservation time')
-        state = load_budget(path)
+        state = load_budget(path, ledger_cache)
         if now < state.get('last_reservation_at', 0):
             return False
         entries = state.get('accounts', {})
@@ -428,10 +435,12 @@ def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, 
         for account, amount in charges.items():
             entries[account] = [*updated[account], [now, amount, now + 3600 + hold_seconds]]
         state = {'accounts': entries, 'last_reservation_at': now}
+        # Encode once: fragment-by-fragment Python writes exceed burst RPC deadlines.
+        contents = json.dumps(state, sort_keys=True).encode()
         fd, temporary = tempfile.mkstemp(prefix='budget-', dir=path.parent)
         try:
-            with os.fdopen(fd, 'w') as stream:
-                json.dump(state, stream, sort_keys=True)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(contents)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
@@ -444,4 +453,7 @@ def reserve_native(path: Path, measurement: dict, nodes: list[dict], cost: int, 
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+        if ledger_cache is not None:
+            # Publish only a durable snapshot; subsequent charges replace, never mutate, lists.
+            ledger_cache.update(path=str(path), contents=contents, state=state)
         return True
