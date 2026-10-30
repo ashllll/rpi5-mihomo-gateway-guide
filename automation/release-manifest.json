@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "b1304a6d284b77df707e9bfff27c8bef60c160f47e70a91ce5e1dd9cd36e5804",
+  "release_id": "9f81591b2f2c32a3ba0d8c97d56f63026918ab9fe14d852f6c83f79055ab5b5c",
   "files": [
     {
       "source": "check-release.py",
@@ -10,7 +10,7 @@
     {
       "source": "env/automation.env.example",
       "target": null,
-      "sha256": "4b404d0f9d22ad13a9bc705099098fba33c82e7ee91b038f4fff961e3e046e17"
+      "sha256": "29e60f5e56b58a503253503bab75676c84dad5fe79e7921f3b2262ddb36d50d0"
     },
     {
       "source": "env/health-probes.conf.example",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "0df9417f9adafcaafe8be53825db5db101f92fae0e36d9d0fe973f48299d0d5c"
+      "sha256": "41f0ad15550f3c343030bf4763b74f91ff6b59a59415470092979ecaedec56e8"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -181,13 +181,13 @@
     {
       "source": "sbin/mihomo-measurement-budget",
       "target": "/usr/local/sbin/mihomo-measurement-budget",
-      "sha256": "3c1355e4583399127327381e99c81b09fcfa165a1e9ed26176af25266132359d",
+      "sha256": "85a544b9ed82bc657bcf0cd3690b77c1f95db9f9d8e9beb449f74a7a93816749",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-measurement-policy",
       "target": "/usr/local/sbin/mihomo-measurement-policy",
-      "sha256": "e8658465ab8df40d534b272dc4717a71d8b2d671abd333cee051bdf820242b3e",
+      "sha256": "37ca3b201a5758ecc85d62dc74f7172ffbeeae9ea7b20e858615dc64d1fb7ccc",
       "mode": 493
     },
     {
@@ -229,7 +229,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "5bec18454e087a8eb24cd3dcbf218c4b2f3912e65b76137ef1f00848acc645f7",
+      "sha256": "445ccecaa7d15241bf220a3943bc8dbe3619252265174fdc74d214fe9ae8e55e",
       "mode": 493
     },
     {
@@ -391,7 +391,7 @@
     {
       "source": "systemd/mihomo-subscription-update.timer",
       "target": "/etc/systemd/system/mihomo-subscription-update.timer",
-      "sha256": "0dbcbca73d774987f9e4faa3f6a23bf0a55efc8b078c48efa81defe332468601",
+      "sha256": "7be4bfc55eb061519f4f2e65d3d2e1620e0bda0ec91407205b90d6305adb4c9c",
       "mode": 420
     },
     {

@@ -26,7 +26,6 @@
 
 ## 单元数量
 
-发布层 enable 11 个单元（核心、预算、mosdns、两个 dnsmasq、HA 守卫、五个 timer）；
-`mihomo-rules-update`、`mihomo-subscription-update`、`download-quality`、
-`social-quality` 四个 timer 随仓库安装但保持 disabled。清单与原因见
-[运维文档](../operations.zh-CN.md)。
+发布层 enable 13 个单元（六个 service、七个 timer），订阅刷新在开机十分钟及任务结束后每 48 小时运行。
+`mihomo-rules-update`、`download-quality`、`social-quality` 三个 timer 随仓库安装但保持 disabled。
+清单、失败恢复与手动操作见[运维文档](../operations.zh-CN.md)。

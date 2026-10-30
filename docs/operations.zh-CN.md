@@ -32,7 +32,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 
 ## 2. 单元清单
 
-发布层 12 个 enabled（6 个 service + 6 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
+发布层 13 个 enabled（6 个 service + 7 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
 其余 worker service 是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，不算 enabled。
 
 | 单元 | 作用 | 触发 |
@@ -49,20 +49,26 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mihomo-watch.timer` | 单元失败/温度/磁盘/内存/WAN（边沿触发） | 开机 90s，之后每 120s |
 | `mosdns-healthcheck.timer` | mosdns 健康 | 开机 30s，之后每分钟 |
 | `mosdns-rules-update.timer` | 规则集每日 04:20±30min | 每日 |
+| `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
 | `mosdns-binary-update.timer` | MosDNS 二进制每周日 05:10±1h | 每周 |
 
-休眠 4 个（随仓库安装但保持 disabled；2026-10-25 已清理本机那 2 个退役评分单元，真机与仓库一致）：
+休眠 3 个（随仓库安装但保持 disabled；2026-10-25 已清理本机那 2 个退役评分单元，真机与仓库一致）：
 
 | 单元 | 为什么休眠 | 手工跑一次 |
 |---|---|---|
 | `mihomo-rules-update.timer` | 规则由订阅管线一并生成，独立更新会与配置快照分叉 | `sudo /usr/local/sbin/mihomo-update-rules` |
-| `mihomo-subscription-update.timer` | 订阅刷新会重写整份配置，必须人工确认时机 | `sudo /usr/local/sbin/mihomo-update-subscription --force` |
 | `mihomo-download-quality.timer` | 采样写 `./providers/quality-*.yaml`，但配置未声明对应 file provider，产物无人读取；开 timer 只消耗带宽 | `sudo /usr/local/sbin/mihomo-download-quality` |
 | `mihomo-social-quality.timer` | 同上，仅 X 视频场景，每 2 分钟一轮 | `sudo /usr/local/sbin/mihomo-social-quality` |
 
 `homeassistant-access-guard.service` 也在发布层（oneshot，开机跑一次）。
 本机另有 1 个不在发布层的单元：`rp5-agent.service`（T-Display 监控的只读指标，tcp/8799），
 由部署端单独维护，仓库不发布（2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`）。
+
+订阅定时任务使用树莓派本机 systemd，不依赖管理电脑。私有地址准备好后执行 `sudo systemctl enable --now mihomo-subscription-update.timer`，用 `systemctl list-timers mihomo-subscription-update.timer` 核对下一次执行。开机超过十分钟后首次启用会立即检查；任务结束（包括失败或无变化）后等待 48 小时，重启后十分钟再次检查。手动检查用 `sudo systemctl start mihomo-subscription-update.service`。
+
+无变化不重启核心；候选有变化时现有更新器会重启 Mihomo，活动连接可能短暂中断。下载或校验失败保留当前主节点或最后可用额外缓存，不能仅凭服务退出成功认定所有来源已更新。新地址只保存在私有订阅文件中。
+
+需要仅手动更新的额外来源，在 `/etc/mihomo-automation.env` 中用 `MIHOMO_SUBSCRIPTION_MANUAL_SOURCES` 配置其标识（空格分隔）。更新器不会请求这些地址，而是合并经过校验的本地缓存；缓存无效时保留当前配置并报错。`--force` 也不覆盖手动来源策略。
 
 ## 3. 故障对照表
 
