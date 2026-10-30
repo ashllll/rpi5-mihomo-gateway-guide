@@ -1,11 +1,11 @@
 {
   "format": 1,
-  "release_id": "88d1e73051747799b4573ed88e013365abf29e14d818106aa6247d0ef260a9dc",
+  "release_id": "b1304a6d284b77df707e9bfff27c8bef60c160f47e70a91ce5e1dd9cd36e5804",
   "files": [
     {
       "source": "check-release.py",
       "target": null,
-      "sha256": "8e123ec68788631bd6f60cde4192b0be5cedd271a423551e82c37b536921e460"
+      "sha256": "6f4d970908217090b4ded95228abf494d26ef50cc93214529640653dfed8e2ff"
     },
     {
       "source": "env/automation.env.example",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "b9e2fab2fe3804182101eedc3646b7c590cf621d3b6c76f3f0a68cc8c9fdcfb4"
+      "sha256": "0df9417f9adafcaafe8be53825db5db101f92fae0e36d9d0fe973f48299d0d5c"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -217,7 +217,7 @@
     {
       "source": "sbin/mihomo-subscription-normalize",
       "target": "/usr/local/sbin/mihomo-subscription-normalize",
-      "sha256": "403c6781afefef03527a38bf9250e3ab76ced3c283d93400bebe06e02353a817",
+      "sha256": "3a9a7fa53ba3f77d437e86d4450f49314a28213e4d25a74cde1417ddce3f7d13",
       "mode": 493
     },
     {
@@ -229,7 +229,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "9a90c5e63f102768e299221bcdd7b79f6bffe90dff85ce55a127294aa8b480bd",
+      "sha256": "5bec18454e087a8eb24cd3dcbf218c4b2f3912e65b76137ef1f00848acc645f7",
       "mode": 493
     },
     {

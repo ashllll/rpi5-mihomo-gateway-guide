@@ -318,12 +318,11 @@ run_cleanup_bounded() {
 candidate_fingerprint() {
   exec 8>&- 9>&-
   {
-    cat "$remote"
-    while IFS='|' read -r source_id selected fresh; do
-      [ -n "$source_id" ] || continue
-      printf '\nsource:%s\n' "$source_id"
-      cat "$selected"
-    done <"$extra_manifest"
+    # Local TUN/DNS/rules are inherited by the candidate too. Canonicalize the
+    # completed config so formatting changes do not bypass failure cooldown.
+    python3 -c 'import json, sys, yaml
+with open(sys.argv[1], encoding="utf-8") as stream:
+    print(json.dumps(yaml.safe_load(stream), sort_keys=True, separators=(",", ":")))' "$candidate"
     printf '\npolicy:%s\n' "$(snapshot_policy_inputs)"
   } | sha256sum | awk '{print $1}'
 }

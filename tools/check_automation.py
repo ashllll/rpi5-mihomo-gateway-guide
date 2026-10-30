@@ -235,6 +235,8 @@ NOT_DEPLOYMENT_PARAMETERS = {
     # These identify this invocation; operators must not configure them.
     "MIHOMO_UPDATE_OWNER_PID",
     "MIHOMO_UPDATE_OWNER_START",
+    # Set only by the installer lock supervisor across its exec into install.sh.
+    "MIHOMO_INSTALL_LOCK_HELD",
 }
 
 SHELL_VAR = re.compile(r'\$\{([A-Z_][A-Z0-9_]*):[-=]')
@@ -510,6 +512,7 @@ def expected_install_map(root: Path) -> set[Path]:
             fail(f"install.sh has no destination rule for {relative}")
     expected.add(Path("etc/dnsmasq-upstreams.conf"))
     expected.add(Path("var/lib/mihomo-automation/installed-manifest.json"))
+    expected.add(Path("run/lock/mihomo-maintenance.lock"))
     return expected
 
 
@@ -608,6 +611,10 @@ def check_installer() -> None:
 
         manifest = root / "etc/mihomo/adaptive/capabilities.yaml"
         route_defaults = root / "etc/mihomo/adaptive/route-defaults.yaml"
+        check(
+            stat.S_IMODE((root / "etc/mihomo/adaptive").stat().st_mode) == 0o700,
+            "install.sh did not retain install -d's private adaptive-directory mode",
+        )
         check(manifest.read_bytes() == old_manifest,
               "install.sh changed a pre-existing private capabilities.yaml")
         check(route_defaults.is_file(), "install.sh did not seed independent route-defaults.yaml")
