@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic media candidate admission
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+AccuracySec=10s
+Unit=mihomo-media-guard.service
+
+[Install]
+WantedBy=timers.target

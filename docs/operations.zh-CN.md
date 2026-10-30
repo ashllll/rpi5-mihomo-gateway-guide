@@ -32,7 +32,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 
 ## 2. 单元清单
 
-发布层 13 个 enabled（6 个 service + 7 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
+发布层 14 个 enabled（6 个 service + 8 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
 其余 worker service 是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，不算 enabled。
 
 | 单元 | 作用 | 触发 |
@@ -50,6 +50,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mosdns-healthcheck.timer` | mosdns 健康 | 开机 30s，之后每分钟 |
 | `mosdns-rules-update.timer` | 规则集每日 04:20±30min | 每日 |
 | `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-media-guard.timer` | 媒体速度准入，私有策略启用才采样；详见[媒体路由](wiki/x-video-routing.md) | 开机 2 分钟，之后每分钟唤醒 |
 | `mosdns-binary-update.timer` | MosDNS 二进制每周日 05:10±1h | 每周 |
 
 休眠 3 个（随仓库安装但保持 disabled；2026-10-25 已清理本机那 2 个退役评分单元，真机与仓库一致）：
@@ -132,10 +133,11 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 
 **组健康检查是硬不变量**：每个自动组都必须被某个探测所有者覆盖，否则它永远不重选——这就是
 2026-10-25「节点超时后一直不切换」的根因。生产模式（`measurement.enabled: true`）下，
-所有 `url-test`/`fallback` 组的节点被折进共享的 `measurement-<16hex>` provider 以归属计量，
+启用媒体准入的 Social / Streaming 使用专属 file provider 的健康调度器；其余
+`url-test`/`fallback` 组的节点被折进共享的 `measurement-<16hex>` provider 以归属计量，
 但**组自己仍保留 `url`/`expected-status`/`interval`**：探测由组内调度器逐节点执行，内联 provider
 的 `health-check` 没有自己的探测循环（真机实测从不触发）。组的间隔取
-`measurement.native_interval_seconds`（真机 250s）与 `stability.max_interval` 的较小者，
+`measurement.native_interval_seconds` 与 `stability.max_interval` 的较小者，
 改它就是改全网的故障发现时间。每次探测都要先过预算侧准入，因此
 `mihomo-measurement-budget` 必须接得住一次全量扫描：它缓存已解析的输入（config/manifest 变更才重读），
 监听 backlog 512、并发上限 256——按请求重解析 5000 行 config 会把一整波扫描挤到准入超时。
@@ -152,11 +154,12 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 | `/var/lib/mihomo-measurements/quality-budget.json` | 预算账本（账户、尝试次数、`last_reservation_at`） |
 | `/var/lib/mihomo-download-quality/scores.json` | 下载采样（休眠） |
 | `/var/lib/mihomo-social-quality/scores.json` | X 视频采样（休眠） |
+| `/var/lib/mihomo-media-admission/state.json` | Social / Streaming 资格、节点指纹及采样时间 |
 | `/var/backups/mosdns-rollout-*.tar.gz` | MosDNS 回滚点 |
 | `/etc/mosdns/rules/releases/` | 规则集历史版本 |
 | `/var/lib/mihomo-swap/state.json`、`/usr/local/lib/mihomo-swap/{a,b}` | 双槽核心与状态 |
 
-预算账本只由 broker 以原子写回更新；手工编辑会让预扣记录失真。
+预算账本由 broker 与媒体 guard 经同一锁和持久预扣接口原子写回；手工编辑会让预扣记录失真。
 备份账本用 `install -m0600` 拷走，不要 `cp` 丢权限。
 
 ## 6. 锁与互斥

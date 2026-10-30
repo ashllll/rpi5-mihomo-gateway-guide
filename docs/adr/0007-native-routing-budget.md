@@ -13,6 +13,10 @@ recorded: 2026-10-24
 
 ## 决策
 
+媒体补充决策（2026-10-31）：Social / Streaming 经用户授权启用可选的逐节点媒体速度准入，
+合格成员仍由原生 fallback 选择，沿用共享计量账本；不涉及下载或 AI 池。
+本 ADR 中媒体组仅按原始顺序、无吞吐样本的约束在此范围内由[当前媒体策略](../wiki/x-video-routing.md)替代。
+
 - 使用 Mihomo 原生 `url-test` 管理 Auto、Developer 和扁平的授权 Download、GitHub Download、Model Download、Package Download 叶节点池；不添加吞吐样本、评分状态或动态 provider 排序。
 - 使用原生 `fallback` 保留 AI Research、Streaming、Social 的既有节点顺序；TW Fixed IP 使用固定 `select`。YouTube 与 Instagram 复用 Streaming，X 复用 Social；域名表不能扩大节点权限或跨业务池路由。
 - 生成配置设置 `unified-delay: false`。它不替代原生核心的截止时间修复。

@@ -10,7 +10,7 @@
 <a href="#30-秒看懂">30 秒看懂</a> ·
 <a href="#安全网失败时谁兜底">安全网</a> ·
 <a href="#一次连接怎么走">数据面</a> ·
-<a href="#单元12-个-enabled4-个休眠">单元表</a> ·
+<a href="#单元14-个-enabled3-个休眠">单元表</a> ·
 <a href="#装成这台机器">安装</a> ·
 <a href="#边界">边界</a> ·
 <a href="docs/README.md">文档索引</a>
@@ -51,7 +51,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 `ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
 [`assets/network-topology.svg`](assets/network-topology.svg)，结构说明见[架构文档](docs/architecture.zh-CN.md)。
 
-## 单元：13 个 enabled、3 个休眠
+## 单元：14 个 enabled、3 个休眠
 
 | 单元 | 作用 | 周期 |
 |---|---|---|
@@ -60,6 +60,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
 | `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
 | `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-media-guard.timer` | 对 Social / Streaming 做有界媒体采样；仅合格节点进入原生 fallback，默认策略关闭 | 每分钟唤醒，采样间隔由策略控制 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
 | `mosdns-healthcheck.timer` | 校验 5335 分流与 metrics | 开机 30s 后每 1 分钟 |
@@ -105,7 +106,7 @@ sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有�
 sudo nft -c -f /etc/nftables.conf
 # 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
 sudo automation/install.sh --dry-run
-sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 13 个单元
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 14 个单元
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 sudo cat /run/mihomo-healthcheck/status
