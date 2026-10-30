@@ -21,6 +21,9 @@ elif name=='mihomo-subscription-candidate':
     if a[0]=='prepare': shutil.copyfile(a[2],a[4]); Path(a[5]).write_text('changed\n')
 elif name=='mihomo-policy-overlay':
     shutil.copyfile(a[0],a[1]); (r/'rollback-phase').touch()
+elif name=='mihomo-media-guard':
+    assert '--check-ready' in a
+    (r/'media-ready').touch()
 elif name=='systemctl':
     if a[0]=='restart':
         p=r/'restarts'; n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
@@ -54,7 +57,7 @@ class Rollback(unittest.TestCase):
                 (root/'etc/secrets/subscription.url').write_text('http://fixture.invalid/config\n')
                 for name in ['curl','mihomo','systemctl','install','logger','sleep','flock','find','xargs',
                              'mihomo-subscription-normalize','mihomo-subscription-candidate','mihomo-policy-overlay',
-                             'mihomo-reconcile-policy','mihomo-healthcheck']:
+                             'mihomo-reconcile-policy','mihomo-healthcheck','mihomo-media-guard']:
                     p=root/'bin'/name
                     p.write_text('#!'+sys.executable+'\n'+STUB)
                     p.chmod(0o755)
@@ -70,6 +73,7 @@ class Rollback(unittest.TestCase):
                          FIXTURE=str(root),FAILURE=failure)
                 result=subprocess.run(['sh',str(root/'updater')],env=env,capture_output=True,text=True,timeout=15)
                 self.assertNotEqual(result.returncode,0)
+                self.assertTrue((root/'media-ready').exists(),'candidate must pass media readiness before rollback')
                 self.assertIn('marker: previous',(root/'etc/config.yaml').read_text())
                 messages=(root/'messages').read_text()
                 if failure!='proxy-unavailable':
