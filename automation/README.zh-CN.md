@@ -76,25 +76,27 @@
 | `mihomo-dnsmasq-guard.timer` | 启动 30 秒后，之后每 30 秒（抖动 5 秒） | 客户端 UDP/TCP 与实际上游分层观测，只恢复满足条件的客户端解析器 |
 | `mosdns-rules-update.timer` | 04:20（抖动 30min） | MosDNS 路由数据更新 |
 | `mosdns-binary-update.timer` | 周日 05:10（抖动 1h） | MosDNS 二进制更新 |
+| `mihomo-subscription-update.timer` | 开机 10 分钟，任务结束后每 48 小时 | 主订阅及非手动额外来源刷新，候选校验、备份、业务检查和失败恢复 |
 | `mosdns-healthcheck.timer` | 启动 30s 后，之后每 1 分钟 | MosDNS 分流自检与回退选择 |
 
-另有四个随仓库安装、在真机上保持 disabled 的 timer：`mihomo-rules-update.timer`、`mihomo-subscription-update.timer`、
-`mihomo-download-quality.timer`、`mihomo-social-quality.timer`。订阅管线会整份重写配置、质量采样消耗预算且改 provider，
-都要人工确认时机；`install.sh` 只 `enable` 上表六个，把这四个 `disable`，从旧发布升级时这步幂等。
+另有三个随仓库安装、保持 disabled 的 timer：`mihomo-rules-update.timer`、
+`mihomo-download-quality.timer`、`mihomo-social-quality.timer`。`install.sh` 启用上表七个 timer，
+保持这三个关闭；升级不会再禁用订阅刷新。订阅无变化不重启核心；有变化时现有更新器会重启 Mihomo，
+并在业务检查失败时恢复旧配置。下载失败保留当前主节点或有效额外缓存，不能将缓存保留报告为来源已更新。
 
 `Persistent=true` 的 timer 可能在首次启动或补执行时立即触发一次，不能只看 `OnCalendar` 判断是否会执行。
 出口探测不属于启动门禁；探测目标或代理节点不可达不应带走国内 DIRECT 转发。
 MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto` 选择，国内解析正常即可保留 MosDNS。
 这里的 `mihomo-dns-mode` 只管理本机环回 dnsmasq；VLAN 客户端的 dnsmasq 仍按部署配置选择上游。
 因此本机 `127.0.0.1:53` 或 `5335` 正常不能代替 VLAN 客户端的 UDP/TCP DNS 与实际流量验收。
-`automation/install.sh` 默认 `enable` 12 个单元（上表六个 timer 加六个服务，不 `start`），四个休眠 timer 显式 `disable`。
+`automation/install.sh` 默认 `enable` 13 个单元（上表七个 timer 加六个服务，不 `start`），三个休眠 timer 显式 `disable`。
 `measurement.enabled` 默认 false，Mihomo 原生 URLTest 暂停；显式启用时仍须配置原生预算服务与账户，周期下限 900 秒。
 下载、GitHub、模型和 Package Download 在授权叶节点间自动选择；YouTube/Instagram 的 Streaming 与 X 的 Social
 保留部署顺序并使用原生 fallback。完整契约见[运维手册](../docs/operations.zh-CN.md)。
 编辑 manifest 不会直接改变运行中的配置；下一次满足更新间隔且通过校验和健康门禁的订阅更新，
 会重新生成并加载 overlay。随后核对运行配置的检测周期、Telegram 网段及实际业务路径。
 
-升级自带旧选路单元的真实主机时，当前安装器只安装仓库中的现行文件并 `disable` 上述四个休眠 timer，
+升级自带旧选路单元的真实主机时，当前安装器只安装仓库中的现行文件并 `disable` 上述三个休眠 timer，
 不会删除主机上已退役的 adaptive 单元文件。管理员应先人工核对旧单元是否在运行、是否有在途作业，
 再按维护窗口停用并移除它们；本轮没有对真实主机执行删除。
 
@@ -102,7 +104,7 @@ MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto`
 
 ```sh
 sudo automation/install.sh --dry-run        # 只打印计划，不碰文件系统
-sudo automation/install.sh                  # 安装 24 个 sbin 与整棵 unit 树，enable 12 个单元（不 start）
+sudo automation/install.sh                  # 安装 24 个 sbin 与整棵 unit 树，enable 13 个单元（不 start）
 GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，也不装到真实系统）
 ```
 
@@ -114,14 +116,16 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - `route-defaults.yaml` 独立安装为 0644 公共数据，不写入或替换已有私有 `capabilities.yaml`；旧清单缺少路由表时使用这份默认表；
 - 创建 0700 权限的 `/etc/mihomo/{secrets,adaptive,providers}` 与 `/var/lib/mihomo-{measurements,extra-subscriptions,subscription-backups}`；
 - 若 `/etc/dnsmasq-upstreams.conf` 不存在，用 `etc/dnsmasq/upstreams.conf` 播种，保证代理栈启动前 DNS 可用；
-- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 12 个单元、`disable` 四个休眠 timer；
+- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 13 个单元、`disable` 三个休眠 timer；
   `enable` 只决定开机自启，首次部署仍需手工 `start` 常驻单元；
 - dispatcher 只在 `/etc/NetworkManager` 存在时装成 0700；仍不改动 sshd、路由、sysctl 或 nftables（管理无线源路由由 dispatcher 在 NetworkManager 事件里自己加）。
 
 安装后仍需人工完成：把 `env/automation.env.example` 与 `env/mihomo-alert.env.example` 复制成 `/etc/mihomo-automation.env`、
 `/etc/mihomo-alert.env`（0600）并填入真实值；放入订阅链接与面板 token；
 填写 `capabilities.yaml` 的 `overlay` 段与 `reconcile-targets.conf`；改写 dnsmasq 配置里的文档占位地址；确认 dispatcher 已按 NetworkManager 连接事件生效；
-按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。
+按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。私有订阅准备完成后执行
+`sudo systemctl enable --now mihomo-subscription-update.timer`。超过开机十分钟首次启用会立即检查；
+任务结束后等待 48 小时，重启后十分钟重新检查。手动刷新用 `sudo systemctl start mihomo-subscription-update.service`。
 
 安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移。
 安装器持有维护锁，在 `/var/lib/mihomo-automation/.install-pending` 持久保存旧文件与权限后逐文件原子替换；
@@ -279,7 +283,7 @@ python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
 python3 tools/check_legacy_stt.py  # 旧清单 STT 改名/删除迁移、原生计量归属与重复刷新
 python3 tools/check_subscription_normalize.py  # SS URI 凭据、地址与插件转换，以及拒绝路径
-python3 tools/check_subscription_update.py  # 完整订阅更新：21 种离线场景，包括原子切换前后故障、撤权、重启与缓存保护
+python3 tools/check_subscription_update.py  # 完整订阅更新：24 种离线场景，包括原子切换前后故障、撤权、重启、手动来源不下载及缓存保护
 python3 tools/check_update_transaction.py  # 真实CLI事务：锁、并发输入、时限、崩溃恢复、缓存持久顺序与规范化
 python3 tools/check_client_dns_guard.py    # 客户端UDP/TCP、实际DNS上游、合法答案、维护互斥与恢复预算
 python3 tools/check_dnsmasq_guard.py       # 宿主兼容目标与持续局部DNS故障不重启
@@ -291,7 +295,7 @@ python3 tools/check_update_rules.py # 规则更新事务与回滚
 python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
 
-`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、24 个脚本全部安装、`enable` 集合恰好是发布层 12 个单元、四个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
+`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、24 个脚本全部安装、`enable` 集合恰好是发布层 13 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
 上述合成检查不替代真实 Linux 数据面、目标机 systemd 行为与客户端验收。
 安装到目标系统前，先在目标系统上做语法检查（`nft -c -f`、`dnsmasq --test`、`mihomo -t`），见
 [分阶段部署](../docs/deployment.zh-CN.md)。

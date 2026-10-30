@@ -12,8 +12,8 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the unit tree is the recorded gateway's tree: exactly the twelve units that
-  box enabled, four timers installed but left off, the startup evidence gate and
+* the unit tree is the recorded gateway's tree: exactly the thirteen units that
+  box enabled, three timers installed but left off, the startup evidence gate and
   the budget wrapper drop-in, and none of the retired adaptive units,
 * the scripts and units are the recorded set (no adaptive selector), every
   `/usr/local/sbin/...` a unit runs is shipped, and `mihomo -t` /
@@ -21,8 +21,8 @@ is checked the way it is shipped:
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, enables exactly the twelve recorded units and
-  disables exactly the four dormant timers, and changes nothing in --dry-run
+  operator-edited deployment data, enables exactly the thirteen recorded units and
+  disables exactly the three dormant timers, and changes nothing in --dry-run
   mode,
 * the gateway address and ports really come from the environment at runtime.
 """
@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import ast
+import configparser
 import os
 import re
 import shutil
@@ -68,13 +69,14 @@ CJK_ALLOWED = {
     "sbin/mihomo-watch",
 }
 
-# The recorded gateway's installed set. Twelve units are enabled; four maintenance
+# The recorded gateway's installed set. Thirteen units are enabled; three maintenance
 # timers ship for completeness but stay off. Keeping both lists literal is the
 # point: a unit silently moving between them is exactly the drift this checker
 # exists to catch.
 ENABLED_UNITS = (
     "mihomo.service",
     "mihomo-measurement-budget.service",
+    "mihomo-subscription-update.timer",
     "mihomo-healthcheck.timer",
     "mihomo-watch.timer",
     "mihomo-dnsmasq-guard.timer",
@@ -88,7 +90,6 @@ ENABLED_UNITS = (
 )
 DORMANT_TIMERS = (
     "mihomo-rules-update.timer",
-    "mihomo-subscription-update.timer",
     "mihomo-download-quality.timer",
     "mihomo-social-quality.timer",
 )
@@ -632,7 +633,7 @@ def check_installer() -> None:
         )
         check(
             enabled == set(ENABLED_UNITS),
-            f"installer enables {sorted(enabled)}, expected the recorded twelve {sorted(ENABLED_UNITS)}",
+            f"installer enables {sorted(enabled)}, expected the enabled set {sorted(ENABLED_UNITS)}",
         )
         dormant = set(
             re.findall(
@@ -642,7 +643,7 @@ def check_installer() -> None:
         )
         check(
             dormant == set(DORMANT_TIMERS),
-            f"installer disables {sorted(dormant)}, expected the dormant four {sorted(DORMANT_TIMERS)}",
+            f"installer disables {sorted(dormant)}, expected the dormant set {sorted(DORMANT_TIMERS)}",
         )
         for unit in ENABLED_UNITS + DORMANT_TIMERS:
             if unit == "dnsmasq.service":
@@ -796,6 +797,16 @@ def check_no_bytecode() -> None:
             fail(f"{path.relative_to(REPO)} must not be committed")
 
 
+def check_subscription_schedule() -> None:
+    unit = configparser.ConfigParser(interpolation=None)
+    unit.read(AUTOMATION / "systemd/mihomo-subscription-update.timer")
+    timer = unit["Timer"]
+    check(timer.get("OnBootSec") == "10min", "subscription refresh must run after boot")
+    check(timer.get("OnUnitInactiveSec") == "2d", "subscription refresh must wait 48 hours after completion")
+    check(not timer.get("OnCalendar"), "subscription refresh must not retain the daily trigger")
+    check(timer.get("Unit") == "mihomo-subscription-update.service", "subscription timer must use the transactional updater")
+
+
 def main() -> int:
     check_no_bytecode()
     check_syntax()
@@ -807,6 +818,7 @@ def main() -> int:
     check_installer()
     check_runtime_parameters()
     check_subscription_environment()
+    check_subscription_schedule()
 
     if FAILURES:
         print("automation checks FAILED")

@@ -51,7 +51,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 `ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
 [`assets/network-topology.svg`](assets/network-topology.svg)，结构说明见[架构文档](docs/architecture.zh-CN.md)。
 
-## 单元：12 个 enabled、4 个休眠
+## 单元：13 个 enabled、3 个休眠
 
 | 单元 | 作用 | 周期 |
 |---|---|---|
@@ -59,6 +59,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
 | `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
+| `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
 | `mosdns-healthcheck.timer` | 校验 5335 分流与 metrics | 开机 30s 后每 1 分钟 |
@@ -75,14 +76,13 @@ T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 �
 其余 worker（`mihomo-healthcheck.service`、`mihomo-watch.service`、`mihomo-alert@.service`、
 `mihomo-download-quality.service` 等）是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起。
 
-**4 个休眠**（随仓库安装、保持关闭；2026-10-25 已清掉本机 2 个退役评分单元，真机与仓库一致）
+**3 个休眠**（随仓库安装、保持关闭；2026-10-25 已清掉本机 2 个退役评分单元，真机与仓库一致）
 
 | 单元 | 原因 |
 |---|---|
 | `mihomo-download-quality.timer` | 质量采样会写 `./providers/quality-*.yaml`，但配置没声明对应 file provider，产物无人读取 |
 | `mihomo-social-quality.timer` | 同上，仅 X 视频场景 |
 | `mihomo-rules-update.timer` | 规则更新由核心 `rule-providers`（file 型）与 MosDNS 更新承担 |
-| `mihomo-subscription-update.timer` | 订阅更新暂走手动/离线管线，避免无人值守换配置 |
 
 休眠不等于卸载：文件仍在 `/etc/systemd/system/`，`systemctl start` 可手动跑一次。
 
@@ -105,7 +105,7 @@ sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有�
 sudo nft -c -f /etc/nftables.conf
 # 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
 sudo automation/install.sh --dry-run
-sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 真机那 12 个单元
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 13 个单元
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 sudo cat /run/mihomo-healthcheck/status

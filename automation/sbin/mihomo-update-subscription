@@ -528,6 +528,8 @@ subscription_url=$(cat "$url_file")
 # documented mirror next to the primary link; set SUBSCRIPTION_BACKUP_URL in
 # /etc/mihomo-automation.env only when yours does.  Empty means "primary only".
 backup_url=${SUBSCRIPTION_BACKUP_URL:-}
+# Space-separated extra-source identifiers whose cached nodes are kept locally.
+: "${MIHOMO_SUBSCRIPTION_MANUAL_SOURCES:=}"
 
 normalize() {
   remaining=$(remaining_seconds) || return 1
@@ -620,10 +622,23 @@ if [ -d "$extra_urls_dir" ]; then
         ;;
     esac
 
+    cached=$extra_cache_root/$source_id.yaml
+    case " $MIHOMO_SUBSCRIPTION_MANUAL_SOURCES " in
+      *" $source_id "*)
+        if [ -s "$cached" ] && extra_is_valid "$cached"; then
+          printf '%s|%s|0\n' "$source_id" "$cached" >>"$extra_manifest"
+          logger -t mihomo-update-subscription "$source_id is manual; retaining validated cache without download"
+        else
+          logger -t mihomo-update-subscription "$source_id is manual but has no valid cache; keeping current configuration"
+          exit 1
+        fi
+        continue
+        ;;
+    esac
+
     extra_url=$(cat "$extra_url_file")
     raw=$extra_work_dir/$source_id.raw
     downloaded=$extra_work_dir/$source_id.yaml
-    cached=$extra_cache_root/$source_id.yaml
     fresh=0
     rm -f "$raw" "$downloaded"
 

@@ -28,6 +28,8 @@ if name == 'curl':
     if '--output' in args and args[args.index('--output') + 1] != '/dev/null':
         output = Path(args[args.index('--output') + 1])
         source = args[-1].rsplit('/', 1)[-1]
+        with (root / 'downloads-requested').open('a') as stream:
+            stream.write(source + '\n')
         if mode == 'retained' and source == 'primary.yaml':
             sys.exit(22)
         if mode in {'cached', 'no-cache'} and source != 'primary.yaml':
@@ -165,6 +167,11 @@ def check_case(mode):
             capabilities.write_text(yaml.safe_dump(cap))
             if mode == 'revoke-invalid-policy':
                 environment['SUB_TEST_BREAK_POLICY'] = '1'
+        if mode in {'manual', 'manual-force', 'manual-no-cache'}:
+            environment['MIHOMO_SUBSCRIPTION_MANUAL_SOURCES'] = 'BWB'
+        if mode == 'manual-no-cache':
+            (root / 'cache/BWB.yaml').unlink()
+            (root / 'fault').touch()
         if mode in {'unchanged', 'force'}:
             manifest = root / 'extras'
             manifest.write_text(''.join(sorted(entries)))
@@ -186,9 +193,9 @@ def check_case(mode):
             script = script.replace(old, new)
         updater = root / 'update.sh'
         updater.write_text(script.replace('\n', '\nexport SUB_TEST_UPDATER_PID=$$\n', 1))
-        result = subprocess.run(['sh', str(updater), *(['--force'] if mode == 'force' else [])],
+        result = subprocess.run(['sh', str(updater), *(['--force'] if mode in {'force', 'manual-force'} else [])],
                                 env=environment, capture_output=True, text=True, timeout=45)
-        success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked'}
+        success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked', 'manual', 'manual-force'}
         assert (result.returncode == 0) == success, (mode, result.stderr)
         rolled_back = mode in {'installed-validation', 'reload', 'inactive', 'health'} or mode.startswith('revoke-')
         if rolled_back and mode != 'revoke-invalid-policy':
@@ -206,6 +213,16 @@ def check_case(mode):
                 p.name: p.read_bytes() for p in (root / 'downloads').iterdir() if p.name != 'primary.yaml'}
         if mode == 'cached':
             assert {p.name: p.read_bytes() for p in (root / 'cache').iterdir()} == cache_before
+        if mode in {'manual', 'manual-force', 'manual-no-cache'}:
+            requested = (root / 'downloads-requested').read_text().splitlines()
+            assert 'BWB.yaml' not in requested, 'manual source was downloaded'
+        if mode in {'manual', 'manual-force'}:
+            assert {'primary.yaml', 'ByWave.yaml', 'InfraAPI.yaml'} <= set(requested)
+            assert (root / 'cache/BWB.yaml').read_bytes() == cache_before['BWB.yaml']
+            final = yaml.safe_load(current.read_text())
+            expected = [dict(n, name='BWB | ' + n['name'])
+                        for n in yaml.safe_load(cache_before['BWB.yaml'])['proxies']]
+            assert expected and [n for n in final['proxies'] if n['name'].startswith('BWB | ')] == expected, 'manual nodes were removed or replaced'
         calls = (root / 'calls').read_text() if (root / 'calls').exists() else ''
         if mode in {'validation', 'backup', 'no-cache', 'unchanged', 'locked', 'write', 'signal'}:
             assert 'reload' not in calls, (mode, calls)
@@ -223,7 +240,8 @@ def check_case(mode):
 if __name__ == '__main__':
     cases = ('success', 'cached', 'retained', 'no-cache', 'validation', 'backup', 'write', 'signal',
              'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked',
-             'revoke-health', 'revoke-reload', 'revoke-write', 'revoke-signal', 'revoke-invalid-policy')
+             'revoke-health', 'revoke-reload', 'revoke-write', 'revoke-signal', 'revoke-invalid-policy',
+             'manual', 'manual-force', 'manual-no-cache')
     failures = []
     for case in cases:
         try:

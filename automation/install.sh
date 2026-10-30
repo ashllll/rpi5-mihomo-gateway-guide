@@ -4,7 +4,7 @@
 #
 # The layer mirrors one gateway that is actually running: the scripts, units,
 # dnsmasq scopes and MosDNS config are the files from that box with site data
-# stripped out.  Twelve units are enabled - the state of the recorded gateway -
+# stripped out.  Thirteen units are enabled - the state of the recorded gateway -
 # and everything else is installed but left off, so the tree and the runbook
 # describe a single system instead of two alternatives.
 #
@@ -226,11 +226,12 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
     fi
   }
   service_action systemctl daemon-reload
-  # The twelve units the recorded gateway runs.  Enabling a timer does not start
+  # The enabled units the gateway runs.  Enabling a timer does not start
   # it, so a fresh host needs one explicit start after the private env files exist.
   for unit in \
       mihomo.service \
       mihomo-measurement-budget.service \
+      mihomo-subscription-update.timer \
       mihomo-healthcheck.timer \
       mihomo-watch.timer \
       mihomo-dnsmasq-guard.timer \
@@ -243,10 +244,9 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
       homeassistant-access-guard.service; do
     service_action systemctl enable "$unit"
   done
-  # These four ship for completeness but stay off: on the recorded gateway the
-  # rule, subscription and quality timers were disabled.  Disabling them is what
-  # makes an upgrade from the previous release idempotent.
-  for retired in mihomo-rules-update.timer mihomo-subscription-update.timer mihomo-download-quality.timer mihomo-social-quality.timer; do
+  # Rule and retired quality timers remain dormant. Subscription refresh is
+  # enabled above and must survive subsequent package upgrades.
+  for retired in mihomo-rules-update.timer mihomo-download-quality.timer mihomo-social-quality.timer; do
     load_state=$(systemctl show --property=LoadState --value "$retired") || {
       echo 'error: automation files are committed, but systemd configuration is incomplete' >&2
       exit 1
