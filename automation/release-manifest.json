@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "9f81591b2f2c32a3ba0d8c97d56f63026918ab9fe14d852f6c83f79055ab5b5c",
+  "release_id": "4c2397c439cfb6e09fc9a72b98fb292487a79e42b06e4172303ccbcd54c50c59",
   "files": [
     {
       "source": "check-release.py",
@@ -118,12 +118,12 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "41f0ad15550f3c343030bf4763b74f91ff6b59a59415470092979ecaedec56e8"
+      "sha256": "d110879cac0d1a5c2c8a32b273685d00f55318b87655ad7c018629da23f9962f"
     },
     {
       "source": "policy/capabilities.yaml",
       "target": null,
-      "sha256": "936922b567468cd9bc6549c145261d79ac14bd142a382b9b8c107103a6f45d51"
+      "sha256": "62e5abaf09da7ed38e6c255eb7a804aba21c9024044ce7c414241469aacf3506"
     },
     {
       "source": "policy/route-defaults.yaml",
@@ -187,13 +187,25 @@
     {
       "source": "sbin/mihomo-measurement-policy",
       "target": "/usr/local/sbin/mihomo-measurement-policy",
-      "sha256": "37ca3b201a5758ecc85d62dc74f7172ffbeeae9ea7b20e858615dc64d1fb7ccc",
+      "sha256": "e8f14608971ac5caf00b51665a45113e0c219937c5ab6e3ea8e42ced63612ecd",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-media-guard",
+      "target": "/usr/local/sbin/mihomo-media-guard",
+      "sha256": "311f22ff3f8813e9d4d16402caa36a8097d60801e10e4649b94429f6cc819d7f",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-media-policy",
+      "target": "/usr/local/sbin/mihomo-media-policy",
+      "sha256": "83150e6a3938fe761b657044b171763491f85045f6df5e4f2e6efca394bd7e66",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-policy-overlay",
       "target": "/usr/local/sbin/mihomo-policy-overlay",
-      "sha256": "c1d677113ebbef0d259ea883808314d0843265358dc25540b89defec14f3e6a3",
+      "sha256": "b8330c518225b80b09f172aef76c1b9d0c763f784d788c70bcdd2ce84735b550",
       "mode": 493
     },
     {
@@ -229,7 +241,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "445ccecaa7d15241bf220a3943bc8dbe3619252265174fdc74d214fe9ae8e55e",
+      "sha256": "8d491de34052e7f0306df494f1f2f04750bdb55613e89a26cd404c663f70ef16",
       "mode": 493
     },
     {
@@ -347,6 +359,18 @@
       "mode": 420
     },
     {
+      "source": "systemd/mihomo-media-guard.service",
+      "target": "/etc/systemd/system/mihomo-media-guard.service",
+      "sha256": "4199a0d713d8d9c48bbc77bda511ed196b923b929315ed4fb0267ac5f6458740",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-media-guard.timer",
+      "target": "/etc/systemd/system/mihomo-media-guard.timer",
+      "sha256": "c1a6a1cc17ddad041cb2691d1ef1c6af270cb58eec799c28ab8f1d4f27108d2c",
+      "mode": 420
+    },
+    {
       "source": "systemd/mihomo-rules-update.service",
       "target": "/etc/systemd/system/mihomo-rules-update.service",
       "sha256": "b4d7e103786481909b0d7a950c1014bd3c0b890ed11a9199b83c7ade306e911f",
@@ -428,6 +452,12 @@
       "source": "systemd/mihomo.service.d/measurement-budget.conf",
       "target": "/etc/systemd/system/mihomo.service.d/measurement-budget.conf",
       "sha256": "e26895744eb6d88e96c1a1c608e1f34ad52b86aa7dcf9603c5f7cc078594b07b",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/media-admission.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/media-admission.conf",
+      "sha256": "9b58a1eb38e1a2828c0a7921e56a46fb06e49b28484585dbfcaebba8772f1676",
       "mode": 420
     },
     {

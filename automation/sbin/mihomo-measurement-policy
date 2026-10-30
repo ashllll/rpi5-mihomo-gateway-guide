@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import socket
 import tempfile
 import threading
@@ -265,11 +266,19 @@ def configure_measurement(config: dict, capabilities: dict) -> None:
             continue
         if not isinstance(url, str) or not url:
             raise ValueError('native provider requires an explicit check URL')
-        health['interval'] = max(interval, int(health.get('interval', interval)))
+        if 'x-media-admission' not in spec:
+            health['interval'] = max(interval, int(health.get('interval', interval)))
+        elif type(health.get('interval')) is not int or health['interval'] <= 0:
+            raise ValueError('invalid media provider health interval')
         # Keep scheduled probing.  lazy skips idle members, so a dead node is
         # only noticed after a client already got stuck on it.
         health.setdefault('lazy', False)
         payload = spec.get('payload', [])
+        if 'x-media-admission' in spec:
+            media = runpy.run_path(str(Path(__file__).with_name('mihomo-media-policy')))
+            # Plan against every eligible leaf, even while the admitted file is empty.
+            # Definitions come from this subscription, never an old provider payload.
+            payload = media['candidate_nodes'](config, spec)
         if not payload:
             raise ValueError('native budget requires resolved provider payload')
         for node in payload:

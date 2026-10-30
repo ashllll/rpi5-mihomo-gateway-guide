@@ -1,0 +1,25 @@
+[Unit]
+Description=Admit media proxy candidates by measured throughput
+Wants=network-online.target
+After=network-online.target mihomo.service
+
+[Service]
+EnvironmentFile=-/etc/mihomo-automation.env
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-media-guard
+TimeoutStartSec=180
+StateDirectory=mihomo-media-admission
+StateDirectoryMode=0700
+Nice=15
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelLogs=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/etc/mihomo/providers /var/lib/mihomo-measurements

@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+"""Pure media candidate admission policy and overlay transformation."""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import runpy
+from urllib.parse import urlsplit
+
+
+ROOT = Path(__file__).resolve().parent
+_MEASUREMENT_HELPERS = None
+_GENERATION = re.compile(r'[0-9a-f]{64}')
+_OWNED_NAME = re.compile(r'media-admission-([0-9a-f]{16})')
+_REQUIRED_SETTINGS = {
+    'interval_seconds': (int, 5, 3600),
+    'sample_bytes': (int, 1024, 2 * 1024 * 1024),
+    'timeout_seconds': (int, 1, 15),
+    'min_bps': ((int, float), 1, 10**12),
+    'recovery_bps': ((int, float), 1, 10**12),
+    'bad_samples': (int, 1, 20),
+    'good_samples': (int, 1, 20),
+    'cooldown_seconds': (int, 5, 7 * 24 * 3600),
+    'max_age_seconds': (int, 1, 7 * 24 * 3600),
+    'samples_per_group': (int, 1, 4),
+}
+
+
+def _finite_number(value) -> bool:
+    return (isinstance(value, int) and not isinstance(value, bool)) or (
+        isinstance(value, float) and math.isfinite(value))
+
+
+def _helpers():
+    global _MEASUREMENT_HELPERS
+    if _MEASUREMENT_HELPERS is None:
+        _MEASUREMENT_HELPERS = runpy.run_path(str(ROOT / 'mihomo-measurement-policy'))
+    return _MEASUREMENT_HELPERS
+
+
+def _profile_url(value) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parts = urlsplit(value)
+        return (parts.scheme == 'https' and bool(parts.hostname) and parts.username is None
+                and parts.password is None and not parts.fragment)
+    except ValueError:
+        return False
+
+
+def settings(manifest: dict) -> dict | None:
+    """Validate and return JSON-safe media admission settings, or None when disabled."""
+    if not isinstance(manifest, dict):
+        raise ValueError('manifest must be a mapping')
+    raw = manifest.get('media_admission', {})
+    if not isinstance(raw, dict):
+        raise ValueError('media_admission must be a mapping')
+    enabled = raw.get('enabled', False)
+    if type(enabled) is not bool:
+        raise ValueError('media_admission.enabled must be boolean')
+    if not enabled:
+        return None
+    if set(raw) - {'enabled', 'profiles', *_REQUIRED_SETTINGS}:
+        raise ValueError('unknown media admission setting')
+
+    result = {'enabled': True}
+    for name, (expected, minimum, maximum) in _REQUIRED_SETTINGS.items():
+        value = raw.get(name)
+        valid_type = type(value) is expected if isinstance(expected, type) else (
+            isinstance(value, expected) and not isinstance(value, bool))
+        if not valid_type or not _finite_number(value) or not minimum <= value <= maximum:
+            raise ValueError('invalid media admission setting: ' + name)
+        result[name] = value
+    if result['recovery_bps'] < result['min_bps']:
+        raise ValueError('recovery_bps must be at least min_bps')
+    if result['max_age_seconds'] < result['interval_seconds']:
+        raise ValueError('max_age_seconds must cover at least one sampling interval')
+    if result['cooldown_seconds'] < result['interval_seconds']:
+        raise ValueError('cooldown_seconds must cover at least one sampling interval')
+
+    profiles = raw.get('profiles')
+    if (not isinstance(profiles, dict) or not profiles
+            or any(name not in {'Social', 'Streaming'} for name in profiles)):
+        raise ValueError('profiles must contain Social and/or Streaming only')
+    total_samples = result['samples_per_group'] * len(profiles)
+    if total_samples * result['timeout_seconds'] > 120:
+        raise ValueError('media sample round exceeds its time budget')
+    if total_samples * result['sample_bytes'] > 8 * 1024 * 1024:
+        raise ValueError('media sample round exceeds its byte budget')
+    result['profiles'] = {}
+    for name, profile in profiles.items():
+        if not isinstance(profile, dict):
+            raise ValueError('profile must be a mapping')
+        if set(profile) - {'sample_url', 'expected_content_type', 'extra_patterns'}:
+            raise ValueError('unknown media profile setting')
+        url = profile.get('sample_url')
+        content_type = profile.get('expected_content_type')
+        patterns = profile.get('extra_patterns', [])
+        if not _profile_url(url) or content_type != 'video/mp4':
+            raise ValueError('profile requires an HTTPS sample_url and video/mp4 content type')
+        if not isinstance(patterns, list) or any(not isinstance(pattern, str) for pattern in patterns):
+            raise ValueError('extra_patterns must be a list of regular expressions')
+        try:
+            for pattern in patterns:
+                re.compile(pattern)
+        except re.error as error:
+            raise ValueError('invalid media candidate pattern') from error
+        result['profiles'][name] = {
+            'sample_url': url,
+            'expected_content_type': content_type,
+            'extra_patterns': list(patterns),
+        }
+    return result
+
+
+def owned_provider(name: str, spec: dict) -> bool:
+    """Check the complete generated name, path, metadata and generation identity."""
+    if not isinstance(name, str) or not isinstance(spec, dict):
+        return False
+    metadata = spec.get('x-media-admission')
+    if not isinstance(metadata, dict):
+        return False
+    generation = metadata.get('generation')
+    match = _OWNED_NAME.fullmatch(name)
+    candidates = metadata.get('candidates')
+    if (not isinstance(candidates, list) or not candidates
+            or any(not isinstance(candidate, str) for candidate in candidates)
+            or len(set(candidates)) != len(candidates)):
+        return False
+    try:
+        for candidate in candidates:
+            _helpers()['validate_node_name'](candidate)
+    except (ValueError, TypeError):
+        return False
+    return (spec.get('type') == 'file' and spec.get('payload') == []
+            and set(metadata) == {'group', 'generation', 'candidates'}
+            and metadata.get('group') in {'Social', 'Streaming'}
+            and isinstance(generation, str) and _GENERATION.fullmatch(generation)
+            and match is not None and match.group(1) == generation[:16]
+            and spec.get('path') == './providers/' + name + '.yaml')
+
+
+def _owned_providers(config: dict) -> dict[str, dict]:
+    providers = config.get('proxy-providers', {})
+    if not isinstance(providers, dict):
+        raise ValueError('proxy-providers must be a mapping')
+    return {name: provider for name, provider in providers.items()
+            if owned_provider(name, provider)}
+
+
+def _remove_owned(config: dict) -> None:
+    providers = config.setdefault('proxy-providers', {})
+    owned = _owned_providers(config)
+    if not owned:
+        return
+    for group in config.get('proxy-groups', []):
+        if not isinstance(group, dict):
+            continue
+        refs = group.get('use')
+        if isinstance(refs, list) and any(name in owned for name in refs):
+            old = next((owned[name] for name in refs if name in owned), None)
+            group['use'] = [name for name in refs if name not in owned]
+            if not group['use']:
+                group.pop('use', None)
+            if not group.get('proxies') and old:
+                candidates = old['x-media-admission']['candidates']
+                current = {node.get('name') for node in config.get('proxies', []) if isinstance(node, dict)}
+                group['proxies'] = [name for name in candidates if name in current] or ['REJECT']
+    for name in owned:
+        providers.pop(name, None)
+    if not providers:
+        config.pop('proxy-providers', None)
+
+
+def _group(config: dict, name: str) -> dict:
+    matches = [group for group in config.get('proxy-groups', [])
+               if isinstance(group, dict) and group.get('name') == name]
+    if len(matches) != 1:
+        raise ValueError('media admission requires exactly one ' + name + ' group')
+    return matches[0]
+
+
+def _candidate_definitions(config: dict, group: dict, profile: dict) -> tuple[list[str], list[dict]]:
+    helpers = _helpers()
+    source = config.get('proxies', [])
+    if not isinstance(source, list):
+        raise ValueError('top-level proxies must be a list')
+    nodes = {}
+    for node in source:
+        if isinstance(node, dict) and 'name' in node:
+            normalized = helpers['normalized_node'](node)
+            name = normalized['name']
+            if name in nodes and nodes[name] != normalized:
+                raise ValueError('conflicting node definition')
+            nodes[name] = normalized
+    members = group.get('proxies')
+    if (not isinstance(members, list) or not members or group.get('use')
+            or group.get('filter') or group.get('exclude-filter')):
+        raise ValueError('media admission requires a nonempty flat proxy list')
+    ordered = []
+    for name in members:
+        if not isinstance(name, str) or name not in nodes or name in {'DIRECT', 'REJECT'}:
+            raise ValueError('media group contains an unresolved candidate')
+        if name not in ordered:
+            ordered.append(name)
+    patterns = [re.compile(pattern) for pattern in profile['extra_patterns']]
+    for name in nodes:
+        if any(pattern.fullmatch(name) for pattern in patterns) and name not in ordered:
+            ordered.append(name)
+    definitions = [nodes[name] for name in ordered]
+    for node in definitions:
+        if node.get('dialer-proxy'):
+            raise ValueError('media admission does not support dialer chains')
+    return ordered, definitions
+
+
+def _group_health(group: dict) -> dict:
+    url = group.get('url')
+    expected = group.get('expected-status')
+    timeout = group.get('timeout')
+    if (not isinstance(url, str) or not url or expected is None
+            or not _finite_number(timeout) or timeout <= 0):
+        raise ValueError('media group requires a complete health-check contract')
+    return {'url': url, 'expected-status': expected, 'timeout': timeout}
+
+
+def _digest(value) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                     ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+def configure(config: dict, manifest: dict) -> None:
+    """Replace enabled media groups with exclusive empty file-provider owners."""
+    selected = settings(manifest)
+    _remove_owned(config)
+    if selected is None:
+        return
+    measurement = manifest.get('measurement', {})
+    if (not isinstance(measurement, dict) or measurement.get('enabled') is not True
+            or measurement.get('native_budget') is not True):
+        raise ValueError('media admission requires the enabled native budget contract')
+    native_interval = measurement.get('native_interval_seconds', selected['interval_seconds'])
+    if (type(native_interval) is not int or native_interval <= 0):
+        raise ValueError('invalid native measurement interval')
+    providers = config.setdefault('proxy-providers', {})
+    for group_name, profile in selected['profiles'].items():
+        group = _group(config, group_name)
+        health = _group_health(group)
+        interval = group.get('interval', native_interval)
+        if type(interval) is not int or interval <= 0:
+            raise ValueError('invalid media group health interval')
+        interval = min(native_interval, interval)
+        names, definitions = _candidate_definitions(config, group, profile)
+        generation = _digest({
+            'group': group_name,
+            'settings': {key: value for key, value in selected.items() if key != 'profiles'},
+            'profile': profile,
+            'health': health,
+            'candidates': definitions,
+        })
+        provider_name = 'media-admission-' + generation[:16]
+        provider_path = './providers/' + provider_name + '.yaml'
+        existing = providers.get(provider_name)
+        if existing is not None:
+            metadata = existing.get('x-media-admission') if isinstance(existing, dict) else None
+            if (not isinstance(metadata, dict) or existing.get('path') != provider_path
+                    or metadata.get('generation') != generation):
+                raise ValueError('media provider identity collision')
+        providers[provider_name] = {
+            'type': 'file',
+            'path': provider_path,
+            'payload': [],
+            'health-check': {
+                'enable': True,
+                **health,
+                'interval': interval,
+                'lazy': False,
+            },
+            'x-media-admission': {
+                'group': group_name,
+                'generation': generation,
+                'candidates': names,
+            },
+        }
+        group['use'] = [provider_name]
+        group['type'] = 'fallback'
+        group['empty-fallback'] = 'REJECT'
+        for key in ('proxies', 'filter', 'url', 'interval', 'lazy'):
+            group.pop(key, None)
+    if not providers:
+        config.pop('proxy-providers', None)
+
+
+def candidate_nodes(config: dict, spec: dict) -> list[dict]:
+    """Resolve an owned provider's metadata names against current top-level nodes."""
+    providers = config.get('proxy-providers', {})
+    owner = next((name for name, value in providers.items() if value is spec), None)
+    if owner is None:
+        raise ValueError('media provider is not owned by this config')
+    owned = _owned_providers(config)
+    if owner not in owned:
+        raise ValueError('media provider identity is invalid')
+    metadata = spec['x-media-admission']
+    if not isinstance(metadata['candidates'], list) or not metadata['candidates']:
+        raise ValueError('media candidate metadata is empty')
+    helpers = _helpers()
+    current = {}
+    for node in config.get('proxies', []):
+        if isinstance(node, dict) and 'name' in node:
+            normalized = helpers['normalized_node'](node)
+            if normalized['name'] in current and current[normalized['name']] != normalized:
+                raise ValueError('conflicting current node definition')
+            current[normalized['name']] = normalized
+    result = []
+    seen = set()
+    for name in metadata['candidates']:
+        if not isinstance(name, str) or name in seen or name not in current:
+            raise ValueError('media candidate is missing or duplicated')
+        seen.add(name)
+        result.append(copy.deepcopy(current[name]))
+    return result
+
+
+def _settings_value(value: dict) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError('settings must be a mapping')
+    return settings({'media_admission': value}) if 'media_admission' not in value else settings(value)
+
+
+def _bad_error(result: dict) -> bool:
+    error = result.get('error')
+    if not isinstance(error, str):
+        return False
+    lowered = error.casefold()
+    return any(word in lowered for word in ('timeout', 'timed out', 'urlerror', 'url error',
+                                             'connection', 'connect error', 'dns error',
+                                             'network error', 'socket error'))
+
+
+def _inconclusive_error(result: dict) -> bool:
+    error = result.get('error')
+    if not isinstance(error, str):
+        return False
+    lowered = error.casefold().replace('_', '')
+    return any(word in lowered for word in ('unexpectedcontenttype', 'content-type', 'mime',
+                                             'incompleteread', 'mihomoexited'))
+
+
+def update_samples(profile_state: dict, results: list[dict], settings: dict, now: float) -> dict:
+    """Apply one batch of per-candidate sample outcomes without storing credentials."""
+    policy = _settings_value(settings)
+    if policy is None or not _finite_number(now) or now < 0:
+        raise ValueError('enabled settings and finite now are required')
+    state = copy.deepcopy(profile_state) if isinstance(profile_state, dict) else {}
+    candidates = state.setdefault('candidates', {})
+    if not isinstance(candidates, dict) or not isinstance(results, list):
+        raise ValueError('invalid media profile state or results')
+    for result in results:
+        if not isinstance(result, dict) or not isinstance(result.get('name'), str) or not result['name']:
+            raise ValueError('each sample result requires a candidate name')
+        name = result['name']
+        current = candidates.setdefault(name, {'admitted': False, 'good_count': 0,
+                                               'bad_count': 0, 'last_good': None,
+                                               'good_since': None, 'isolated_until': 0})
+        if not isinstance(current, dict):
+            raise ValueError('invalid candidate state')
+        current.setdefault('admitted', False)
+        current.setdefault('good_count', 0)
+        current.setdefault('bad_count', 0)
+        current.setdefault('last_good', None)
+        current.setdefault('good_since', None)
+        current.setdefault('isolated_until', 0)
+        admitted_before = current['admitted'] is True
+        last_good = current.get('last_good')
+        if (_finite_number(last_good) and now - last_good > policy['max_age_seconds']):
+            current['admitted'] = False
+            current['good_count'] = 0
+            current['good_since'] = None
+            current['bad_count'] = 0
+            admitted_before = False
+        if result.get('status') in (403, 429) or _inconclusive_error(result):
+            continue
+        if _bad_error(result):
+            valid_bad = True
+        else:
+            status, count, elapsed = result.get('status'), result.get('bytes'), result.get('elapsed')
+            if (result.get('success') is not True or result.get('error')
+                    or type(status) is not int or status not in (200, 206)):
+                continue
+            if (type(count) is not int or count < policy['sample_bytes']
+                    or not _finite_number(elapsed) or elapsed <= 0
+                    or elapsed > policy['timeout_seconds']):
+                continue
+            rate = count / elapsed
+            if not math.isfinite(rate):
+                continue
+            if rate < policy['min_bps']:
+                valid_bad = True
+            else:
+                valid_bad = False
+                current['last_good'] = now
+                if not admitted_before:
+                    isolated_until = current.get('isolated_until', 0)
+                    if _finite_number(isolated_until) and now < isolated_until:
+                        continue
+                    if rate < policy['recovery_bps']:
+                        current['good_count'] = 0
+                        current['good_since'] = None
+                        continue
+                    since = current.get('good_since')
+                    if (not _finite_number(since) or now - since > policy['max_age_seconds']):
+                        current['good_count'] = 0
+                        current['good_since'] = now
+                    current['good_count'] += 1
+                    if current['good_count'] >= policy['good_samples']:
+                        current['admitted'] = True
+                        current['bad_count'] = 0
+                        current['isolated_until'] = 0
+                else:
+                    current['good_count'] = 0
+                    current['good_since'] = None
+                    current['bad_count'] = 0
+                continue
+        if valid_bad and admitted_before:
+            current['good_count'] = 0
+            current['good_since'] = None
+            current['bad_count'] += 1
+            if current['bad_count'] >= policy['bad_samples']:
+                current['admitted'] = False
+                current['bad_count'] = 0
+                current['isolated_until'] = now + policy['cooldown_seconds']
+        elif valid_bad:
+            current['good_count'] = 0
+            current['good_since'] = None
+    return state
+
+
+def admitted(profile_state: dict, candidate_names: list[str], settings: dict, now: float) -> list[str]:
+    """Return currently admitted, fresh candidates in their input order."""
+    policy = _settings_value(settings)
+    if (policy is None or not _finite_number(now) or now < 0
+            or not isinstance(candidate_names, list)):
+        raise ValueError('enabled settings, finite now and candidate list are required')
+    candidates = profile_state.get('candidates', {}) if isinstance(profile_state, dict) else {}
+    result = []
+    for name in candidate_names:
+        state = candidates.get(name) if isinstance(candidates, dict) else None
+        last_good = state.get('last_good') if isinstance(state, dict) else None
+        if (isinstance(state, dict) and state.get('admitted') is True
+                and _finite_number(last_good) and 0 <= now - last_good <= policy['max_age_seconds']
+                and name not in result):
+            result.append(name)
+    return result
