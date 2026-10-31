@@ -6,8 +6,8 @@ download_routes:
     group: GitHub Download
     domains: [release-assets.githubusercontent.com, objects.githubusercontent.com, codeload.github.com, github-releases.githubusercontent.com, pkg-containers.githubusercontent.com]
   git-transport:
-    group: GitHub Control
-    domains: [github.com, api.github.com, alive.github.com]
+    group: GitHub Download
+    domains: [github.com]
   packages:
     group: Package Download
     domains: [registry.npmjs.org, registry.yarnpkg.com, unpkg.com, cdn.jsdelivr.net, nodejs.org]

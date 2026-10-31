@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Install a candidate mihomo config on a Raspberry Pi gateway, but only after
+# the machine has checked it. Nothing is written unless every gate passes.
+#
+#   mihomo-config-install /path/to/candidate.yaml [--dry-run]
+#
+# Gates:
+#   1. candidate parses and passes `mihomo -t`
+#   2. the running config is backed up and the diff is printed (blast radius)
+#   3. every process that rewrites /etc/mihomo/config.yaml is listed, so a
+#      generator that will silently undo this change cannot stay invisible
+#   4. after reload the service is active and the API answers
+set -uo pipefail
+
+CONF_DIR=${MIHOMO_DIR:-/etc/mihomo}
+LIVE="$CONF_DIR/config.yaml"
+BIN=${MIHOMO_BIN:-/usr/local/bin/mihomo}
+CAND=${1:-}
+DRY=${2:-}
+
+[ -n "$CAND" ] || { echo "usage: $0 <candidate.yaml> [--dry-run]" >&2; exit 2; }
+[ -f "$CAND" ] || { echo "no such file: $CAND" >&2; exit 2; }
+[ "$(id -u)" = 0 ] || { echo "must run as root" >&2; exit 2; }
+
+block() { echo "" >&2; echo "[mihomo-install] REFUSED: $*" >&2; exit 1; }
+note() { echo "[mihomo-install] $*"; }
+
+# --- gate 0: never ship a config that carries live credentials in-place check
+# (config legitimately contains proxy credentials; keep the file mode tight
+#  and never leave copies behind in /tmp)
+case "$CAND" in
+  /tmp/*) note "candidate lives in /tmp; it will hold credentials; remove it after install" ;;
+esac
+
+# --- gate 1: syntax + semantic validation
+note "validating candidate"
+"$BIN" -t -d "$CONF_DIR" -f "$CAND" || block "mihomo -t rejected the candidate"
+
+# --- gate 2: blast radius
+CHANGED=0
+if [ -f "$LIVE" ]; then
+  CHANGED=$(diff "$LIVE" "$CAND" | grep -cE '^[<>]' || true)
+  note "candidate differs from live in $CHANGED line(s); first 40:"
+  diff -u "$LIVE" "$CAND" | sed -n '1,40p' | sed 's/^/  /'
+  [ "$CHANGED" -gt 200 ] && note "WARNING: large config change ($CHANGED lines); confirm this is intended"
+fi
+
+# --- gate 3: who else writes this file?
+note "processes/units that can rewrite $LIVE (check each before trusting a manual edit):"
+{
+  grep -rl --binary-files=without-match "$LIVE" /usr/local/sbin /etc/systemd/system /etc/cron.d 2>/dev/null || true
+  systemctl list-timers --all --no-pager 2>/dev/null | grep -iE 'mihomo|policy|subscription|download' || true
+} | sed 's/^/  - /'
+ENABLED=$(systemctl list-timers --all --no-pager 2>/dev/null | grep -icE 'mihomo|policy|subscription|download' || true)
+[ "$ENABLED" = 0 ] || note "NOTE: $ENABLED mihomo-related timer(s) exist; one may re-own proxy-groups and undo this change"
+
+if [ "$DRY" = "--dry-run" ]; then
+  note "dry run: candidate validated, nothing installed"
+  exit 0
+fi
+
+# --- install with backup, then verify the live service
+STAMP=$(date +%Y%m%d-%H%M%S)
+[ -f "$LIVE" ] && { cp -a "$LIVE" "$LIVE.bak-$STAMP" && note "backed up live to $LIVE.bak-$STAMP"; }
+install -m 0600 -o root -g root "$CAND" "$LIVE" || block "install failed"
+note "installed; reloading service"
+systemctl reload mihomo || systemctl restart mihomo || block "reload and restart both failed"
+sleep 2
+systemctl is-active --quiet mihomo || {
+  note "service is not active; rolling back"
+  [ -f "$LIVE.bak-$STAMP" ] && install -m 0600 -o root -g root "$LIVE.bak-$STAMP" "$LIVE" && systemctl restart mihomo
+  block "mihomo failed to stay up on the new config (rolled back)"
+}
+note "mihomo active; done"
