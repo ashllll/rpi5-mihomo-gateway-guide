@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "4c2397c439cfb6e09fc9a72b98fb292487a79e42b06e4172303ccbcd54c50c59",
+  "release_id": "504b7917aebf5102171ad8440bea7520e4d62774e82c2a89f4dfc1c32a8ade6d",
   "files": [
     {
       "source": "check-release.py",
@@ -145,7 +145,7 @@
     {
       "source": "sbin/mihomo-alert",
       "target": "/usr/local/sbin/mihomo-alert",
-      "sha256": "28960b430f7ab6edf825ea138bf03170b801653fac64a7db24e45a361b753b83",
+      "sha256": "028d3ff04010ad69d652292c4a049a33a3cb6055fda740c84aee52bad2e7475c",
       "mode": 493
     },
     {
@@ -163,7 +163,7 @@
     {
       "source": "sbin/mihomo-dnsmasq-guard",
       "target": "/usr/local/sbin/mihomo-dnsmasq-guard",
-      "sha256": "34a8b7ebc17b9596dc99c067ab6de3b09e99067909de92730b99588456f4a837",
+      "sha256": "dbb90baf1983ba320729a4618ce466ff641928d87dff9e192fd3f13a6bceb05b",
       "mode": 493
     },
     {
@@ -247,7 +247,7 @@
     {
       "source": "sbin/mihomo-watch",
       "target": "/usr/local/sbin/mihomo-watch",
-      "sha256": "0c9ebd99ba947bf6a55b64eb33a00056619dc01ca5740acd3aa2a325ad689672",
+      "sha256": "d47befc1218dcdf47b7894ebd258c286915a9b8633676207038d6c48183ad742",
       "mode": 493
     },
     {

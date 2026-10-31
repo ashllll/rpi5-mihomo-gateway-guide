@@ -48,6 +48,9 @@ exit 0
 
 ALERT = """#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_STATE/alert.log"
+case "${FAKE_ALERT_FAIL_KEY:-}" in
+  "${3:-}") exit 1 ;;
+esac
 exit 0
 """
 
@@ -71,7 +74,8 @@ def build_run(run: Path) -> Path:
     return script
 
 
-def run_once(script: Path, run: Path, lan: int, res: int) -> dict:
+def run_once(script: Path, run: Path, lan: int, res: int, *, observe: bool = False,
+             alert_fail_key: str = "") -> dict:
     for path in run.glob("state/count.*"):
         path.unlink()
     env = {
@@ -79,8 +83,10 @@ def run_once(script: Path, run: Path, lan: int, res: int) -> dict:
         "FAKE_STATE": str(run / "state"),
         "FAKE_LAN": str(lan),
         "FAKE_RES": str(res),
+        "FAKE_ALERT_FAIL_KEY": alert_fail_key,
     }
-    subprocess.run(["sh", str(script)], env=env, check=True, capture_output=True, timeout=30)
+    command = ["sh", str(script)] + (["--observe-only"] if observe else [])
+    subprocess.run(command, env=env, check=True, capture_output=True, timeout=30)
     text = (run / "state" / "status").read_text().strip()
     fields = dict(item.split("=", 1) for item in text.split(" ")[1:] if "=" in item)
     fields["restarts"] = (run / "state" / "systemctl.log").read_text().count("restart dnsmasq") if (run / "state" / "systemctl.log").exists() else 0
@@ -154,8 +160,44 @@ def main() -> int:
         # Healthy recovery and a later partial failure remain observable.
         state = run_once(script, run, 2, 2)
         check(state.get("action") == "none", f"recovery: {state}")
+        check("dns-path-recovery" in state["alert_keys"],
+              f"full health must recover every previously reported fault: {state['alert_keys']}")
         state = run_once(script, run, 1, 2)
         check(state.get("action") == "degraded-watch", f"counter must reset after recovery: {state}")
+
+        # Degraded notification retries until delivery, then only full health recovers it.
+        (run / "state" / "last-notified").unlink(missing_ok=True)
+        (run / "state" / "alert.log").write_text("")
+        state = run_once(script, run, 1, 2, observe=True)
+        last_notified = run / "state" / "last-notified"
+        check(not state["alert_keys"] and not (last_notified.exists() and last_notified.read_text().strip()),
+              f"observe-only degraded state must stay unacknowledged: {state}")
+        state = run_once(script, run, 1, 2, alert_fail_key="dns-path-degraded")
+        check("dns-path-degraded" in state["alert_keys"], f"degraded notification must be attempted: {state}")
+        state = run_once(script, run, 1, 2)
+        check(state["alert_keys"].count("dns-path-degraded") == 2,
+              f"failed degraded notification must retry: {state['alert_keys']}")
+        state = run_once(script, run, 1, 2)
+        check(state["alert_keys"].count("dns-path-degraded") == 2,
+              f"delivered degraded notification must not repeat: {state['alert_keys']}")
+        prior_alert_count = len(state["alert_keys"])
+        state = run_once(script, run, 1, 2, observe=True)
+        check(len(state["alert_keys"]) == prior_alert_count,
+              f"partial health is not recovery: {state}")
+        state = run_once(script, run, 2, 2, observe=True)
+        check(len(state["alert_keys"]) == prior_alert_count,
+              f"observe-only must not notify: {state}")
+        acknowledged = (run / "state" / "last-notified").read_text()
+        state = run_once(script, run, 2, 2, alert_fail_key="dns-path-recovery")
+        check((run / "state" / "last-notified").read_text() == acknowledged,
+              f"failed recovery must retain the reported fault state: {state}")
+        check("dns-path-recovery" in state["alert_keys"], f"full health must attempt recovery: {state}")
+        state = run_once(script, run, 2, 2)
+        check(state["alert_keys"].count("dns-path-recovery") == 2,
+              f"failed recovery notification must retry: {state['alert_keys']}")
+        state = run_once(script, run, 2, 2)
+        check(state["alert_keys"].count("dns-path-recovery") == 2,
+              f"delivered recovery notification must not repeat: {state['alert_keys']}")
 
     if failures:
         for failure in failures:

@@ -24,6 +24,7 @@ exec 8>/run/lock/mihomo-dnsmasq-guard.lock
 flock -n 8 || exit 0
 state_dir=/run/mihomo-dnsmasq-guard
 status_file=$state_dir/status
+last_notified_file=$state_dir/last-notified
 install -d -m 755 "$state_dir"
 restart_gap=20
 restart_budget=3
@@ -80,8 +81,15 @@ maintenance=0
 exec 9>/run/lock/mihomo-maintenance.lock
 flock -n 9 || maintenance=1
 notify() {
-  [ "$observe" = false ] || return 0
-  [ -x "$alert" ] && "$alert" --health "$2" "$1" >/dev/null 2>&1 || true
+  [ "$observe" = false ] || return 1
+  [ -x "$alert" ] || return 1
+  if "$alert" --health "$2" "$1" >/dev/null 2>&1; then
+    if [ "$1" != dns-path-recovery ] && ! grep -Fxq "$1" "$last_notified_file" 2>/dev/null; then
+      printf '%s\n' "$1" >>"$last_notified_file"
+    fi
+    return 0
+  fi
+  return 1
 }
 if [ "$action" = restart ]; then
   if [ "$observe" = true ]; then action=observe-only
@@ -98,23 +106,31 @@ if [ "$action" = restart ]; then
     case "$last" in *[!0-9]*|'') last=0 ;; esac
     if [ "$used" -ge "$restart_budget" ]; then
       action=throttled
-      notify dnsmasq-guard-exhausted "DNS client $unit exhausted recovery budget; client=$client_udp/$client_tcp upstream=$upstream_udp/$upstream_tcp"
+      notify dnsmasq-guard-exhausted "DNS client $unit exhausted recovery budget; client=$client_udp/$client_tcp upstream=$upstream_udp/$upstream_tcp" || true
     elif [ $((now - last)) -lt "$restart_gap" ]; then action=restart-gap
     else
       printf '%s\n' "$now" >>"$state_dir/restarts"
       printf '%s\n' "$now" >"$state_dir/last-restart"
       if systemctl restart "$unit"; then
-        notify dnsmasq-restart "Requested DNS client recovery: $unit; upstream answers, client UDP and TCP are silent"
+        notify dnsmasq-restart "Requested DNS client recovery: $unit; upstream answers, client UDP and TCP are silent" || true
       else
         action=restart-failed
-        notify dnsmasq-guard-exhausted "DNS client recovery failed: $unit"
+        notify dnsmasq-guard-exhausted "DNS client recovery failed: $unit" || true
       fi
     fi
   fi
 elif [ "$action" = chain-down ]; then
-  notify dns-path-down "DNS client and its actual upstream are silent; no client restart: $unit upstream=$upstream:$upstream_port"
+  notify dns-path-down "DNS client and its actual upstream are silent; no client restart: $unit upstream=$upstream:$upstream_port" || true
 elif [ "$action" = escalate-resolver ]; then
-  notify resolver-silent "DNS client answers but its actual upstream is silent; no client restart: $unit"
+  notify resolver-silent "DNS client answers but its actual upstream is silent; no client restart: $unit" || true
+fi
+if [ "$reason" = degraded ] && [ "$observe" = false ] &&
+   ! grep -Fxq dns-path-degraded "$last_notified_file" 2>/dev/null; then
+  notify dns-path-degraded "DNS path degraded: client UDP/TCP=$client_udp/$client_tcp upstream UDP/TCP=$upstream_udp/$upstream_tcp; passing=$checks" || true
+elif [ "$reason" = healthy ] && [ "$observe" = false ] && [ -s "$last_notified_file" ]; then
+  if notify dns-path-recovery "DNS path recovered: all $checks client and upstream UDP/TCP checks pass"; then
+    : >"$last_notified_file"
+  fi
 fi
 mode=stopped
 systemctl is-active --quiet "$unit" && mode=running
