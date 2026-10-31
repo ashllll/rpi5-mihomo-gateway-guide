@@ -1,0 +1,16 @@
+name: gates
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Full preflight (scripts/preflight.sh)
+        run: ./scripts/preflight.sh
