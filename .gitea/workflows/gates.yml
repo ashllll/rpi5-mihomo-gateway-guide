@@ -9,8 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout (token auth, no JS action)
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          git init -q .
+          git remote add origin "http://llll:${GITEA_TOKEN}@192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide.git"
+          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
       - name: Full preflight (scripts/preflight.sh)
         run: ./scripts/preflight.sh
