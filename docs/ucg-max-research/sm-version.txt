@@ -1,0 +1,24 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+Version Control · Site Manager · UniFi API
+Available Endpoints
+There are two versions of the Site Manager API:
+https://api.ui.com/v1/...
+https://api.ui.com/ea/...
+Backward Compatibility
+When an EA endpoint is promoted to Official (e.g., api.ui.com/ea/ → api.ui.com/v1/), your existing integration using the EA endpoint will continue to function as expected — no immediate changes required.
+Optional fields during EA
+response.data
+Backward-Compatible Changes
+The following modifications are considered backward-compatible and may be applied to the API without advance notice:
+Adding new API resources or endpoints
+Adding new optional request parameters to existing API methods
+Adding new properties to existing API responses
+Changing the order of properties in existing API responses
+Changing the length or format of opaque strings (such as object IDs, error messages, and other human-readable strings)
+Best Practice

@@ -1,0 +1,10 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+$L35
+Execute Adopted Device Action · Network · UniFi API
+Perform an action on an specific adopted device. The request body must include the action name and any applicable input arguments.

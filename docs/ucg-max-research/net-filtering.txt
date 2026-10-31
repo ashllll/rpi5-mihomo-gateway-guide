@@ -1,0 +1,180 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+$L35
+Filtering · Network · UniFi API
+Explains how to use the filter query parameter for advanced querying across list endpoints,
+including supported property types, syntax, and operators.
+GET
+DELETE
+filter
+Filtering Syntax
+Filtering follows a structured, URL-safe syntax with three types of expressions.
+1. Property Expressions
+<property>.<function>(<arguments>)
+Examples:
+id.eq(123)
+id
+123
+name.isNotNull()
+name
+createdAt.in(2025-01-01, 2025-01-05)
+createdAt
+2025-01-01
+2025-01-05
+2. Compound Expressions
+<logical-operator>(<expressions>)
+Examples:
+and(name.isNull(), createdAt.gt(2025-01-01))
+name
+and
+createdAt
+2025-01-01
+or(name.isNull(), expired.isNull(), expiresAt.isNull())
+any
+name
+expired
+expiresAt
+3. Negation Expressions
+not(<expression>)
+Example:
+not(name.like('guest*'))
+guest
+Filterable Property Types
+The table below lists all supported property types.
+Type
+Examples
+Syntax
+STRING
+'Hello, ''World''!'
+Must be wrapped in single quotes. To escape a single quote, use another single quote.
+INTEGER
+123
+Must start with a digit.
+DECIMAL
+123
+123.321
+Must start with a digit. Can include a decimal point (.).
+TIMESTAMP
+2025-01-29
+2025-01-29T12:39:11Z
+Must follow ISO 8601 format (date or date-time).
+BOOLEAN
+true
+false
+true
+false
+$L49
+UUID
+550e8400-e29b-41d4-a716-446655440000
+Must be a valid UUID format (8-4-4-4-12).
+SET(STRING|INTEGER|DECIMAL|TIMESTAMP|UUID)
+[1, 2, 3, 4, 5]
+A set of (unique) values.
+Filtering Functions
+The table below lists available filtering functions, their arguments, and applicable property types:
+Function
+Arguments
+Semantics
+Supported property types
+isNull
+is null
+all types
+isNotNull
+is not null
+all types
+eq
+equals
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+BOOLEAN
+UUID
+ne
+not equals
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+BOOLEAN
+UUID
+gt
+greater than
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+ge
+greater than or equals
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+lt
+less than
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+le
+less than or equals
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+like
+matches pattern
+STRING
+in
+1 or more
+one of
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+notIn
+1 or more
+not one of
+STRING
+INTEGER
+DECIMAL
+TIMESTAMP
+UUID
+isEmpty
+is empty
+SET
+contains
+contains
+SET
+containsAny
+1 or more
+contains any of
+SET
+containsAll
+1 or more
+contains all of
+SET
+containsExactly
+1 or more
+contains exactly
+SET
+like
+like
+single
+type.like('type.')
+type1
+type100
+any number
+name.like('guest*')
+guest1
+guest100

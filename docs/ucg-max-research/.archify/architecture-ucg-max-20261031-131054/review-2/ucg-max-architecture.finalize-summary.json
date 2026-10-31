@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "/Users/llll/code/树莓派网关/docs/ucg-max-research/.archify/architecture-ucg-max-20261031-131054/candidate.json",
+    "sha256": "36d14ffca83c1a2e8a0778631141b63183372aee3f6ea71a890b4c35455bb594",
+    "bytes": 4461
+  },
+  "artifact": {
+    "path": "/Users/llll/code/树莓派网关/docs/ucg-max-research/.archify/architecture-ucg-max-20261031-131054/ucg-max-architecture.html",
+    "sha256": "13538051d35abef8bc15dd4f40bb1e667b339272f49d89e45cf538118e25d5cc",
+    "bytes": 760635
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "/Users/llll/code/树莓派网关/docs/ucg-max-research/.archify/architecture-ucg-max-20261031-131054/review-2/ucg-max-architecture.finalize.json",
+    "summaryReceipt": "/Users/llll/code/树莓派网关/docs/ucg-max-research/.archify/architecture-ucg-max-20261031-131054/review-2/ucg-max-architecture.finalize-summary.json",
+    "browserCheckReceipt": "/Users/llll/code/树莓派网关/docs/ucg-max-research/.archify/architecture-ucg-max-20261031-131054/review-2/ucg-max-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "update_available",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.2.0",
+    "releaseNotes": "https://github.com/tt-a1i/archify/releases/tag/v3.2.0",
+    "severity": "normal",
+    "checkedAt": "2026-10-31T05:10:54.974Z",
+    "source": "cache",
+    "noticeRequired": true,
+    "noticeText": "Archify update: 3.0.1 → 3.2.0. A previous check at 2026-10-31T05:10:54.974Z found a newer release. Release notes: https://github.com/tt-a1i/archify/releases/tag/v3.2.0. The installed Skill has not changed; ask to snooze or ignore this reminder.",
+    "eventKey": "archify@sha256:70e210265c59f24dcbdf2a502ff671104b5454e7ee7d3554aecd86bad32384f5"
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2344
+}

@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UCG Max 交互演示 · 架构 / 工作原理 / API 链路</title>
+<style>
+  :root{
+    --bg:#0b0e14; --bg2:#11161f; --card:#151b26; --card2:#1a2230;
+    --fg:#e6edf3; --muted:#8b98a9; --line:#25303f; --line2:#31405a;
+    --accent:#4cc9f0; --accent2:#7cf5c4; --warn:#ffb86b; --danger:#ff6b81;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  html[data-theme="light"]{
+    --bg:#f7f9fc; --bg2:#eef2f8; --card:#ffffff; --card2:#f2f6fb;
+    --fg:#121a26; --muted:#5b6b7f; --line:#dde5ef; --line2:#c9d6e6;
+    --accent:#0b78c2; --accent2:#0f9f7a; --warn:#a35b00; --danger:#c0223b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  a{color:var(--accent)}
+  code,pre{font-family:var(--mono)}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+
+  header.hero{background:linear-gradient(160deg,var(--bg2),var(--bg));border-bottom:1px solid var(--line);padding:34px 0 26px}
+  .hero h1{margin:0 0 6px;font-size:30px;letter-spacing:-.5px}
+  .hero .sub{color:var(--muted);font-size:14px}
+  .hero .badges{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+  .badge{font-size:12px;border:1px solid var(--line2);border-radius:999px;padding:3px 10px;color:var(--muted);background:var(--card)}
+  .badge b{color:var(--fg);font-weight:600}
+  .topbar{position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .topbar .inner{display:flex;gap:6px;align-items:center;padding:8px 0;overflow:auto}
+  .topbar a{color:var(--muted);text-decoration:none;font-size:13px;padding:5px 10px;border-radius:8px;white-space:nowrap}
+  .topbar a:hover{background:var(--card);color:var(--fg)}
+  .themebtn{margin-left:auto;border:1px solid var(--line2);background:var(--card);color:var(--fg);border-radius:8px;padding:5px 12px;cursor:pointer;font-size:13px}
+
+  section{padding:34px 0;border-bottom:1px solid var(--line)}
+  h2{font-size:21px;margin:0 0 4px;letter-spacing:-.2px}
+  h2 .num{color:var(--accent);font-family:var(--mono);font-size:14px;margin-right:8px}
+  .lead{color:var(--muted);margin:0 0 18px;font-size:14px}
+
+  .grid{display:grid;gap:14px}
+  .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  @media(max-width:900px){.g3,.g4,.g2{grid-template-columns:1fr 1fr}}
+  @media(max-width:600px){.g3,.g4,.g2{grid-template-columns:1fr}}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .card h3{margin:0 0 8px;font-size:15px}
+  .card p{margin:6px 0 0;color:var(--muted);font-size:13.5px}
+  .kpi{font-size:26px;font-weight:700;letter-spacing:-.5px}
+  .kpi small{font-size:13px;color:var(--muted);font-weight:500;margin-left:4px}
+
+  .spec{display:grid;grid-template-columns:150px 1fr;gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .spec div{padding:9px 14px;border-bottom:1px solid var(--line);font-size:13.5px}
+  .spec div:nth-child(odd){background:var(--card2);color:var(--muted)}
+  .spec div:nth-last-child(-n+2){border-bottom:0}
+
+  .frame{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#0b0e14}
+  .frame iframe{display:block;width:100%;height:640px;border:0}
+  .frame .cap{padding:8px 14px;font-size:12.5px;color:var(--muted);border-top:1px solid var(--line)}
+
+  .flow{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+  .flow .step{flex:1 1 150px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;position:relative}
+  .flow .step b{display:block;font-size:13.5px;margin-bottom:4px}
+  .flow .step span{font-size:12.5px;color:var(--muted)}
+  .flow .step::after{content:"→";position:absolute;right:-14px;top:50%;transform:translateY(-50%);color:var(--line2)}
+  .flow .step:last-child::after{content:""}
+
+  .api-toggle{display:flex;gap:8px;margin:12px 0 16px;flex-wrap:wrap}
+  .tab{border:1px solid var(--line2);background:var(--card);color:var(--muted);border-radius:9px;padding:7px 14px;cursor:pointer;font-size:13px}
+  .tab.on{color:var(--fg);border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
+  .pane{display:none}
+  .pane.on{display:block}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;background:var(--card2)}
+  td code{font-size:12.5px}
+  .filter{width:100%;margin:4px 0 12px;padding:9px 12px;border-radius:9px;border:1px solid var(--line2);background:var(--card);color:var(--fg);font-size:13px}
+
+  /* sequence player */
+  .player{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .player .ctrl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .btn{border:1px solid var(--line2);background:var(--card2);color:var(--fg);border-radius:9px;padding:7px 14px;cursor:pointer;font-size:13px}
+  .btn.primary{border-color:var(--accent);color:var(--accent)}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .dots{display:flex;gap:6px;margin-left:auto}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--line2)}
+  .dot.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .dot.done{background:var(--accent2)}
+  .reqline{font-family:var(--mono);font-size:13px;background:#0a0f16;border:1px solid var(--line2);border-radius:10px;padding:12px 14px;min-height:46px;white-space:pre-wrap;word-break:break-all}
+  html[data-theme="light"] .reqline{background:#0f1a24;color:#d7e3ee}
+  .reqline .m{color:var(--accent2);font-weight:700}
+  .reqline .cursor{display:inline-block;width:8px;height:15px;background:var(--accent);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .resp{font-family:var(--mono);font-size:12.5px;background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-top:10px;white-space:pre-wrap;word-break:break-word;min-height:120px}
+  .note{margin-top:10px;font-size:13px;color:var(--muted)}
+  .tag{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:6px;border:1px solid var(--line2);color:var(--muted);margin-right:6px}
+
+  details{border:1px solid var(--line);border-radius:12px;padding:0 14px;background:var(--card);margin-top:12px}
+  details summary{cursor:pointer;padding:12px 0;font-weight:600;font-size:14px}
+  details[open] summary{border-bottom:1px solid var(--line);margin-bottom:10px}
+  details ul{margin:0 0 12px;padding-left:20px;color:var(--muted);font-size:13.5px}
+  details li{margin:4px 0}
+
+  .warnbox{border-left:3px solid var(--warn);background:color-mix(in srgb,var(--warn) 10%,transparent);border-radius:0 10px 10px 0;padding:10px 14px;font-size:13.5px;margin-top:12px}
+  .okbox{border-left:3px solid var(--accent2);background:color-mix(in srgb,var(--accent2) 10%,transparent);border-radius:0 10px 10px 0;padding:10px 14px;font-size:13.5px;margin-top:12px}
+  footer{padding:26px 0 48px;color:var(--muted);font-size:12.5px}
+  .sources a{display:block;padding:4px 0;font-size:13px;text-decoration:none}
+  .sources a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>UCG Max · 交互演示</h1>
+    <div class="sub">UniFi Cloud Gateway Max（<code>UCG-Max</code>）— 架构、工作原理与 API 链路。依据 <code>00-UCG-Max-调研报告.md</code> v1.4（2026-10-31），数据均来自 ui.com / developer.ui.com 官方资料与本人实测。</div>
+    <div class="badges">
+      <span class="badge">对象：<b>Ubiquiti UCG-Max</b></span>
+      <span class="badge">固件 <b>UniFi OS 5.1.33 / Network 10.6.109</b></span>
+      <span class="badge">API <b>Network v11.0.97 · Site Manager v1.0.0</b></span>
+      <span class="badge">实测 <b>2026-10-31</b></span>
+      <span class="badge">密钥 <b>X-API-Key</b></span>
+    </div>
+  </div>
+</header>
+
+<nav class="topbar">
+  <div class="wrap inner">
+    <a href="#obj">对象定位</a>
+    <a href="#how">工作原理</a>
+    <a href="#arch">架构图</a>
+    <a href="#api">API 链路</a>
+    <a href="#live">实测记录</a>
+    <a href="#refs">参考资料</a>
+    <button class="themebtn" id="theme">☀︎ 亮色</button>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<section id="obj">
+  <h2><span class="num">01</span>对象定位</h2>
+  <p class="lead">背景里的「unify 有线网关」= Ubiquiti 的 <b>UniFi</b> 品牌（拼写差异已在报告说明）；准确型号是 UniFi Cloud Gateway Max，slug <code>UCG-Max</code>，不是独立「纯网关」——它是「UniFi OS 主机 + 网关」二合一，本身没有 WiFi 射频。</p>
+  <div class="grid g4">
+    <div class="card"><div class="kpi">5<small>× 2.5GbE</small></div><p>RJ45，默认 1 WAN，最多可配 4 个 WAN</p></div>
+    <div class="card"><div class="kpi">2.3<small>Gbps IPS</small></div><p>IDS/IPS 吞吐，需 UniFi OS 4.1+</p></div>
+    <div class="card"><div class="kpi">3<small>GB RAM</small></div><p>四核 ARM Cortex-A53 @1.5 GHz</p></div>
+    <div class="card"><div class="kpi">2<small>TB NVMe</small></div><p>可选存储，用于 Protect 录像</p></div>
+  </div>
+
+  <div class="grid g2" style="margin-top:14px">
+    <div class="spec">
+      <div>型号 / slug</div><div>UCG-Max（SKU：UCG-Max-US 等地区变体）</div>
+      <div>尺寸 / 重量</div><div>141.8 × 127.6 × 30 mm；裸机 460 g，带 SSD 519 g</div>
+      <div>供电 / 功耗</div><div>USB-C 5V/5A（含适配器）；最大 16.1 W</div>
+      <div>散热 / 材质</div><div>无风扇；聚碳酸酯外壳；0.96" LCM 状态屏</div>
+      <div>工作温度</div><div>-10 ~ 40 °C；认证 CE/FCC/IC/Anatel/SRRC；NDAA Compliant</div>
+      <div>容量</div><div>30+ UniFi 设备 / 300+ 客户端；摄像头 15 HD · 8 2K · 5 4K</div>
+      <div>应用套件</div><div>Network · Protect · Access · Talk · Connect（均支持）</div>
+    </div>
+    <div class="card">
+      <h3>版本与 SKU 说明</h3>
+      <p>存储分四档：No Storage（<code>UCG-Max-NS</code>，$199）、512 GB、1 TB、2 TB。其中 NS 有独立规格页，与标准版仅认证写法略有差异（Anatel 编号）。</p>
+      <p>店铺里 1 TB / 2 TB 没有独立页面，是同一产品的预装 SSD 配置；第三方 SSD 需另购 <code>UACC-SSD-Tray</code> 托盘（$19，支持 2230–22110）。</p>
+      <p>关键提示：设备是「纯有线」，无 WiFi 射频；无线由 U7 Lite 等 AP 提供。</p>
+      <div class="warnbox">「unify」不是官方品牌名。官方一律写作 <b>UniFi</b>（Ubiquiti Inc.）。</div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <h2><span class="num">02</span>工作原理</h2>
+  <p class="lead">一句话：WAN 进来 → Traffic Flow Engine 做防火墙 / IPS / DPI / 策略路由 → 分发到 LAN/VLAN；同时 UniFi OS 上的 Network 应用负责配置与遥测，Cloud Connector 负责「出站反向长连接」，让云端不穿透也能管理。</p>
+
+  <div class="grid g3">
+    <div class="card"><h3>① 转发面（数据流）</h3><p>数据包从 WAN 口进入，经 Zone-Based Firewall、IPS/IDS（55,000+ 签名）、DPI、应用识别，按策略路由 / QoS / 多 WAN 负载均衡后从 LAN 口或 VLAN 出去。</p></div>
+    <div class="card"><h3>② 控制面（配置）</h3><p>UniFi OS 承载 Network / Protect 等应用；本地 UI 与 Local API 直连 <code>https://consoleIP</code>；云端经 Site Manager 下发或经 Cloud Connector 代理。</p></div>
+    <div class="card"><h3>③ 存储面（可选）</h3><p>NVMe（≤2 TB）走 PCIe Gen3×2，供 Protect 存录像；无 SSD 的版本不影响路由转发，只是不能本地录像。</p></div>
+  </div>
+
+  <div class="flow">
+    <div class="step"><b>Internet / ISP</b><span>PPPoE 双拨，WAN 2.5GbE</span></div>
+    <div class="step"><b>Traffic Flow Engine</b><span>防火墙 · IPS · DPI · 策略路由</span></div>
+    <div class="step"><b>LAN / VLAN</b><span>2.5GbE ×4，VLAN 分段</span></div>
+    <div class="step"><b>Clients</b><span>AP、终端、摄像头</span></div>
+    <div class="step"><b>遥测 / 配置</b><span>UniFi OS + Cloud Connector</span></div>
+  </div>
+
+  <details open>
+    <summary>官方明确 vs 合理归纳（保留证据等级）</summary>
+    <ul>
+      <li><b>官方明确：</b>5×2.5GbE、IPS 2.3 Gbps（需 UniFi OS 4.1+）、NVMe ≤2 TB、PCIe Gen3×2、无风扇、支持 Site Magic / Zone-Based Firewall / DPI / 内容过滤。</li>
+      <li><b>合理归纳：</b>「无 WiFi 射频」来自规格页无射频项 + 管理方式仅 Ethernet/Bluetooth；「纯网关 + 主机」来自 Application Suite 与 UniFi OS 的描述。</li>
+      <li><b>未公开：</b>具体 SoC 型号、NAT 硬件加速实现、单流吞吐上限、风扇策略（无风扇型号无此项）。</li>
+    </ul>
+  </details>
+</section>
+
+<section id="arch">
+  <h2><span class="num">03</span>架构图（可交互）</h2>
+  <p class="lead">由 <code>archify</code> 生成：支持缩放、拖动、深浅色、节点高亮；这是单文件 HTML，可独立打开。</p>
+  <div class="frame">
+    <iframe src=".archify/architecture-ucg-max-20261031-131054/ucg-max-architecture.html" title="UCG Max 架构图" loading="lazy"></iframe>
+    <div class="cap">图内节点：Internet / UCG Max（Traffic Flow Engine）/ LAN / Clients / NVMe / Site Manager / Cloud Connector / Local API / Site Manager API</div>
+  </div>
+</section>
+
+<section id="api">
+  <h2><span class="num">04</span>API 链路</h2>
+  <p class="lead">两套 API、两把 key，互相不可互换：<b>云侧 Site Manager</b>（<code>api.ui.com</code>，官方标注只读）与 <b>本地 console</b>（<code>https://consoleIP/proxy/network/integration</code>，可读写）。</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3>认证方式</h3>
+      <p>HTTP 头 <code>X-API-Key</code>（llms.txt 写作 <code>X-API-KEY</code>，头名大小写不敏感）。密钥在 <code>unifi.ui.com/settings/api-keys</code> 生成，<b>只显示一次</b>；可设 1/3/6/12 个月有效期。</p>
+      <p>Scope：Site Manager（跨站概览）与 UniFi Applications（Network / Protect / InnerSpace）分开勾选。</p>
+    </div>
+    <div class="card">
+      <h3>两个入口</h3>
+      <p>云：<code>https://api.ui.com/v1/...</code>，控制台数据走 <code>/v1/connector/consoles/{consoleId}/proxy/network/integration/...</code></p>
+      <p>本地：<code>https://{consoleIP}/proxy/network/integration/v1/...</code>（需本地签发的 key）</p>
+    </div>
+  </div>
+
+  <div class="api-toggle">
+    <button class="tab on" data-pane="p-seq">调用时序（可播放）</button>
+    <button class="tab" data-pane="p-ep">端点速查</button>
+    <button class="tab" data-pane="p-lim">限制与错误</button>
+  </div>
+
+  <div class="pane on" id="p-seq">
+    <div class="player">
+      <div class="ctrl">
+        <button class="btn primary" id="play">▶ 播放</button>
+        <button class="btn" id="prev" disabled>上一步</button>
+        <button class="btn" id="next">下一步</button>
+        <button class="btn" id="reset">重置</button>
+        <span class="dots" id="dots"></span>
+      </div>
+      <div class="reqline" id="req">点击「播放」开始 —— 从建 key 到取回设备实时统计的完整链路</div>
+      <div class="resp" id="resp">// 响应将在这里显示</div>
+      <div class="note" id="note"></div>
+    </div>
+  </div>
+
+  <div class="pane" id="p-ep">
+    <input class="filter" id="epfilter" placeholder="过滤端点，例如 devices / firewall / sites …">
+    <table>
+      <thead><tr><th style="width:90px">方法</th><th>路径（Network v11.0.97，节选）</th><th style="width:38%">用途</th></tr></thead>
+      <tbody id="eptbody">
+        <tr><td><code>GET</code></td><td><code>/v1/sites</code></td><td>站点列表（取 siteId，UUID）</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/sites/{siteId}/devices</code></td><td>设备列表，支持分页与 filter</td></tr>
+        <tr><td><code>POST</code></td><td><code>/v1/sites/{siteId}/devices</code></td><td>Adopt Devices（接纳设备）</td></tr>
+        <tr><td><code>DELETE</code></td><td><code>/v1/sites/{siteId}/devices/{deviceId}</code></td><td>Remove（Unadopt）设备</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/sites/{siteId}/devices/{deviceId}/statistics/latest</code></td><td>最新统计（CPU/内存/启动时长）</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/sites/{siteId}/clients</code></td><td>客户端列表</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/firewall/policies</code></td><td>防火墙策略 CRUD</td></tr>
+        <tr><td><code>GET/POST</code></td><td><code>/v1/sites/{siteId}/firewall/policies/ordering</code></td><td>策略排序</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/acl-rules</code></td><td>ACL 规则（含 ordering）</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/networks</code></td><td>网络 / VLAN 配置</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/switching/...</code></td><td>交换机端口、LAG 等</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/dns/policies</code></td><td>DNS 策略</td></tr>
+        <tr><td><code>GET/POST/PUT</code></td><td><code>/v1/sites/{siteId}/wifi/broadcasts</code></td><td>WiFi 广播（创建体 13 个必填字段）</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/sites/{siteId}/vpn/servers</code></td><td>VPN 服务器（<b>只读</b>）</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/sites/{siteId}/hotspot/vouchers</code></td><td>热点券（分页默认 100/上限 1000）</td></tr>
+        <tr><td><code>GET</code></td><td><code>/v1/info</code></td><td>应用版本信息（本地实测 200）</td></tr>
+      </tbody>
+    </table>
+    <div class="note">完整规范：Network 44 路径 / 73 操作；Site Manager 10 路径 / 14 操作。</div>
+  </div>
+
+  <div class="pane" id="p-lim">
+    <div class="grid g2">
+      <div class="card">
+        <h3>分页与过滤</h3>
+        <p>Network：<code>offset/limit</code>，默认 25，上限 200（热点券例外 100/1000）；响应包裹 <code>{count,data,limit,offset,totalCount}</code>。</p>
+        <p>Site Manager：<code>pageSize + nextToken</code>，单页 ≤500；响应 <code>{data,httpStatusCode,traceId,nextToken}</code>。</p>
+        <p>filter 语法：<code>property.function(args)</code>，支持 <code>and/or/not</code>、<code>like/in/eq/gt/le</code> 等；可过滤属性写在每个 operation 的 description 表里。</p>
+      </div>
+      <div class="card">
+        <h3>限流与超时</h3>
+        <p>Site Manager：稳定版 10,000 请求/分钟；EA 100/分钟；超限 429 + <code>Retry-After</code>。</p>
+        <p>Cloud Connector：每个 console 100 请求/分钟；单请求超时 25 秒；响应体上限 10 MB；console 固件需 ≥ 5.0.3。</p>
+        <p>Network 本地 API：官方未公布限流数值。</p>
+      </div>
+    </div>
+    <details>
+      <summary>错误体两种形状</summary>
+      <ul>
+        <li>Network：7 字段 <code>code / message / requestId / requestPath / statusCode / statusName / timestamp</code></li>
+        <li>Site Manager：4 字段 <code>code / httpStatusCode / message / traceId</code>，含 <code>RATE_LIMIT</code></li>
+      </ul>
+    </details>
+  </div>
+</section>
+
+<section id="live">
+  <h2><span class="num">05</span>实测记录（2026-10-31）</h2>
+  <p class="lead">在同一台 UCG Max 上验证「云侧 key 与本地 key 不可互换」及分页/过滤行为（MAC、IP、UUID 已脱敏）。</p>
+  <div class="grid g3">
+    <div class="card"><h3>本地 key ✅</h3><p><code>GET https://192.168.0.1/proxy/network/integration/v1/info</code> → 200 <code>{"applicationVersion":"10.6.109"}</code></p></div>
+    <div class="card"><h3>云侧 key 直连本地 ❌</h3><p>同一请求 → 401；云侧 key 只能走 <code>api.ui.com</code> 的 Connector 代理。</p></div>
+    <div class="card"><h3>Connector 路径 ✅</h3><p><code>/v1/hosts</code> → <code>reportedState.name = "Cloud Gateway Max"</code>；代理到 <code>/v1/info</code> 同样是 10.6.109。</p></div>
+  </div>
+  <details open>
+    <summary>关键行为</summary>
+    <ul>
+      <li><code>filter=state.eq('ONLINE')</code> 命中 UCG Max（固件 5.1.33）与 U7 Lite；非法 filter 返回 400，错误体 7 字段与文档一致。</li>
+      <li><code>limit=500</code> 被服务端夹到 200；<code>clients</code> 的 <code>totalCount</code> 为 26。</li>
+      <li><code>statistics/latest</code> 返回 CPU 36.2% / 内存 69.6% / 启动时长等字段。</li>
+      <li>响应头未见 <code>x-ratelimit-*</code>；429 与写操作尚未实测（报告已列为未验证项）。</li>
+    </ul>
+  </details>
+</section>
+
+<section id="refs">
+  <h2><span class="num">06</span>参考资料</h2>
+  <div class="sources">
+    <a href="https://techspecs.ui.com/unifi/cloud-gateways/ucg-max" target="_blank" rel="noopener">techspecs.ui.com — UniFi Cloud Gateway Max（规格）</a>
+    <a href="https://store.ui.com/us/en/products/ucg-max" target="_blank" rel="noopener">store.ui.com — Cloud Gateway Max（SKU/价格）</a>
+    <a href="https://developer.ui.com/llms.txt" target="_blank" rel="noopener">developer.ui.com — llms.txt（官方 API 索引）</a>
+    <a href="https://developer.ui.com/network/v11.0.97/openapi.json" target="_blank" rel="noopener">Network API v11.0.97 — OpenAPI 规范</a>
+    <a href="https://developer.ui.com/site-manager/v1.0.0/openapi.json" target="_blank" rel="noopener">Site Manager API v1.0.0 — OpenAPI 规范</a>
+    <a href="https://developer.ui.com/network/v11.0.97/filtering" target="_blank" rel="noopener">Network API — Filtering 语法</a>
+    <a href="https://developer.ui.com/network/v11.0.97/error-handling" target="_blank" rel="noopener">Network API — 错误处理</a>
+    <a href="https://developer.ui.com/network/v11.0.97/quick_start.ansible" target="_blank" rel="noopener">Network API — Ansible 快速开始</a>
+    <a href="https://help.ui.com/hc/en-us/articles/235247068-Adding-SSH-Keys-to-UniFi-Devices" target="_blank" rel="noopener">help.ui.com — 给 UniFi 设备添加 SSH 公钥</a>
+    <a href="https://github.com/tt-a1i/archify" target="_blank" rel="noopener">Archify — 本页架构图工具</a>
+  </div>
+  <footer>UGCMax 调研演示页 · 生成于 2026-10-31 · 主文档：00-UCG-Max-调研报告.md（v1.4）· 本页为单文件 HTML，可离线打开；架构图为其子页面。</footer>
+</section>
+
+</div>
+
+<script>
+(function(){
+  // theme
+  var root=document.documentElement, btn=document.getElementById('theme');
+  btn.addEventListener('click',function(){
+    var light=root.getAttribute('data-theme')==='light';
+    root.setAttribute('data-theme',light?'':'light');
+    btn.textContent=light?'☀︎ 亮色':'☾ 暗色';
+  });
+
+  // tabs
+  document.querySelectorAll('.tab').forEach(function(t){
+    t.addEventListener('click',function(){
+      document.querySelectorAll('.tab').forEach(function(x){x.classList.remove('on')});
+      document.querySelectorAll('.pane').forEach(function(x){x.classList.remove('on')});
+      t.classList.add('on');
+      document.getElementById(t.dataset.pane).classList.add('on');
+    });
+  });
+
+  // endpoint filter
+  var f=document.getElementById('epfilter'), tb=document.getElementById('eptbody');
+  f.addEventListener('input',function(){
+    var q=f.value.trim().toLowerCase();
+    Array.prototype.forEach.call(tb.rows,function(r){
+      r.style.display = (!q || r.textContent.toLowerCase().indexOf(q)>-1) ? '' : 'none';
+    });
+  });
+
+  // sequence player
+  var steps=[
+    {m:'POST',u:'https://unifi.ui.com/settings/api-keys',t:'① 建 Key（界面操作）',
+     r:'{\n  "name": "ucgmax-demo",\n  "scopes": ["site-manager", "network"],\n  "expiresIn": "1 month"\n}\n\n// 明文 key 只显示一次：MQjj…c1xc',
+     n:'生产环境一次勾选所需 Scope；用完即 Remove，避免长期凭证。'},
+    {m:'GET',u:'https://api.ui.com/v1/hosts',t:'② 找 console（hostId）',
+     r:'{\n  "data": [{\n    "hostId": "6C63F881…:365382398",\n    "reportedState": { "name": "Cloud Gateway Max", "hardware": { "type": "ucg" } },\n    "controllers": ["network","protect","access","talk","connect","innerspace"]\n  }]\n}',
+     n:'云侧入口第一步：拿 hostId；组织 key 可看整个组织，非组织 key 只能看自己。'},
+    {m:'GET',u:'https://api.ui.com/v1/connector/consoles/{hostId}/proxy/network/integration/v1/info',t:'③ 探活 + 版本',
+     r:'{\n  "applicationVersion": "10.6.109"\n}',
+     n:'Cloud Connector 代理：console 与云端保持出站长连接，所以不需要端口转发。'},
+    {m:'GET',u:'…/proxy/network/integration/v1/sites',t:'④ 取本地 siteId',
+     r:'{\n  "count": 1,\n  "data": [{ "id": "88f7af54-98f8-306a-a1c7-c9349722b1f6", "name": "Default" }],\n  "limit": 25, "offset": 0, "totalCount": 1\n}',
+     n:'注意：Network 的 siteId 是 UUID，与 Site Manager 的 24 位 hex siteId 不是同一个东西。'},
+    {m:'GET',u:'…/v1/sites/{siteId}/devices?filter=state.eq(\u0027ONLINE\u0027)&limit=50',t:'⑤ 过滤在线设备',
+     r:'{\n  "data": [\n    { "id": "…", "name": "Cloud Gateway Max", "model": "UCG Max", "firmwareVersion": "5.1.33", "state": "ONLINE" },\n    { "id": "…", "name": "U7 Lite", "model": "U7 Lite", "state": "ONLINE" }\n  ],\n  "limit": 50, "totalCount": 2\n}',
+     n:'filter 属性来自该 operation description 里的「Filterable properties」表；limit 上限 200。'},
+    {m:'GET',u:'…/v1/sites/{siteId}/devices/{deviceId}/statistics/latest',t:'⑥ 读实时统计',
+     r:'{\n  "cpuUtilizationPct": 36.2,\n  "memoryUtilizationPct": 69.6,\n  "uptimeSec": 1284401\n}',
+     n:'典型监控入口：CP U/内存/uptime；错误响应含 requestId，便于对日志。'}
+  ];
+
+  var i=-1, timer=null;
+  var req=document.getElementById('req'), resp=document.getElementById('resp'),
+      note=document.getElementById('note'), dots=document.getElementById('dots'),
+      bPlay=document.getElementById('play'), bPrev=document.getElementById('prev'), bNext=document.getElementById('next');
+
+  steps.forEach(function(){var d=document.createElement('span');d.className='dot';dots.appendChild(d)});
+
+  function render(idx){
+    var s=steps[idx];
+    req.innerHTML='<span class="m">'+s.m+'</span> '+s.u+'<span class="cursor"></span>';
+    resp.textContent=s.r;
+    note.textContent=s.t+' — '+s.n;
+    Array.prototype.forEach.call(dots.children,function(d,k){
+      d.className='dot'+(k<idx?' done':k===idx?' on':'');
+    });
+    bPrev.disabled=idx<=0; bNext.disabled=idx>=steps.length-1;
+  }
+  function next(){ if(i<steps.length-1){i++;render(i)} }
+  function prev(){ if(i>0){i--;render(i)} }
+
+  bNext.addEventListener('click',function(){stop();next()});
+  bPrev.addEventListener('click',function(){stop();prev()});
+  document.getElementById('reset').addEventListener('click',function(){
+    stop(); i=-1; req.textContent='点击「播放」开始 —— 从建 key 到取回设备实时统计的完整链路';
+    resp.textContent='// 响应将在这里显示'; note.textContent='';
+    Array.prototype.forEach.call(dots.children,function(d){d.className='dot'});
+    bPrev.disabled=true;bNext.disabled=false;
+  });
+  function stop(){ if(timer){clearInterval(timer);timer=null} bPlay.textContent='▶ 播放'; }
+  bPlay.addEventListener('click',function(){
+    if(timer){stop();return}
+    if(i>=steps.length-1){i=-1}
+    bPlay.textContent='⏸ 暂停';
+    next();
+    timer=setInterval(function(){
+      if(i>=steps.length-1){stop();return}
+      next();
+    },1600);
+  });
+})();
+</script>
+</body>
+</html>

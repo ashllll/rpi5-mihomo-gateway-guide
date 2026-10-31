@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "UCG Max 系统架构",
+    "output": ".archify/.archify/architecture-ucg-max-20261031-131054/ucg-max-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "internet",
+      "type": "external",
+      "label": "Internet / ISP",
+      "sublabel": "China Mobile · PPPoE ×2",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "ucg",
+      "type": "backend",
+      "label": "UCG Max",
+      "sublabel": "Traffic Flow Engine · UniFi OS 5.1.33",
+      "pos": [
+        260,
+        286
+      ],
+      "size": [
+        210,
+        92
+      ]
+    },
+    {
+      "id": "lan",
+      "type": "backend",
+      "label": "LAN",
+      "sublabel": "2.5GbE ×4 · VLAN",
+      "pos": [
+        540,
+        300
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "Clients",
+      "sublabel": "AP / 终端 / 摄像头",
+      "pos": [
+        760,
+        300
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "ssd",
+      "type": "database",
+      "label": "NVMe 存储",
+      "sublabel": "≤ 2 TB · Protect 录像",
+      "pos": [
+        275,
+        452
+      ],
+      "size": [
+        180,
+        60
+      ]
+    },
+    {
+      "id": "cloud",
+      "type": "cloud",
+      "label": "UniFi Site Manager",
+      "sublabel": "api.ui.com",
+      "pos": [
+        40,
+        132
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "connector",
+      "type": "backend",
+      "label": "Cloud Connector",
+      "sublabel": "出站长连接 · 25 s / 10 MB",
+      "pos": [
+        286,
+        132
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "localapi",
+      "type": "security",
+      "label": "Local API",
+      "sublabel": "/proxy/network/integration/v1",
+      "pos": [
+        536,
+        126
+      ],
+      "size": [
+        200,
+        76
+      ]
+    },
+    {
+      "id": "uiapi",
+      "type": "security",
+      "label": "Site Manager API",
+      "sublabel": "X-API-Key · 只读",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        180,
+        60
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "UniFi OS 控制台：UCG Max（Debian 11 · aarch64）",
+      "wraps": [
+        "ucg",
+        "connector",
+        "localapi",
+        "ssd"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "本地网络 192.168.0.0/24",
+      "wraps": [
+        "lan",
+        "clients"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "wan",
+      "from": "internet",
+      "to": "ucg",
+      "label": "WAN 2.5GbE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "lan-link",
+      "from": "ucg",
+      "to": "lan",
+      "label": "LAN 2.5GbE"
+    },
+    {
+      "id": "lan-clients",
+      "from": "lan",
+      "to": "clients"
+    },
+    {
+      "id": "nvr",
+      "from": "ucg",
+      "to": "ssd",
+      "label": "NVMe",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "sm-api",
+      "from": "uiapi",
+      "to": "cloud",
+      "label": "HTTPS",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "cloud-connector",
+      "from": "cloud",
+      "to": "connector",
+      "label": "出站长连接",
+      "variant": "emphasis"
+    },
+    {
+      "id": "connector-proxy",
+      "from": "connector",
+      "to": "localapi",
+      "label": "代理"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "转发面",
+      "items": [
+        "WAN → Traffic Flow Engine → LAN/VLAN",
+        "防火墙 / IPS-IDS / DPI / 策略路由",
+        "2.5GbE ×5，最大 4 个 WAN"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "控制面",
+      "items": [
+        "本地 UI 与 Local API 直连 console",
+        "云端经 Site Manager + Cloud Connector 代理",
+        "SSH root 免密（dgw_auto）已配置"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "凭据边界",
+      "items": [
+        "云侧 Site Manager key：官方只读",
+        "本地 console key：可读写，两者不可互换",
+        "Cloud Connector 每 console 100 req/min"
+      ]
+    }
+  ]
+}

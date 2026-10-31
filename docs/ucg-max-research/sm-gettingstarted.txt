@@ -1,0 +1,32 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+Getting Started · Site Manager · UniFi API
+Site Manager API v1.0 (Official)
+Getting Started
+Site Manager API
+Site Manager API
+https://unifi.ui.com/settings/api-keys
+Authentication
+An API Key serves as a unique identifier used to authenticate API requests. These keys are essential for securing access to your UniFi account and its associated devices. Each key is linked to the specific UI account that generated it, ensuring secure and personalized API interactions.
+Obtaining an API Key
+unifi.ui.com
+Settings → API Keys
+Select "Create New API Key"
+Copy the generated key and store it securely, as it will only be displayed once.
+Ensure the key is properly hashed and securely stored.
+Use the API Key
+Incorporate the API key into the X-API-Key header for all requests. Follow the example provided, replacing YOUR_API_KEY with your actual API key.
+Note:
+Rate Limiting
+The API rate limits are enforced based on the API version:
+Early Access (EA) version
+100 requests per minute
+v1 stable release
+10,000 requests per minute
+429 Too Many Requests
+Retry-After
