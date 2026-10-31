@@ -1,0 +1,78 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+Response Format · Site Manager · UniFi API
+Response Format
+All Site Manager API responses follow a consistent JSON structure to ensure predictable handling across different endpoints.
+Success Response Structure
+A successful API response will have the following format:
+data
+httpStatusCode
+traceId
+nextToken
+Error Response Structure
+All error responses follow this consistent format:
+code
+httpStatusCode
+message
+traceId
+Common Error Codes
+HTTP Status
+Error Code
+Description
+Example Message
+400
+BAD_REQUEST
+The request was improperly formatted or contained invalid parameters
+"invalid request parameters"
+401
+UNAUTHORIZED
+Authentication failed or credentials are missing
+"unauthorized"
+403
+FORBIDDEN
+The authenticated user lacks permission to access the resource
+"insufficient permissions"
+404
+NOT_FOUND
+The requested resource does not exist
+"thing not found: {id}"
+429
+RATE_LIMIT
+The request exceeds the rate limit
+"rate limit exceeded, retry after 5.372786998s"
+500
+SERVER_ERROR
+An unexpected error occurred on the server
+"failed to get resource by ID"
+502
+BAD_GATEWAY
+The server received an invalid response from an upstream server
+"bad gateway"
+Handling Errors
+When handling errors from the API, we recommend:
+Check the HTTP status code
+Parse the error code
+Log the traceId
+Implement retries
+Extract retry information
+Display user-friendly messages
+For rate limit errors, parse the retry time from the header and wait at least that long before retrying.
+Pagination
+/v1/devices
+/v1/hosts
+/v1/sites
+pageSize
+nextToken
+pageSize
+500 items per request
+nextToken
+nextToken
+nextToken
+Example — fetching the first page:
+nextToken
+nextToken

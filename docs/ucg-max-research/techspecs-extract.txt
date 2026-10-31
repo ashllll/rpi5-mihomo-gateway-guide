@@ -1,0 +1,56 @@
+# Tech Specs extract
+- name: UCG-Max
+- title: Cloud Gateway Max
+- shortDescription: Compact 2.5G Cloud Gateway with 30+ UniFi device / 300+ client support, 2.3 Gbps IPS routing, and selectable NVR storage.
+- skuField: None
+- url: https://techspecs.ui.com/unifi/cloud-gateways/ucg-max
+
+
+## SECTION: Overview
+      value: 141.8 x 127.6 x 30 mm
+(5.6 x 5 x 1.2")  [Dimensions]
+      value: 30+  [Managed UniFi Devices]
+      value: (15) HD
+(8) 2K
+(5) 4K  [Managed Cameras]
+      value: 50  [Managed Access Hubs]
+      value: 300+  [Simultaneous Users Connected]
+      value: 4  [Max. WAN Port Count]
+      value: (1) 2.5 GbE RJ45  [Default WAN Ports]
+      value: 5
+(2.5G/1G/100M/10M)  [2.5 GbE RJ45]
+      value: 2.3 Gbps  [IDS/IPS Throughput]
+      value: Compact desktop  [Form Factor]
+
+## SECTION: Security
+      value: 55,000+
+with CyberSecure  [IDS/IPS Signatures]
+
+## SECTION: VPN & SD-WAN
+
+## SECTION: Networking
+      value: 2,000  [MAC Address Table Size]
+
+## SECTION: Hardware
+      value: Selectable NVMe SSD up to 2 TB  [NVR Storage]
+      value: 16.1W  [Max. Power Consumption]
+      value: USB type C (5V DC/5A)  [Power Method]
+      value: USB type C (5V DC/5A) (Adapter included)  [Power Supply]
+      value: 100–240V AC  [Supported Voltage Range]
+      value: 55 BTU/hr  [Heat Dissipation]
+      value: Quad-core ARM® Cortex®-A53 at 1.5 GHz  [Processor]
+      value: 3 GB  [System Memory]
+      value: Without SSD: 460 g (1 lb) 
+With SSD: 519 g (1.1 lb)  [Weight]
+      value: Polycarbonate  [Enclosure Material]
+      value: 0.96" status display  [LCM Display]
+      value: Ethernet
+Bluetooth  [Management]
+      value: (1) Factory reset  [Button]
+      value: Air: ± 8kV, contact: ± 4kV  [ESD/EMP Protection]
+      value: -10 to 40° C (14 to 104° F)  [Ambient Operating Temperature]
+      value: 5 to 95% noncondensing  [Ambient Operating Humidity]
+      value: CE, FCC, IC, Anatel: 09004-24-08356, SRRC  [Certifications]
+
+## SECTION: Software
+      value: UniFi iOS™ and Android™: Version 10.17.2 and later  [Mobile App]

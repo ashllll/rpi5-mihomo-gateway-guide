@@ -1,0 +1,24 @@
+$@1d
+$L25
+$L28
+404
+Page Not Found
+The page you are looking for does not exist.
+Back to Home
+$L35
+Quick Start · Network · UniFi API
+Installation
+Python dependencies
+httpx
+urllib3
+Installing the Ansible Collection
+ubiquiti.unifi_api
+UniFi Network API – Ansible Usage Guide
+Version: v11.0.97
+ubiquiti.unifi_api.network
+Quick Start
+ubiquiti.unifi_api.network
+You can then add tasks to call specific API operations. For example, to retrieve site information, you might add:
+Idempotency
+ubiquiti.unifi_api.network
+Example:
