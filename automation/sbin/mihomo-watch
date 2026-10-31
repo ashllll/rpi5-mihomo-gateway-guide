@@ -23,6 +23,7 @@ umask 077
 env_file=/etc/mihomo-alert.env
 state_dir=/run/mihomo-watch
 alert=/usr/local/sbin/mihomo-alert
+media_config=/etc/mihomo/config.yaml
 
 # Site file first: it may override every default below.
 [ -r "$env_file" ] && . "$env_file"
@@ -37,23 +38,30 @@ bypass_target=${WATCH_DNS_BYPASS_TARGET:-192.0.2.1}
 mkdir -p "$state_dir"
 
 push() { # key message
-  "$alert" --health "$2" "$1" >/dev/null 2>&1 || logger -t mihomo-watch "alert failed: $2"
+  if "$alert" --health "$2" "$1" >/dev/null 2>&1; then
+    return 0
+  fi
+  logger -t mihomo-watch "alert failed: $2"
+  return 1
 }
 trip() { # key message — report once while the condition holds
   [ -e "$state_dir/$1" ] && return 0
-  : >"$state_dir/$1"
-  logger -t mihomo-watch "raised: $2"
-  push "$1" "$2"
+  if push "$1" "$2"; then
+    : >"$state_dir/$1"
+    logger -t mihomo-watch "raised: $2"
+  fi
 }
 relax() { # key label — drop the condition and report the recovery
   [ -e "$state_dir/$1" ] || return 0
-  rm -f "$state_dir/$1"
-  logger -t mihomo-watch "cleared: $2"
-  push "$1-recovered" "$title | 已恢复：$2"
+  if push "$1-recovered" "$title | 已恢复：$2"; then
+    rm -f "$state_dir/$1"
+    logger -t mihomo-watch "cleared: $2"
+  fi
 }
 
 check_units() {
-  failed=$(systemctl --failed --plain --no-legend 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+  failed_output=$(systemctl --failed --plain --no-legend 2>/dev/null) || return 0
+  failed=$(printf '%s\n' "$failed_output" | awk '{print $1}' | tr '\n' ' ')
   for unit in $failed; do
     case "$unit" in
       *alert@* | mihomo-watch*) continue ;;
@@ -72,10 +80,17 @@ check_units() {
 
 check_temp() {
   command -v vcgencmd >/dev/null 2>&1 || return 0
-  temp=$(vcgencmd measure_temp 2>/dev/null | sed -n 's/temp=\([0-9.]*\).*/\1/p')
-  throttled=$(vcgencmd get_throttled 2>/dev/null | sed -n 's/.*throttled=0x\([0-9a-f]*\).*/\1/p')
-  throttled=${throttled:-0}
-  hot=$(awk -v t="${temp:-0}" -v lim="$temp_c" 'BEGIN{print (t >= lim) ? 1 : 0}')
+  temp_raw=$(vcgencmd measure_temp 2>/dev/null) || return 0
+  throttled_raw=$(vcgencmd get_throttled 2>/dev/null) || return 0
+  temp=$(printf '%s\n' "$temp_raw" | sed -n \
+    -e "s/^temp=\\([0-9][0-9]*\\.[0-9][0-9]*\\)'C$/\\1/p" \
+    -e "s/^temp=\\([0-9][0-9]*\\)'C$/\\1/p")
+  throttled=$(printf '%s\n' "$throttled_raw" | sed -n 's/^throttled=0x\([0-9a-fA-F][0-9a-fA-F]*\)$/\1/p')
+  awk -v value="$temp" 'BEGIN { exit !(value ~ /^[0-9]+([.][0-9]+)?$/) }' || return 0
+  case "$throttled" in ''|*[!0-9a-fA-F]*) return 0 ;; esac
+  [ "$temp_raw" = "temp=$temp'C" ] || return 0
+  [ "$throttled_raw" = "throttled=0x$throttled" ] || return 0
+  hot=$(awk -v t="$temp" -v lim="$temp_c" 'BEGIN{print (t >= lim) ? 1 : 0}')
   # 0x1 undervoltage, 0x2 arm frequency capped, 0x4 currently throttled
   now=$(( 0x$throttled & 0x7 ))
   if [ "$hot" = 1 ] || [ "$now" -ne 0 ]; then
@@ -137,6 +152,7 @@ table inet dns_bypass {
     ip daddr $bypass_target meta l4proto { tcp, udp } th dport 53 log prefix "dns-bypass " level info limit rate 6/minute
   }
 }
+
 EOF
   now=$(date +%s)
   since=$(cat "$state_dir/dns-bypass-last" 2>/dev/null || echo $((now - 600)))
@@ -155,6 +171,73 @@ EOF
   done
 }
 
+check_media() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -r "$media_config" ] || return 0
+  observations=$(python3 - "$media_config" 2>/dev/null <<'PY'
+import re
+import sys
+from pathlib import Path
+import yaml
+
+config_path = Path(sys.argv[1])
+try:
+    config = yaml.safe_load(config_path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError("invalid config")
+    groups = config.get("proxy-groups", [])
+    providers = config.get("proxy-providers", {})
+    if not isinstance(groups, list) or not isinstance(providers, dict):
+        raise ValueError("invalid media configuration")
+except Exception:
+    sys.exit(1)
+
+root = config_path.parent.resolve()
+for group in groups:
+    if not isinstance(group, dict) or group.get("empty-fallback") != "REJECT":
+        continue
+    group_name = group.get("name")
+    if not isinstance(group_name, str) or not group_name or re.search(r"[/\x00-\x1f\x7f]", group_name):
+        continue
+    uses = group.get("use", [])
+    if not isinstance(uses, list):
+        continue
+    for name in uses:
+        if not isinstance(name, str) or not re.fullmatch(r"media-admission-[0-9a-f]{16}", name):
+            continue
+        provider = providers.get(name)
+        if not isinstance(provider, dict) or provider.get("type") != "file":
+            continue
+        if provider.get("path") != f"./providers/{name}.yaml":
+            continue
+        provider_dir = root / "providers"
+        provider_path = provider_dir / f"{name}.yaml"
+        if provider_dir.is_symlink() or provider_path.is_symlink() or not provider_path.is_file():
+            continue
+        try:
+            value = yaml.safe_load(provider_path.read_text())
+            if not isinstance(value, dict) or not isinstance(value.get("proxies"), list):
+                continue
+            proxy_defs = value["proxies"]
+            if any(not isinstance(proxy, dict) or not isinstance(proxy.get("name"), str)
+                   or not isinstance(proxy.get("type"), str) for proxy in proxy_defs):
+                continue
+        except Exception:
+            continue
+        state = "healthy" if any(proxy["type"].lower() != "reject" for proxy in proxy_defs) else "empty"
+        print(f"{group_name}\t{state}")
+PY
+) || return 0
+  [ -n "$observations" ] || return 0
+  printf '%s\n' "$observations" | while IFS="$(printf '\t')" read -r group state; do
+    [ -n "$group" ] || continue
+    case "$state" in
+      empty) trip "media-empty:$group" "$title | 媒体代理池为空：$group（仅 REJECT）" ;;
+      healthy) relax "media-empty:$group" "媒体代理池 $group 已有可用候选" ;;
+    esac
+  done
+}
+
 self_test() {
   # One message per type so the operator can confirm every push class lands.
   push self-test:unit "$title | 自检：systemd 单元失败类"
@@ -167,6 +250,6 @@ self_test() {
 
 case "${1:-}" in
   --self-test) self_test ;;
-  '') check_units; check_temp; check_disk; check_mem; check_wan; check_dns_bypass ;;
+  '') check_units; check_temp; check_disk; check_mem; check_wan; check_dns_bypass; check_media ;;
   *) echo 'usage: mihomo-watch [--self-test]' >&2; exit 2 ;;
 esac
