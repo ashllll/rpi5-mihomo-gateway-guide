@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import runpy
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,77 @@ def socket_request(path, item=None):
 
 
 class NativeBudgetTests(unittest.TestCase):
+    def test_input_loader_preserves_safe_values_and_rejects_python_tags(self):
+        with tempfile.TemporaryDirectory() as raw:
+            cfg, manifest = Path(raw)/'config.yaml', Path(raw)/'policy.yaml'
+            expected = config([node(name='匿名节点')])
+            cfg.write_text(yaml.safe_dump(expected, allow_unicode=True))
+            manifest.write_text(yaml.safe_dump({'measurement': policy()}))
+            self.assertEqual(BROKER['read_inputs'](cfg, manifest), (expected, policy()))
+            cfg.write_text('!!python/object/apply:builtins.dict []')
+            with self.assertRaises(yaml.YAMLError):
+                BROKER['read_inputs'](cfg, manifest)
+
+    def test_socket_observes_another_process_ledger_update_and_corruption(self):
+        settings = policy(limit=6)
+        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+            directory = Path(raw)
+            cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
+            cfg.write_text(yaml.safe_dump(config()))
+            manifest.write_text(yaml.safe_dump({'measurement': settings}))
+            path = str(directory/'budget.sock')
+            with BROKER['Server'](path, cfg, manifest, ledger) as server:
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(socket_request(path))
+                    external = subprocess.run([sys.executable, '-c',
+                        "import runpy,sys; from pathlib import Path; "
+                        "b=runpy.run_path(sys.argv[1]); "
+                        "c,m=b['read_inputs'](Path(sys.argv[2]),Path(sys.argv[3])); "
+                        "assert b['POLICY']['reserve_native'](Path(sys.argv[4]),m,c['proxies'],2)",
+                        str(ROOT/'automation/sbin/mihomo-measurement-budget'),
+                        str(cfg), str(manifest), str(ledger)], capture_output=True, timeout=10)
+                    self.assertEqual(external.returncode, 0, external.stderr.decode())
+                    self.assertTrue(socket_request(path))
+                    self.assertFalse(socket_request(path))
+                    self.assertEqual(sum(row[1] for row in json.loads(ledger.read_text())['accounts']['shared']), 6)
+                    for invalid in ('{broken', '{"accounts":{},"accounts":{},"last_reservation_at":0}'):
+                        ledger.write_text(invalid)
+                        self.assertFalse(socket_request(path))
+                        self.assertEqual(ledger.read_text(), invalid)
+                finally:
+                    server.shutdown()
+                    worker.join()
+
+    def test_socket_retains_a_debit_when_directory_sync_fails_after_replace(self):
+        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+            directory = Path(raw)
+            cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
+            cfg.write_text(yaml.safe_dump(config()))
+            manifest.write_text(yaml.safe_dump({'measurement': policy(limit=4)}))
+            path = str(directory/'budget.sock')
+            with BROKER['Server'](path, cfg, manifest, ledger) as server:
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    self.assertTrue(socket_request(path))
+                    fsync = os.fsync
+
+                    def fail_directory(descriptor):
+                        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                            raise OSError('injected directory sync failure')
+                        return fsync(descriptor)
+
+                    with patch('os.fsync', side_effect=fail_directory):
+                        self.assertFalse(socket_request(path))
+                    # The failed acknowledgement still consumed its charge on disk.
+                    self.assertFalse(socket_request(path))
+                    self.assertEqual(sum(row[1] for row in json.loads(ledger.read_text())['accounts']['shared']), 4)
+                finally:
+                    server.shutdown()
+                    worker.join()
+
     def test_account_ids_validate_before_generation_and_admission(self):
         for account in (12345, True, None, '', 1.5):
             settings = policy(accounts={account: {'names': ['A'], 'native_probes_per_hour': 8,

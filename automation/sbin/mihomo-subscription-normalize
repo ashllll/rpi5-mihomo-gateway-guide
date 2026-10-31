@@ -36,7 +36,7 @@ def b64decode_loose(text: str) -> bytes:
     compact = "".join(text.split())
     compact += "=" * (-len(compact) % 4)
     try:
-        return base64.b64decode(compact, validate=False)
+        return base64.b64decode(compact, altchars=b'-_', validate=False)
     except (binascii.Error, ValueError):
         raise SystemExit("subscription payload is not valid base64")
 
@@ -104,6 +104,54 @@ def parse_vmess(uri: str) -> dict:
     return node
 
 
+def ss_plugin(value: str) -> tuple[str, dict]:
+    fields, current, escaped = [], [], False
+    for character in value:
+        if escaped:
+            current.append(character)
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == ";":
+            fields.append(''.join(current))
+            current = []
+        else:
+            current.append(character)
+    if escaped:
+        raise ValueError('invalid ss plugin escape')
+    fields.append(''.join(current))
+    plugin = fields.pop(0)
+    options = {}
+    for field in fields:
+        key, separator, value = field.partition('=')
+        if not key or key in options:
+            raise ValueError('invalid ss plugin option')
+        options[key] = value if separator else True
+    if plugin in {'obfs-local', 'simple-obfs', 'obfs'}:
+        if set(options) - {'obfs', 'obfs-host'} or options.get('obfs') not in {'http', 'tls'}:
+            raise ValueError('unsupported ss obfs options')
+        mapped = {'mode': options['obfs']}
+        if 'obfs-host' in options:
+            if not isinstance(options['obfs-host'], str):
+                raise ValueError('invalid ss obfs host')
+            mapped['host'] = options['obfs-host']
+        return 'obfs', mapped
+    if plugin != 'v2ray-plugin' or set(options) - {'mode', 'tls', 'mux', 'host', 'path'}:
+        raise ValueError('unsupported ss plugin options')
+    options.setdefault('mode', 'websocket')
+    if options['mode'] != 'websocket':
+        raise ValueError('unsupported ss plugin transport')
+    for key in ('tls', 'mux'):
+        if key in options:
+            if options[key] not in (True, 'true', 'false'):
+                raise ValueError('invalid ss plugin flag')
+            options[key] = options[key] in (True, 'true')
+    for key in ('host', 'path'):
+        if key in options and not isinstance(options[key], str):
+            raise ValueError('invalid ss plugin value')
+    return plugin, options
+
+
 def parse_ss(uri: str) -> dict:
     body = uri[len("ss://"):]
     fragment = ""
@@ -112,24 +160,32 @@ def parse_ss(uri: str) -> dict:
     query = ""
     if "?" in body:
         body, query = body.split("?", 1)
-    if "@" not in body:
+    legacy = "@" not in body
+    if legacy:
         body = b64decode_loose(body).decode("utf-8")
     credentials, endpoint = body.rsplit("@", 1)
     if ":" not in credentials:
         credentials = b64decode_loose(credentials).decode("utf-8")
+    elif not legacy:
+        credentials = unquote(credentials)
     method, password = credentials.split(":", 1)
-    host, port = endpoint.rsplit(":", 1)
+    address = urlsplit('//' + endpoint)
+    if not address.hostname or not address.port or address.path not in ('', '/'):
+        raise ValueError('invalid ss endpoint')
     node = {
-        "name": unquote(fragment) or host,
+        "name": unquote(fragment) or address.hostname,
         "type": "ss",
-        "server": host.strip("[]"),
-        "port": int(port),
+        "server": address.hostname,
+        "port": address.port,
         "cipher": method,
         "password": password,
         "udp": True,
     }
-    if parse_qs(query).get("plugin"):
-        node["plugin"] = parse_qs(query)["plugin"][0]
+    plugins = parse_qs(query, keep_blank_values=True).get("plugin")
+    if plugins is not None:
+        if len(plugins) != 1 or not plugins[0]:
+            raise ValueError('invalid ss plugin')
+        node["plugin"], node["plugin-opts"] = ss_plugin(plugins[0])
     return node
 
 

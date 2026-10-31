@@ -4,7 +4,7 @@
 #
 # The layer mirrors one gateway that is actually running: the scripts, units,
 # dnsmasq scopes and MosDNS config are the files from that box with site data
-# stripped out.  Twelve units are enabled - the state of the recorded gateway -
+# stripped out.  Fourteen units are enabled - the state of the recorded gateway -
 # and everything else is installed but left off, so the tree and the runbook
 # describe a single system instead of two alternatives.
 #
@@ -51,13 +51,16 @@ if [ "$GATEWAY_ROOT" = "/" ] && [ "$(id -u)" != 0 ]; then
 fi
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ "$GATEWAY_ROOT" = "/" ] && [ "$dry_run" = false ]; then
-  exec 8>/run/lock/mihomo-maintenance.lock
-  flock -n 8 || { echo 'gateway maintenance is busy' >&2; exit 1; }
+if [ "$dry_run" = false ] && [ "${MIHOMO_INSTALL_LOCK_HELD:-false}" != true ]; then
+  exec python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --lock-run sh "$0" "$@"
 fi
 
-# Verify all bytes and the previous installed baseline before the first write.
-python3 "$here/check-release.py" --root "$GATEWAY_ROOT"
+# Recover an interrupted file transaction before checking the old baseline.
+if [ "$dry_run" = true ]; then
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --dry-run
+else
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --prepare
+fi
 
 say() {
   if [ "$dry_run" = true ]; then
@@ -77,8 +80,8 @@ install_file() {
   if [ "$dry_run" = true ]; then
     return 0
   fi
-  mkdir -p -- "$(dirname -- "$destination")"
-  install -m "$mode" -- "$source" "$destination"
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" \
+    --install-file "$source" "$target" "$mode"
 }
 
 # install_default <source> <absolute destination> <mode>
@@ -92,8 +95,42 @@ install_default() {
     say "keep existing $target"
     return 0
   fi
-  install_file "$source" "$target" "$mode"
+  if [ "$dry_run" = true ]; then
+    install_file "$source" "$target" "$mode"
+  else
+    say "install default $(basename "$source") -> $target if absent"
+    python3 "$here/check-release.py" --root "$GATEWAY_ROOT" \
+      --default --install-file "$source" "$target" "$mode"
+  fi
 }
+
+transaction_active=false
+on_exit() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$transaction_active" = true ]; then
+    if recovery_result=$(python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --rollback 2>&1); then
+      if [ "$recovery_result" = 'no pending file transaction' ]; then
+        echo 'install failed; no pending file transaction; no file rollback was needed' >&2
+      else
+        echo 'install failed; previous file state restored' >&2
+      fi
+    else
+      echo 'error: install failed and automatic recovery could not finish; pending recovery data retained' >&2
+      echo "$recovery_result" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$dry_run" = false ]; then
+  transaction_active=true
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --begin
+fi
 
 if [ "$dry_run" = false ]; then
   for directory in \
@@ -103,7 +140,7 @@ if [ "$dry_run" = false ]; then
     /var/lib/mihomo-measurements \
     /var/lib/mihomo-extra-subscriptions \
     /var/lib/mihomo-subscription-backups; do
-    install -d -m 0700 "$root$directory"
+    python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --ensure-dir "$directory" 0700
   done
 fi
 
@@ -148,7 +185,7 @@ done
 # /etc/nftables.conf; the includes are part of the same ruleset, so a host that
 # already has local edits keeps them (install_default).
 if [ "$dry_run" = false ]; then
-  mkdir -p -- "$root/etc/nftables.d"
+  python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --ensure-dir /etc/nftables.d 0755
 fi
 install_default "$here/etc/nftables.conf" /etc/nftables.conf 0644
 for include in "$here"/etc/nftables.d/*; do
@@ -171,22 +208,31 @@ install_default "$here/env/reconcile-targets.conf.example" /etc/mihomo/reconcile
 if [ ! -e "$root/etc/dnsmasq-upstreams.conf" ]; then
   say "seed /etc/dnsmasq-upstreams.conf from etc/dnsmasq/upstreams.conf"
   if [ "$dry_run" = false ]; then
-    mkdir -p -- "$root/etc"
-    install -m 0644 -- "$here/etc/dnsmasq/upstreams.conf" "$root/etc/dnsmasq-upstreams.conf"
+    python3 "$here/check-release.py" --root "$GATEWAY_ROOT" \
+        --default --install-file "$here/etc/dnsmasq/upstreams.conf" /etc/dnsmasq-upstreams.conf 0644
   fi
 fi
 
 if [ "$dry_run" = false ]; then
   python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --record
+  transaction_active=false
 fi
 
 if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/system ]; then
-  systemctl daemon-reload
-  # The twelve units the recorded gateway runs.  Enabling a timer does not start
+  service_action() {
+    if ! "$@"; then
+      echo 'error: automation files are committed, but systemd configuration is incomplete' >&2
+      exit 1
+    fi
+  }
+  service_action systemctl daemon-reload
+  # The enabled units the gateway runs.  Enabling a timer does not start
   # it, so a fresh host needs one explicit start after the private env files exist.
   for unit in \
       mihomo.service \
       mihomo-measurement-budget.service \
+      mihomo-media-guard.timer \
+      mihomo-subscription-update.timer \
       mihomo-healthcheck.timer \
       mihomo-watch.timer \
       mihomo-dnsmasq-guard.timer \
@@ -197,13 +243,18 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
       dnsmasq-vlan-pilot.service \
       dnsmasq.service \
       homeassistant-access-guard.service; do
-    systemctl enable "$unit"
+    service_action systemctl enable "$unit"
   done
-  # These four ship for completeness but stay off: on the recorded gateway the
-  # rule, subscription and quality timers were disabled.  Disabling them is what
-  # makes an upgrade from the previous release idempotent.
-  for retired in mihomo-rules-update.timer mihomo-subscription-update.timer mihomo-download-quality.timer mihomo-social-quality.timer; do
-    systemctl disable "$retired" 2>/dev/null || true
+  # Rule and retired quality timers remain dormant. Subscription refresh is
+  # enabled above and must survive subsequent package upgrades.
+  for retired in mihomo-rules-update.timer mihomo-download-quality.timer mihomo-social-quality.timer; do
+    load_state=$(systemctl show --property=LoadState --value "$retired") || {
+      echo 'error: automation files are committed, but systemd configuration is incomplete' >&2
+      exit 1
+    }
+    if [ "$load_state" != not-found ]; then
+      service_action systemctl disable "$retired"
+    fi
   done
 fi
 

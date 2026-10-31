@@ -15,6 +15,29 @@ measurement:
   # budget for every native URLTest, including startup, failure, refresh and
   # rollback checks). The existing quality_attempts_per_hour key is retained
   # for the persisted account ledger contract.
+# Media throughput admission is opt-in; timer invocations do not sample
+# until the operator enables this section in the private manifest.
+media_admission:
+  enabled: false
+  interval_seconds: 600
+  sample_bytes: 1048576
+  timeout_seconds: 8
+  min_bps: 262144
+  recovery_bps: 393216
+  bad_samples: 2
+  good_samples: 2
+  cooldown_seconds: 900
+  max_age_seconds: 21600
+  samples_per_group: 2
+  profiles:
+    Social:
+      sample_url: https://media.example.invalid/sample.mp4
+      expected_content_type: video/mp4
+      extra_patterns: []
+    Streaming:
+      sample_url: https://media.example.invalid/sample.mp4
+      expected_content_type: video/mp4
+      extra_patterns: []
 # Optional private download_routes/video_routes entries override the
 # separately installed route-defaults.yaml by route ID. Missing, null or empty
 # tables inherit defaults; explicit route entries must contain domains.

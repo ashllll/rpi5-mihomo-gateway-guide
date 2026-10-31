@@ -31,16 +31,20 @@ jobs:
           python3 tools/check_mihomo_policy.py
           python3 tools/check_subscription_candidate.py
           python3 tools/check_legacy_stt.py
+          python3 tools/check_subscription_normalize.py
           python3 tools/check_subscription_update.py
           python3 tools/check_automation.py
           python3 tools/check_stability.py
           python3 tools/check_gateway_resilience.py
           python3 tools/check_dns_resilience.py
           python3 tools/check_alert_delivery.py
+          python3 tools/check_watch_notifications.py
           python3 tools/check_rollback_recovery.py
           python3 tools/check_dnsmasq_guard.py
           python3 tools/check_measurement_policy.py
           python3 tools/check_native_budget.py
+          python3 tools/check_media_policy.py
+          python3 tools/check_media_guard.py
           python3 tools/check_update_rules.py
           python3 tools/check_publication_privacy.py
           python3 tools/check_image.py
@@ -77,6 +81,7 @@ jobs:
           "$RUNNER_TEMP/core-host" -v | grep -q 'v1.19.28-budget-status-contract-v3'
           test "$("$RUNNER_TEMP/core-host" -measurement-budget-protocol)" = mihomo-budget-v1
           (cd "$GITHUB_WORKSPACE" && MIHOMO_TEST_BINARY="$RUNNER_TEMP/core-host" python3 tools/check_legacy_stt.py)
+          (cd "$GITHUB_WORKSPACE" && MIHOMO_TEST_BINARY="$RUNNER_TEMP/core-host" python3 tools/check_media_core.py)
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
             go build -trimpath -tags "with_gvisor no_tailscale" \
             -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
