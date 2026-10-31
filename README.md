@@ -156,6 +156,7 @@ VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理�
 
 ## 发布前自查
 
+
 ```sh
 python3 tools/validate_public.py
 python3 tools/check_automation.py        # 脚本/单元/env 示例与安装器的一致性
@@ -169,5 +170,13 @@ python3 tools/check_publication_privacy.py
 
 生产配置改动只走设备上的 `/usr/local/sbin/mihomo-config-install`（源：`ops/mihomo-config-install`）：
 先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer，备份后才写入并 reload，失败自动回滚。
+
+## 主仓库与 CI
+
+主仓库是飞牛 NAS 上的 Gitea（`http://192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide`），GitHub 仓库由 Gitea 的推送镜像同步。
+
+- 推送进 Gitea 后，`.gitea/workflows/gates.yml` 在 NAS 的 act_runner 上跑全量 `scripts/preflight.sh`；CI 绿了才算这次提交通过。
+- 本机 `pre-push` 只跑 `scripts/preflight.sh --staged`（秒级）与影响面确认，不再跑 35 分钟全量；需要本机全量时用 `PUSH_FULL_GATE=1 git push`。
+- 作业镜像 `gitea-gate:bookworm` 需要 `git/python3/PyYAML/jq/util-linux`（检查脚本依赖 jq 与 flock），定义在 NAS 的 `/vol3/gitea/gate.Dockerfile`。
 
 [CC0 1.0 Universal](LICENSE) · 第三方产品名与商标归各自权利人所有。
