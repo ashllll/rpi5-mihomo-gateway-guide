@@ -1,0 +1,3 @@
+# Checks that already failed on HEAD before this gate existed.
+# Keep this list short and justified; a fixed check is reported so it can be dropped.
+check_automation.py   # install.sh: "package differs from its reviewed release manifest" (predates 2026-10-31 GitHub routing change)

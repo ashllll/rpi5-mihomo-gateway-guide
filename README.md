@@ -163,4 +163,10 @@ python3 tools/check_mihomo_policy.py     # 生成的每个组都带健康探测�
 python3 tools/check_publication_privacy.py
 ```
 
+一次跑完全部检查用 `scripts/preflight.sh`（`--staged` 为 2 秒快档，全量实测约 35 分钟）；
+既有失败登记在 `scripts/preflight-baseline.txt`，负载敏感项登记在 `scripts/preflight-advisory.txt`。
+
+生产配置改动只走设备上的 `/usr/local/sbin/mihomo-config-install`（源：`ops/mihomo-config-install`）：
+先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer，备份后才写入并 reload，失败自动回滚。
+
 [CC0 1.0 Universal](LICENSE) · 第三方产品名与商标归各自权利人所有。
