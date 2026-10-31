@@ -74,6 +74,8 @@ snapshot_inputs() {
       /usr/local/sbin/mihomo-subscription-normalize \
       /usr/local/sbin/mihomo-reconcile-policy \
       /usr/local/sbin/mihomo-measurement-policy \
+      /usr/local/sbin/mihomo-media-policy \
+      /usr/local/sbin/mihomo-media-guard \
       "$mihomo_bin"
     do
       [ -n "$input" ] || continue
@@ -111,6 +113,8 @@ snapshot_policy_inputs() {
       /usr/local/sbin/mihomo-subscription-normalize \
       /usr/local/sbin/mihomo-reconcile-policy \
       /usr/local/sbin/mihomo-measurement-policy \
+      /usr/local/sbin/mihomo-media-policy \
+      /usr/local/sbin/mihomo-media-guard \
       "$mihomo_bin"
     do
       [ -n "$input" ] || continue
@@ -318,12 +322,11 @@ run_cleanup_bounded() {
 candidate_fingerprint() {
   exec 8>&- 9>&-
   {
-    cat "$remote"
-    while IFS='|' read -r source_id selected fresh; do
-      [ -n "$source_id" ] || continue
-      printf '\nsource:%s\n' "$source_id"
-      cat "$selected"
-    done <"$extra_manifest"
+    # Local TUN/DNS/rules are inherited by the candidate too. Canonicalize the
+    # completed config so formatting changes do not bypass failure cooldown.
+    python3 -c 'import json, sys, yaml
+with open(sys.argv[1], encoding="utf-8") as stream:
+    print(json.dumps(yaml.safe_load(stream), sort_keys=True, separators=(",", ":")))' "$candidate"
     printf '\npolicy:%s\n' "$(snapshot_policy_inputs)"
   } | sha256sum | awk '{print $1}'
 }
@@ -529,6 +532,8 @@ subscription_url=$(cat "$url_file")
 # documented mirror next to the primary link; set SUBSCRIPTION_BACKUP_URL in
 # /etc/mihomo-automation.env only when yours does.  Empty means "primary only".
 backup_url=${SUBSCRIPTION_BACKUP_URL:-}
+# Space-separated extra-source identifiers whose cached nodes are kept locally.
+: "${MIHOMO_SUBSCRIPTION_MANUAL_SOURCES:=}"
 
 normalize() {
   remaining=$(remaining_seconds) || return 1
@@ -621,10 +626,23 @@ if [ -d "$extra_urls_dir" ]; then
         ;;
     esac
 
+    cached=$extra_cache_root/$source_id.yaml
+    case " $MIHOMO_SUBSCRIPTION_MANUAL_SOURCES " in
+      *" $source_id "*)
+        if [ -s "$cached" ] && extra_is_valid "$cached"; then
+          printf '%s|%s|0\n' "$source_id" "$cached" >>"$extra_manifest"
+          logger -t mihomo-update-subscription "$source_id is manual; retaining validated cache without download"
+        else
+          logger -t mihomo-update-subscription "$source_id is manual but has no valid cache; keeping current configuration"
+          exit 1
+        fi
+        continue
+        ;;
+    esac
+
     extra_url=$(cat "$extra_url_file")
     raw=$extra_work_dir/$source_id.raw
     downloaded=$extra_work_dir/$source_id.yaml
-    cached=$extra_cache_root/$source_id.yaml
     fresh=0
     rm -f "$raw" "$downloaded"
 
@@ -709,6 +727,15 @@ if [ "$(snapshot_inputs)" != "$input_snapshot" ]; then
 fi
 if ! remaining_seconds >/dev/null; then
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  exit 1
+fi
+
+# A candidate must retain a qualified media route before replacing a live core.
+# This is a read-only projection; startup materializes only current definitions.
+remaining=$(remaining_seconds) || exit 1
+if ! run_bounded "$remaining" /usr/local/sbin/mihomo-media-guard \
+    --config "$candidate" --check-ready --valid-for "$remaining" >/dev/null; then
+  logger -t mihomo-update-subscription "Media admission is not ready; retained the running configuration"
   exit 1
 fi
 

@@ -22,7 +22,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `action` | `none` | 本次未触发恢复动作；`restart` 表示探针重启过核心 |
 | `fatal` | `none` | 非 `none` 时优先看它，再对照 `journalctl` |
 
-`business=failed` / 任一四要素为 0 / `egress!=ok` 都代表代理链路不可用。
+`business=failed` 或任一本地转发要素为 0 表示本地转发检查失败。`egress=partial/fail` 表示网站抽样部分/全部失败，不能由此判定整网断线；`egress=unknown` 表示尚未检查。
 
 出口抽样固定走 `127.0.0.1:7890`：核心按 `bind-address: "*"` 监听，本机已无独立 LAN 口，环回是唯一不随链路状态变化的入口；`lan-allowed-ips` 必须含 `127.0.0.1/32`，否则核心会重置环回连接。生产拓扑是「一根网线接 UCG 交换机」：上行 VLAN1（`192.168.0.0/24`）+ 下行 VLAN20（`192.168.20.1/24`，UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端），独立下游 LAN 口与 Pi 自建 AP 已移除。
 
@@ -30,9 +30,31 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 黑障自愈：进程还活着但证据连续红 3 次，探针会重启核心一次（`restarted_at` 记录时间，
 每小时至多一次）；三次仍不绿说明重启救不回来，直接查节点/订阅/上游。
 
+## 手机通知怎么看
+
+通知标题先写具体问题，再附网关名称；正文说明检查结果、可能影响和建议。Bark 直接推送和 ServerChan 使用同一套文案，原始诊断字段保留在状态文件与调用方日志中。
+
+| 通知标题示例 | 代表什么 / 建议 |
+|---|---|
+| GitHub、视频访问检查异常 | 标出失败网站及通过的网站；检查失败不等于全网断线，也不能单凭它确定机场故障 |
+| 网关转发异常 | 本地代理程序或转发配置检查失败，经过网关的设备可能无法上网 |
+| 网关转发检查恢复 | 本地转发已通过；出口尚未检查时正文明确说明 |
+| 域名查询检查有异常 | 分别说明国内查询、代理地址分配、状态接口的检查结果 |
+| 设备域名查询无响应，已请求重启 | 只是已请求修复，后续全项通过才发送恢复 |
+| 整条域名查询链路无响应 / 部分设备域名查询检查异常 | 查询入口或上游异常，网站可能打不开；全部检查通过后有恢复通知 |
+| 订阅更新失败 / 分流规则更新失败 | 新内容可能未生效，需查任务日志；不能据此认定当前已经断网 |
+| 推特图片和视频没有达标的候选节点 / 视频播放没有达标的候选节点 | 媒体节点文件无可用候选；补回后通知，但实际播放仍需确认 |
+| 树莓派温度或供电 / 存储空间 / 可用内存异常 | 检查相应硬件或资源，正文给处理建议和可取得的数值 |
+| 树莓派到主路由的连接异常 | 检查网线、主路由及接口配置 |
+| 有设备未使用网关的域名查询 | 按设备地址检查其查询设置；不能据此确认地址被污染 |
+
+监控只在检测到异常或状态变化时通知；持续相同问题按冷却限流。通知投递失败不确认状态，下轮重试。系统任务从失败列表移除只写“不再报告失败”，不等于实际功能已验收。恢复只代表对应检查通过。Bark/推送服务器接受请求也不保证手机实际显示。
+
+断电、树莓派完全离线或全部通知通道失联时，本机无法实时发送通知；需要独立于树莓派的外部监控才能覆盖。
+
 ## 2. 单元清单
 
-发布层 12 个 enabled（6 个 service + 6 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
+发布层 14 个 enabled（6 个 service + 8 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
 其余 worker service 是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，不算 enabled。
 
 | 单元 | 作用 | 触发 |
@@ -41,7 +63,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `dnsmasq.service` | 环回 resolver（`/etc/dnsmasq.d/resolver.conf`，`127.0.0.1:53`）；`boot-safe.conf` 保证先于 mihomo 写 direct 基线；`restart.conf` 补 `Restart=always`／`RestartSec=2s`（Debian 原 unit 没有重启策略，崩溃后网关自身解析静默失效，而 mihomo 门禁只证明代理链路，看不到它） | 常驻，崩溃自起 |
 | `dnsmasq-vlan-pilot.service` | VLAN 20 独立 DNS/DHCP | 常驻 |
 | `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 HA UI | 开机一次（oneshot） |
-| `mihomo-dnsmasq-guard.timer` | 每 30 秒分层探测：先 `127.0.0.1:53` 两个国内域名，失败再退到 `127.0.0.1:5335`。dnsmasq 静默（0/2）立即重启它；只有一个域名慢/无答案记为降级，连续两轮先重启 mosdns、仍不恢复再重启 dnsmasq。重启预算 3 次/15 分钟，超出只告警不重启（`throttled`），避免重启风暴 | 定时 |
+| `mihomo-dnsmasq-guard.timer` | 每 30 秒检查配置的设备查询入口和实际上游，分别测试两个域名的两种查询方式。只有入口全无应答而上游有应答才重启入口服务；链路全无响应、上游无响应或部分失败分别告警，不重启上游。重启预算 3 次/15 分钟，最短间隔 20 秒；全部查询通过后报告恢复 | 定时 |
 | `mihomo.service` | 核心（`--run-core` 校验后拉起；`ExecStartPre` 先 `mihomo -t`） | 常驻，`Restart=always` |
 | `mihomo-measurement-budget.service` | 预算准入 broker（建 socket；账本首扣创建） | 常驻（enabled） |
 | `mosdns.service` | 国内直连/代理分流 DNS | 常驻，`After=mihomo` |
@@ -49,20 +71,27 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mihomo-watch.timer` | 单元失败/温度/磁盘/内存/WAN（边沿触发） | 开机 90s，之后每 120s |
 | `mosdns-healthcheck.timer` | mosdns 健康 | 开机 30s，之后每分钟 |
 | `mosdns-rules-update.timer` | 规则集每日 04:20±30min | 每日 |
+| `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-media-guard.timer` | 媒体速度准入，私有策略启用才采样；详见[媒体路由](wiki/x-video-routing.md) | 开机 2 分钟，之后每分钟唤醒 |
 | `mosdns-binary-update.timer` | MosDNS 二进制每周日 05:10±1h | 每周 |
 
-休眠 4 个（随仓库安装但保持 disabled；2026-10-25 已清理本机那 2 个退役评分单元，真机与仓库一致）：
+休眠 3 个（随仓库安装但保持 disabled；2026-10-25 已清理本机那 2 个退役评分单元，真机与仓库一致）：
 
 | 单元 | 为什么休眠 | 手工跑一次 |
 |---|---|---|
 | `mihomo-rules-update.timer` | 规则由订阅管线一并生成，独立更新会与配置快照分叉 | `sudo /usr/local/sbin/mihomo-update-rules` |
-| `mihomo-subscription-update.timer` | 订阅刷新会重写整份配置，必须人工确认时机 | `sudo /usr/local/sbin/mihomo-update-subscription --force` |
 | `mihomo-download-quality.timer` | 采样写 `./providers/quality-*.yaml`，但配置未声明对应 file provider，产物无人读取；开 timer 只消耗带宽 | `sudo /usr/local/sbin/mihomo-download-quality` |
 | `mihomo-social-quality.timer` | 同上，仅 X 视频场景，每 2 分钟一轮 | `sudo /usr/local/sbin/mihomo-social-quality` |
 
 `homeassistant-access-guard.service` 也在发布层（oneshot，开机跑一次）。
 本机另有 1 个不在发布层的单元：`rp5-agent.service`（T-Display 监控的只读指标，tcp/8799），
 由部署端单独维护，仓库不发布（2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`）。
+
+订阅定时任务使用树莓派本机 systemd，不依赖管理电脑。私有地址准备好后执行 `sudo systemctl enable --now mihomo-subscription-update.timer`，用 `systemctl list-timers mihomo-subscription-update.timer` 核对下一次执行。开机超过十分钟后首次启用会立即检查；任务结束（包括失败或无变化）后等待 48 小时，重启后十分钟再次检查。手动检查用 `sudo systemctl start mihomo-subscription-update.service`。
+
+无变化不重启核心；候选有变化时现有更新器会重启 Mihomo，活动连接可能短暂中断。下载或校验失败保留当前主节点或最后可用额外缓存，不能仅凭服务退出成功认定所有来源已更新。新地址只保存在私有订阅文件中。
+
+需要仅手动更新的额外来源，在 `/etc/mihomo-automation.env` 中用 `MIHOMO_SUBSCRIPTION_MANUAL_SOURCES` 配置其标识（空格分隔）。更新器不会请求这些地址，而是合并经过校验的本地缓存；缓存无效时保留当前配置并报错。`--force` 也不覆盖手动来源策略。
 
 ## 3. 故障对照表
 
@@ -126,10 +155,11 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 
 **组健康检查是硬不变量**：每个自动组都必须被某个探测所有者覆盖，否则它永远不重选——这就是
 2026-10-25「节点超时后一直不切换」的根因。生产模式（`measurement.enabled: true`）下，
-所有 `url-test`/`fallback` 组的节点被折进共享的 `measurement-<16hex>` provider 以归属计量，
+启用媒体准入的 Social / Streaming 使用专属 file provider 的健康调度器；其余
+`url-test`/`fallback` 组的节点被折进共享的 `measurement-<16hex>` provider 以归属计量，
 但**组自己仍保留 `url`/`expected-status`/`interval`**：探测由组内调度器逐节点执行，内联 provider
 的 `health-check` 没有自己的探测循环（真机实测从不触发）。组的间隔取
-`measurement.native_interval_seconds`（真机 250s）与 `stability.max_interval` 的较小者，
+`measurement.native_interval_seconds` 与 `stability.max_interval` 的较小者，
 改它就是改全网的故障发现时间。每次探测都要先过预算侧准入，因此
 `mihomo-measurement-budget` 必须接得住一次全量扫描：它缓存已解析的输入（config/manifest 变更才重读），
 监听 backlog 512、并发上限 256——按请求重解析 5000 行 config 会把一整波扫描挤到准入超时。
@@ -146,11 +176,12 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 | `/var/lib/mihomo-measurements/quality-budget.json` | 预算账本（账户、尝试次数、`last_reservation_at`） |
 | `/var/lib/mihomo-download-quality/scores.json` | 下载采样（休眠） |
 | `/var/lib/mihomo-social-quality/scores.json` | X 视频采样（休眠） |
+| `/var/lib/mihomo-media-admission/state.json` | Social / Streaming 资格、节点指纹及采样时间 |
 | `/var/backups/mosdns-rollout-*.tar.gz` | MosDNS 回滚点 |
 | `/etc/mosdns/rules/releases/` | 规则集历史版本 |
 | `/var/lib/mihomo-swap/state.json`、`/usr/local/lib/mihomo-swap/{a,b}` | 双槽核心与状态 |
 
-预算账本只由 broker 以原子写回更新；手工编辑会让预扣记录失真。
+预算账本由 broker 与媒体 guard 经同一锁和持久预扣接口原子写回；手工编辑会让预扣记录失真。
 备份账本用 `install -m0600` 拷走，不要 `cp` 丢权限。
 
 ## 6. 锁与互斥

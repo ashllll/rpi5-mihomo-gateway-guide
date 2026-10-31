@@ -923,6 +923,8 @@ def main() -> None:
     # references are gone may exact legacy file-provider owners be retired.
     retire_legacy_quality_providers(config, capabilities, route_defaults)
     apply_stability(config, capabilities)
+    media = runpy.run_path(str(Path(__file__).with_name("mihomo-media-policy")))
+    media["configure"](config, capabilities)
     measurement["configure_measurement"](config, capabilities)
     with open(destination, "w", encoding="utf-8") as stream:
         yaml.safe_dump(

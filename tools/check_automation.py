@@ -12,8 +12,8 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the unit tree is the recorded gateway's tree: exactly the twelve units that
-  box enabled, four timers installed but left off, the startup evidence gate and
+* the unit tree is the recorded gateway's tree: exactly the thirteen units that
+  box enabled, three timers installed but left off, the startup evidence gate and
   the budget wrapper drop-in, and none of the retired adaptive units,
 * the scripts and units are the recorded set (no adaptive selector), every
   `/usr/local/sbin/...` a unit runs is shipped, and `mihomo -t` /
@@ -21,8 +21,8 @@ is checked the way it is shipped:
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, enables exactly the twelve recorded units and
-  disables exactly the four dormant timers, and changes nothing in --dry-run
+  operator-edited deployment data, enables exactly the thirteen recorded units and
+  disables exactly the three dormant timers, and changes nothing in --dry-run
   mode,
 * the gateway address and ports really come from the environment at runtime.
 """
@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import ast
+import configparser
 import os
 import re
 import shutil
@@ -68,13 +69,15 @@ CJK_ALLOWED = {
     "sbin/mihomo-watch",
 }
 
-# The recorded gateway's installed set. Twelve units are enabled; four maintenance
+# The recorded gateway's installed set. Fourteen units are enabled; three maintenance
 # timers ship for completeness but stay off. Keeping both lists literal is the
 # point: a unit silently moving between them is exactly the drift this checker
 # exists to catch.
 ENABLED_UNITS = (
     "mihomo.service",
     "mihomo-measurement-budget.service",
+    "mihomo-media-guard.timer",
+    "mihomo-subscription-update.timer",
     "mihomo-healthcheck.timer",
     "mihomo-watch.timer",
     "mihomo-dnsmasq-guard.timer",
@@ -88,7 +91,6 @@ ENABLED_UNITS = (
 )
 DORMANT_TIMERS = (
     "mihomo-rules-update.timer",
-    "mihomo-subscription-update.timer",
     "mihomo-download-quality.timer",
     "mihomo-social-quality.timer",
 )
@@ -101,8 +103,10 @@ SBIN_SCRIPTS = (
     "mihomo-download-quality",
     "mihomo-dnsmasq-guard",
     "mihomo-healthcheck",
+    "mihomo-media-guard",
     "mihomo-measurement-budget",
     "mihomo-measurement-policy",
+    "mihomo-media-policy",
     "mihomo-policy-overlay",
     "mihomo-reconcile-policy",
     "mihomo-social-quality",
@@ -235,6 +239,8 @@ NOT_DEPLOYMENT_PARAMETERS = {
     # These identify this invocation; operators must not configure them.
     "MIHOMO_UPDATE_OWNER_PID",
     "MIHOMO_UPDATE_OWNER_START",
+    # Set only by the installer lock supervisor across its exec into install.sh.
+    "MIHOMO_INSTALL_LOCK_HELD",
 }
 
 SHELL_VAR = re.compile(r'\$\{([A-Z_][A-Z0-9_]*):[-=]')
@@ -363,6 +369,40 @@ def check_unit_layout() -> None:
             continue
         check((units / unit).is_file(), f"automation/systemd is missing {unit}")
 
+    media_service_path = units / "mihomo-media-guard.service"
+    media_timer_path = units / "mihomo-media-guard.timer"
+    media_startup_path = units / "mihomo.service.d" / "media-admission.conf"
+    check(media_service_path.is_file(), "automation/systemd is missing mihomo-media-guard.service")
+    check(media_timer_path.is_file(), "automation/systemd is missing mihomo-media-guard.timer")
+    check(media_startup_path.is_file(), "mihomo startup media-admission drop-in is missing")
+    if media_service_path.is_file():
+        media_service = configparser.ConfigParser(interpolation=None)
+        media_service.read(media_service_path)
+        service = media_service["Service"]
+        check(service.get("Type") == "oneshot", "media guard service must be oneshot")
+        check(service.get("EnvironmentFile") == "-/etc/mihomo-automation.env",
+              "media guard service must load the optional automation environment")
+        check(service.get("StateDirectory") == "mihomo-media-admission",
+              "media guard service must use its private state directory")
+        check(service.get("TimeoutStartSec") == "180", "media guard service timeout must be 180 seconds")
+        check({"/etc/mihomo/providers", "/var/lib/mihomo-measurements"}
+              <= set(service.get("ReadWritePaths", "").split()),
+              "media guard service must have provider and measurement-ledger write access")
+    if media_timer_path.is_file():
+        media_timer = configparser.ConfigParser(interpolation=None)
+        media_timer.read(media_timer_path)
+        timer = media_timer["Timer"]
+        check(timer.get("OnBootSec") == "2min", "media guard timer must first run two minutes after boot")
+        check(timer.get("OnUnitInactiveSec") == "1min", "media guard timer must wait one minute after each run")
+        check(not timer.get("OnCalendar"), "media guard timer must not add a calendar schedule")
+        check(timer.get("Unit") == "mihomo-media-guard.service", "media guard timer must target its service")
+    if media_startup_path.is_file():
+        startup = read_source(media_startup_path)
+        check("ExecStartPre=-+/usr/local/sbin/mihomo-media-guard --expire-only" in startup,
+              "media expiration must run as a non-blocking core startup precheck")
+        check("ReadWritePaths=/etc/mihomo/providers" in startup,
+              "mihomo startup hardening must allow provider cache replacement")
+
     scripts = {
         path.name
         for path in (AUTOMATION / "sbin").iterdir()
@@ -452,6 +492,30 @@ def check_manifest() -> None:
         check(measurement.get("enabled") is False, "native URLTests must ship paused")
         check(measurement.get("native_budget") is True, "native URLTests must require budget admission")
         check(measurement.get("accounts") == {}, "capabilities.yaml must not ship account identities")
+    media = manifest.get("media_admission")
+    check(isinstance(media, dict), "capabilities.yaml must declare media_admission defaults")
+    if isinstance(media, dict):
+        check(media.get("enabled") is False, "media admission must ship disabled")
+        for key, expected in {
+            "interval_seconds": 600, "sample_bytes": 1048576, "timeout_seconds": 8,
+            "min_bps": 262144, "recovery_bps": 393216, "bad_samples": 2,
+            "good_samples": 2, "cooldown_seconds": 900, "max_age_seconds": 21600,
+            "samples_per_group": 2,
+        }.items():
+            check(media.get(key) == expected, f"media_admission.{key} default must be {expected}")
+        profiles = media.get("profiles")
+        check(isinstance(profiles, dict) and set(profiles) == {"Social", "Streaming"},
+              "media admission must define only the Social and Streaming profiles")
+        if isinstance(profiles, dict):
+            for name, profile in profiles.items():
+                check(isinstance(profile, dict), f"media_admission.profiles.{name} must be a mapping")
+                if isinstance(profile, dict):
+                    check(profile.get("sample_url") == "https://media.example.invalid/sample.mp4",
+                          f"media_admission.profiles.{name} must use the placeholder MP4 URL")
+                    check(profile.get("expected_content_type") == "video/mp4",
+                          f"media_admission.profiles.{name} must expect video/mp4")
+                    check(profile.get("extra_patterns") == [],
+                          f"media_admission.profiles.{name} must ship no candidate names")
     for key in ("download_routes", "video_routes"):
         check(key not in manifest,
               f"capabilities.yaml must not duplicate the public {key} table")
@@ -510,6 +574,7 @@ def expected_install_map(root: Path) -> set[Path]:
             fail(f"install.sh has no destination rule for {relative}")
     expected.add(Path("etc/dnsmasq-upstreams.conf"))
     expected.add(Path("var/lib/mihomo-automation/installed-manifest.json"))
+    expected.add(Path("run/lock/mihomo-maintenance.lock"))
     return expected
 
 
@@ -608,6 +673,10 @@ def check_installer() -> None:
 
         manifest = root / "etc/mihomo/adaptive/capabilities.yaml"
         route_defaults = root / "etc/mihomo/adaptive/route-defaults.yaml"
+        check(
+            stat.S_IMODE((root / "etc/mihomo/adaptive").stat().st_mode) == 0o700,
+            "install.sh did not retain install -d's private adaptive-directory mode",
+        )
         check(manifest.read_bytes() == old_manifest,
               "install.sh changed a pre-existing private capabilities.yaml")
         check(route_defaults.is_file(), "install.sh did not seed independent route-defaults.yaml")
@@ -625,8 +694,12 @@ def check_installer() -> None:
         )
         check(
             enabled == set(ENABLED_UNITS),
-            f"installer enables {sorted(enabled)}, expected the recorded twelve {sorted(ENABLED_UNITS)}",
+            f"installer enables {sorted(enabled)}, expected the enabled set {sorted(ENABLED_UNITS)}",
         )
+        check("mihomo-media-guard.timer" in enabled,
+              "installer must enable the media guard timer")
+        check("systemctl start mihomo-media-guard.timer" not in installer_text,
+              "installer must enable, but not start, the media guard timer")
         dormant = set(
             re.findall(
                 r"([a-z0-9@._-]+\.timer)",
@@ -635,7 +708,7 @@ def check_installer() -> None:
         )
         check(
             dormant == set(DORMANT_TIMERS),
-            f"installer disables {sorted(dormant)}, expected the dormant four {sorted(DORMANT_TIMERS)}",
+            f"installer disables {sorted(dormant)}, expected the dormant set {sorted(DORMANT_TIMERS)}",
         )
         for unit in ENABLED_UNITS + DORMANT_TIMERS:
             if unit == "dnsmasq.service":
@@ -789,6 +862,16 @@ def check_no_bytecode() -> None:
             fail(f"{path.relative_to(REPO)} must not be committed")
 
 
+def check_subscription_schedule() -> None:
+    unit = configparser.ConfigParser(interpolation=None)
+    unit.read(AUTOMATION / "systemd/mihomo-subscription-update.timer")
+    timer = unit["Timer"]
+    check(timer.get("OnBootSec") == "10min", "subscription refresh must run after boot")
+    check(timer.get("OnUnitInactiveSec") == "2d", "subscription refresh must wait 48 hours after completion")
+    check(not timer.get("OnCalendar"), "subscription refresh must not retain the daily trigger")
+    check(timer.get("Unit") == "mihomo-subscription-update.service", "subscription timer must use the transactional updater")
+
+
 def main() -> int:
     check_no_bytecode()
     check_syntax()
@@ -800,6 +883,7 @@ def main() -> int:
     check_installer()
     check_runtime_parameters()
     check_subscription_environment()
+    check_subscription_schedule()
 
     if FAILURES:
         print("automation checks FAILED")

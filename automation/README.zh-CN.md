@@ -76,25 +76,27 @@
 | `mihomo-dnsmasq-guard.timer` | 启动 30 秒后，之后每 30 秒（抖动 5 秒） | 客户端 UDP/TCP 与实际上游分层观测，只恢复满足条件的客户端解析器 |
 | `mosdns-rules-update.timer` | 04:20（抖动 30min） | MosDNS 路由数据更新 |
 | `mosdns-binary-update.timer` | 周日 05:10（抖动 1h） | MosDNS 二进制更新 |
+| `mihomo-subscription-update.timer` | 开机 10 分钟，任务结束后每 48 小时 | 主订阅及非手动额外来源刷新，候选校验、备份、业务检查和失败恢复 |
 | `mosdns-healthcheck.timer` | 启动 30s 后，之后每 1 分钟 | MosDNS 分流自检与回退选择 |
 
-另有四个随仓库安装、在真机上保持 disabled 的 timer：`mihomo-rules-update.timer`、`mihomo-subscription-update.timer`、
-`mihomo-download-quality.timer`、`mihomo-social-quality.timer`。订阅管线会整份重写配置、质量采样消耗预算且改 provider，
-都要人工确认时机；`install.sh` 只 `enable` 上表六个，把这四个 `disable`，从旧发布升级时这步幂等。
+另有三个随仓库安装、保持 disabled 的 timer：`mihomo-rules-update.timer`、
+`mihomo-download-quality.timer`、`mihomo-social-quality.timer`。`install.sh` 启用上表七个 timer，
+保持这三个关闭；升级不会再禁用订阅刷新。订阅无变化不重启核心；有变化时现有更新器会重启 Mihomo，
+并在业务检查失败时恢复旧配置。下载失败保留当前主节点或有效额外缓存，不能将缓存保留报告为来源已更新。
 
 `Persistent=true` 的 timer 可能在首次启动或补执行时立即触发一次，不能只看 `OnCalendar` 判断是否会执行。
 出口探测不属于启动门禁；探测目标或代理节点不可达不应带走国内 DIRECT 转发。
 MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto` 选择，国内解析正常即可保留 MosDNS。
 这里的 `mihomo-dns-mode` 只管理本机环回 dnsmasq；VLAN 客户端的 dnsmasq 仍按部署配置选择上游。
 因此本机 `127.0.0.1:53` 或 `5335` 正常不能代替 VLAN 客户端的 UDP/TCP DNS 与实际流量验收。
-`automation/install.sh` 默认 `enable` 12 个单元（上表六个 timer 加六个服务，不 `start`），四个休眠 timer 显式 `disable`。
+`automation/install.sh` 默认 `enable` 13 个单元（上表七个 timer 加六个服务，不 `start`），三个休眠 timer 显式 `disable`。
 `measurement.enabled` 默认 false，Mihomo 原生 URLTest 暂停；显式启用时仍须配置原生预算服务与账户，周期下限 900 秒。
 下载、GitHub、模型和 Package Download 在授权叶节点间自动选择；YouTube/Instagram 的 Streaming 与 X 的 Social
 保留部署顺序并使用原生 fallback。完整契约见[运维手册](../docs/operations.zh-CN.md)。
 编辑 manifest 不会直接改变运行中的配置；下一次满足更新间隔且通过校验和健康门禁的订阅更新，
 会重新生成并加载 overlay。随后核对运行配置的检测周期、Telegram 网段及实际业务路径。
 
-升级自带旧选路单元的真实主机时，当前安装器只安装仓库中的现行文件并 `disable` 上述四个休眠 timer，
+升级自带旧选路单元的真实主机时，当前安装器只安装仓库中的现行文件并 `disable` 上述三个休眠 timer，
 不会删除主机上已退役的 adaptive 单元文件。管理员应先人工核对旧单元是否在运行、是否有在途作业，
 再按维护窗口停用并移除它们；本轮没有对真实主机执行删除。
 
@@ -102,7 +104,7 @@ MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto`
 
 ```sh
 sudo automation/install.sh --dry-run        # 只打印计划，不碰文件系统
-sudo automation/install.sh                  # 安装 24 个 sbin 与整棵 unit 树，enable 12 个单元（不 start）
+sudo automation/install.sh                  # 安装 24 个 sbin 与整棵 unit 树，enable 13 个单元（不 start）
 GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，也不装到真实系统）
 ```
 
@@ -114,17 +116,26 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - `route-defaults.yaml` 独立安装为 0644 公共数据，不写入或替换已有私有 `capabilities.yaml`；旧清单缺少路由表时使用这份默认表；
 - 创建 0700 权限的 `/etc/mihomo/{secrets,adaptive,providers}` 与 `/var/lib/mihomo-{measurements,extra-subscriptions,subscription-backups}`；
 - 若 `/etc/dnsmasq-upstreams.conf` 不存在，用 `etc/dnsmasq/upstreams.conf` 播种，保证代理栈启动前 DNS 可用；
-- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 12 个单元、`disable` 四个休眠 timer；
+- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 13 个单元、`disable` 三个休眠 timer；
   `enable` 只决定开机自启，首次部署仍需手工 `start` 常驻单元；
 - dispatcher 只在 `/etc/NetworkManager` 存在时装成 0700；仍不改动 sshd、路由、sysctl 或 nftables（管理无线源路由由 dispatcher 在 NetworkManager 事件里自己加）。
 
 安装后仍需人工完成：把 `env/automation.env.example` 与 `env/mihomo-alert.env.example` 复制成 `/etc/mihomo-automation.env`、
 `/etc/mihomo-alert.env`（0600）并填入真实值；放入订阅链接与面板 token；
 填写 `capabilities.yaml` 的 `overlay` 段与 `reconcile-targets.conf`；改写 dnsmasq 配置里的文档占位地址；确认 dispatcher 已按 NetworkManager 连接事件生效；
-按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。
+按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。私有订阅准备完成后执行
+`sudo systemctl enable --now mihomo-subscription-update.timer`。超过开机十分钟首次启用会立即检查；
+任务结束后等待 48 小时，重启后十分钟重新检查。手动刷新用 `sudo systemctl start mihomo-subscription-update.service`。
 
-安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移；
-校验失败时不会先覆盖文件。安装完成且文件与候选清单一致后，才原子记录新的安装基线。
+安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移。
+安装器持有维护锁，在 `/var/lib/mihomo-automation/.install-pending` 持久保存旧文件与权限后逐文件原子替换；
+可捕获的失败恢复旧文件集合，SIGKILL 等中断遗留的事务由下一次正常安装先恢复，再继续安装。
+恢复会校验日志、快照和当前文件；遇到人工改动或损坏记录时非零退出并保留恢复资料，不绕过漂移检查。
+`--dry-run` 不写入、不执行恢复，存在待恢复事务时只报告并退出。
+
+全部候选文件验证成功后，才提交新的安装清单并退出待恢复状态。systemd 配置在文件提交后执行；
+若 `daemon-reload`、`enable` 或有效单元的 `disable` 失败，安装器非零退出并提示服务配置未完成，已提交文件仍保持新版本。
+文件恢复不等于运行中服务回滚；断电恢复和真实服务时序需要单独实机验收。
 发布维护者在审查最终文件后生成清单，再验证；部署者不要用重生成清单或手工 `--record` 绕过差异：
 
 ```sh
@@ -150,7 +161,7 @@ sudo python3 automation/check-release.py --root /  # 只读核对已安装基线
 | `SUBSCRIPTION_BACKUP_URL` | 空 | 供应商文档提供的镜像链接；留空时只用 `subscription.url` 单链接 |
 | `MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS` | `1800` | 一次更新的工作时限；下载、规范化、校验、重启和验收均使用剩余时间 |
 | `MIHOMO_SUBSCRIPTION_CLEANUP_TIMEOUT_SECONDS` | `240` | 失败后的独立恢复总时限 |
-| `MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS` | `21600` | 相同失败来源与策略指纹的冷却期；`--force` 可明确重试 |
+| `MIHOMO_SUBSCRIPTION_FAILURE_COOLDOWN_SECONDS` | `21600` | 相同失败候选与策略/helper 指纹的冷却期；`--force` 可明确重试 |
 | `DNS_CLIENT_SERVER` / `DNS_CLIENT_PORT` | `127.0.0.1` / `53` | 实际向客户端提供 DNS 的地址与端口；VLAN 部署必须填写真实目标 |
 | `DNS_CLIENT_UNIT` | `dnsmasq` | 该客户端 DNS 实例所属的 systemd 单元，不能误填成另一个解析器 |
 | `DNS_UPSTREAM_SERVER` / `DNS_UPSTREAM_PORT` | `127.0.0.1` / `5335` | 客户端解析器实际使用的上游；直接接 Mihomo DNS 的站点应填写对应监听端口 |
@@ -174,6 +185,15 @@ sudo python3 automation/check-release.py --root /  # 只读核对已安装基线
 
 ## 订阅事务与恢复
 
+订阅输入可为 Clash YAML、Base64 包装的 YAML 或 URI 列表。SS URI 支持 SIP002 尾部斜线、
+百分号编码凭据、URL-safe Base64 和 IPv6；`obfs-local`/`simple-obfs` 映射到 Mihomo `obfs`，
+`v2ray-plugin` 支持 WebSocket 的 `tls`、`mux`、`host`、`path` 参数。不支持或格式错误的插件节点会明确报错并跳过，
+不会退化为无插件节点；没有可用节点时拒绝该来源。真实节点可连接性仍由后续验收确定。
+
+已有 `STT` 组但没有 `selections.STT` 的旧配置，按 `roles.bulk_download.stt_prefix` 对当前节点重建成员，
+保留原有组类型，并继续应用统一的稳定性与测量策略。显式 `selections.STT` 优先；必需来源没有候选时拒绝生成，保留运行配置。
+仅由用户自定义 provider 提供成员的 STT 组保留其 `use` 与 `filter`，不添加显式节点列表；自动生成的计量 provider 按当前成员重新生成。
+
 健康检查 timer 每分钟补偿清理一次失效 Fallback 固定选择，维护锁忙时跳过，API 失败留待下轮重试。
 它只处理非空 `fixed` 已不在该组 `all` 中的状态；有效固定选择和 Selector 保持原样。
 清理使用原生 controller DELETE，并读回确认；此接口清除选择及缓存，不删除节点。
@@ -191,7 +211,8 @@ critical HTTP 验收同时要求 curl 成功退出和预期状态码，半响应
 
 事务记录和恢复快照保存在 `/var/lib/mihomo-subscription-backups/`。被中断的事务在下次调用时先执行本地恢复，
 本次恢复完成后退出，不立即联网重装同一候选；已 `accepted` 的事务只修复缓存，尚未验收的事务恢复旧配置。
-当前配置出现不属于该事务的变化时保留冲突和恢复记录，不覆盖独立修改。相同失败候选在冷却期内跳过，
+当前配置出现不属于该事务的变化时保留冲突和恢复记录，不覆盖独立修改。失败指纹包含规范化的最终候选配置与策略/helper 身份，
+因此继承的 TUN、DNS 或规则发生实质变化时允许重新验证；相同失败候选在冷却期内跳过，
 需要再次尝试时显式使用 `--force`；日志与冷却记录不保存原始 URI 或凭据。
 
 默认工作时限为 1800 秒，恢复另有 240 秒总时限；子进程超时会终止其进程组。
@@ -261,7 +282,8 @@ python3 tools/check_image.py        # 恢复镜像的自检与拒绝写入磁盘
 python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池顺序、备份池、幂等性、空 manifest 时 fail-closed
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护
 python3 tools/check_legacy_stt.py  # 旧清单 STT 改名/删除迁移、原生计量归属与重复刷新
-python3 tools/check_subscription_update.py  # 完整订阅更新：21 种离线场景，包括原子切换前后故障、撤权、重启与缓存保护
+python3 tools/check_subscription_normalize.py  # SS URI 凭据、地址与插件转换，以及拒绝路径
+python3 tools/check_subscription_update.py  # 完整订阅更新：24 种离线场景，包括原子切换前后故障、撤权、重启、手动来源不下载及缓存保护
 python3 tools/check_update_transaction.py  # 真实CLI事务：锁、并发输入、时限、崩溃恢复、缓存持久顺序与规范化
 python3 tools/check_client_dns_guard.py    # 客户端UDP/TCP、实际DNS上游、合法答案、维护互斥与恢复预算
 python3 tools/check_dnsmasq_guard.py       # 宿主兼容目标与持续局部DNS故障不重启
@@ -273,7 +295,7 @@ python3 tools/check_update_rules.py # 规则更新事务与回滚
 python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
 
-`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、24 个脚本全部安装、`enable` 集合恰好是发布层 12 个单元、四个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
+`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、24 个脚本全部安装、`enable` 集合恰好是发布层 13 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
 上述合成检查不替代真实 Linux 数据面、目标机 systemd 行为与客户端验收。
 安装到目标系统前，先在目标系统上做语法检查（`nft -c -f`、`dnsmasq --test`、`mihomo -t`），见
 [分阶段部署](../docs/deployment.zh-CN.md)。

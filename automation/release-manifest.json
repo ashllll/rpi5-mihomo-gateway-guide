@@ -1,16 +1,16 @@
 {
   "format": 1,
-  "release_id": "88d1e73051747799b4573ed88e013365abf29e14d818106aa6247d0ef260a9dc",
+  "release_id": "504b7917aebf5102171ad8440bea7520e4d62774e82c2a89f4dfc1c32a8ade6d",
   "files": [
     {
       "source": "check-release.py",
       "target": null,
-      "sha256": "8e123ec68788631bd6f60cde4192b0be5cedd271a423551e82c37b536921e460"
+      "sha256": "6f4d970908217090b4ded95228abf494d26ef50cc93214529640653dfed8e2ff"
     },
     {
       "source": "env/automation.env.example",
       "target": null,
-      "sha256": "4b404d0f9d22ad13a9bc705099098fba33c82e7ee91b038f4fff961e3e046e17"
+      "sha256": "29e60f5e56b58a503253503bab75676c84dad5fe79e7921f3b2262ddb36d50d0"
     },
     {
       "source": "env/health-probes.conf.example",
@@ -118,12 +118,12 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "b9e2fab2fe3804182101eedc3646b7c590cf621d3b6c76f3f0a68cc8c9fdcfb4"
+      "sha256": "d110879cac0d1a5c2c8a32b273685d00f55318b87655ad7c018629da23f9962f"
     },
     {
       "source": "policy/capabilities.yaml",
       "target": null,
-      "sha256": "936922b567468cd9bc6549c145261d79ac14bd142a382b9b8c107103a6f45d51"
+      "sha256": "62e5abaf09da7ed38e6c255eb7a804aba21c9024044ce7c414241469aacf3506"
     },
     {
       "source": "policy/route-defaults.yaml",
@@ -145,7 +145,7 @@
     {
       "source": "sbin/mihomo-alert",
       "target": "/usr/local/sbin/mihomo-alert",
-      "sha256": "28960b430f7ab6edf825ea138bf03170b801653fac64a7db24e45a361b753b83",
+      "sha256": "028d3ff04010ad69d652292c4a049a33a3cb6055fda740c84aee52bad2e7475c",
       "mode": 493
     },
     {
@@ -163,7 +163,7 @@
     {
       "source": "sbin/mihomo-dnsmasq-guard",
       "target": "/usr/local/sbin/mihomo-dnsmasq-guard",
-      "sha256": "34a8b7ebc17b9596dc99c067ab6de3b09e99067909de92730b99588456f4a837",
+      "sha256": "dbb90baf1983ba320729a4618ce466ff641928d87dff9e192fd3f13a6bceb05b",
       "mode": 493
     },
     {
@@ -181,19 +181,31 @@
     {
       "source": "sbin/mihomo-measurement-budget",
       "target": "/usr/local/sbin/mihomo-measurement-budget",
-      "sha256": "3c1355e4583399127327381e99c81b09fcfa165a1e9ed26176af25266132359d",
+      "sha256": "85a544b9ed82bc657bcf0cd3690b77c1f95db9f9d8e9beb449f74a7a93816749",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-measurement-policy",
       "target": "/usr/local/sbin/mihomo-measurement-policy",
-      "sha256": "e8658465ab8df40d534b272dc4717a71d8b2d671abd333cee051bdf820242b3e",
+      "sha256": "e8f14608971ac5caf00b51665a45113e0c219937c5ab6e3ea8e42ced63612ecd",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-media-guard",
+      "target": "/usr/local/sbin/mihomo-media-guard",
+      "sha256": "311f22ff3f8813e9d4d16402caa36a8097d60801e10e4649b94429f6cc819d7f",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-media-policy",
+      "target": "/usr/local/sbin/mihomo-media-policy",
+      "sha256": "83150e6a3938fe761b657044b171763491f85045f6df5e4f2e6efca394bd7e66",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-policy-overlay",
       "target": "/usr/local/sbin/mihomo-policy-overlay",
-      "sha256": "c1d677113ebbef0d259ea883808314d0843265358dc25540b89defec14f3e6a3",
+      "sha256": "b8330c518225b80b09f172aef76c1b9d0c763f784d788c70bcdd2ce84735b550",
       "mode": 493
     },
     {
@@ -217,7 +229,7 @@
     {
       "source": "sbin/mihomo-subscription-normalize",
       "target": "/usr/local/sbin/mihomo-subscription-normalize",
-      "sha256": "403c6781afefef03527a38bf9250e3ab76ced3c283d93400bebe06e02353a817",
+      "sha256": "3a9a7fa53ba3f77d437e86d4450f49314a28213e4d25a74cde1417ddce3f7d13",
       "mode": 493
     },
     {
@@ -229,13 +241,13 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "9a90c5e63f102768e299221bcdd7b79f6bffe90dff85ce55a127294aa8b480bd",
+      "sha256": "8d491de34052e7f0306df494f1f2f04750bdb55613e89a26cd404c663f70ef16",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-watch",
       "target": "/usr/local/sbin/mihomo-watch",
-      "sha256": "0c9ebd99ba947bf6a55b64eb33a00056619dc01ca5740acd3aa2a325ad689672",
+      "sha256": "d47befc1218dcdf47b7894ebd258c286915a9b8633676207038d6c48183ad742",
       "mode": 493
     },
     {
@@ -347,6 +359,18 @@
       "mode": 420
     },
     {
+      "source": "systemd/mihomo-media-guard.service",
+      "target": "/etc/systemd/system/mihomo-media-guard.service",
+      "sha256": "4199a0d713d8d9c48bbc77bda511ed196b923b929315ed4fb0267ac5f6458740",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-media-guard.timer",
+      "target": "/etc/systemd/system/mihomo-media-guard.timer",
+      "sha256": "c1a6a1cc17ddad041cb2691d1ef1c6af270cb58eec799c28ab8f1d4f27108d2c",
+      "mode": 420
+    },
+    {
       "source": "systemd/mihomo-rules-update.service",
       "target": "/etc/systemd/system/mihomo-rules-update.service",
       "sha256": "b4d7e103786481909b0d7a950c1014bd3c0b890ed11a9199b83c7ade306e911f",
@@ -391,7 +415,7 @@
     {
       "source": "systemd/mihomo-subscription-update.timer",
       "target": "/etc/systemd/system/mihomo-subscription-update.timer",
-      "sha256": "0dbcbca73d774987f9e4faa3f6a23bf0a55efc8b078c48efa81defe332468601",
+      "sha256": "7be4bfc55eb061519f4f2e65d3d2e1620e0bda0ec91407205b90d6305adb4c9c",
       "mode": 420
     },
     {
@@ -428,6 +452,12 @@
       "source": "systemd/mihomo.service.d/measurement-budget.conf",
       "target": "/etc/systemd/system/mihomo.service.d/measurement-budget.conf",
       "sha256": "e26895744eb6d88e96c1a1c608e1f34ad52b86aa7dcf9603c5f7cc078594b07b",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo.service.d/media-admission.conf",
+      "target": "/etc/systemd/system/mihomo.service.d/media-admission.conf",
+      "sha256": "9b58a1eb38e1a2828c0a7921e56a46fb06e49b28484585dbfcaebba8772f1676",
       "mode": 420
     },
     {

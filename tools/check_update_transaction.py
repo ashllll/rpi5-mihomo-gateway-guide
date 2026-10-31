@@ -151,7 +151,8 @@ class UpdateTransactionCLI(unittest.TestCase):
             path.write_text('#!' + sys.executable + '\n' + boundary)
             path.chmod(0o755)
         for name in ('mihomo-subscription-candidate', 'mihomo-policy-overlay', 'mihomo-measurement-policy',
-                     'mihomo-subscription-normalize'):
+                     'mihomo-subscription-normalize', 'mihomo-media-policy', 'mihomo-media-guard',
+                     'mihomo-download-quality'):
             original = ROOT / 'automation/sbin' / name
             if not original.exists():
                 continue
@@ -241,10 +242,67 @@ os.execv(sys.executable, [sys.executable, __ORIGINAL__] + sys.argv[1:])
         self.assert_drift_rejected('reconcile')
 
     def test_success_restarts_core_to_replace_provider_lifecycles(self):
+        self.assertIsNot(yaml.safe_load(self.capabilities.read_text()).get('media_admission', {}).get('enabled'), True)
         result = self.run_cli()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = (self.directory / 'calls').read_text().splitlines()
         self.assertEqual([line for line in calls if line.startswith(('restart ', 'reload '))], ['restart mihomo'])
+
+    def test_media_readiness_rejection_preserves_running_config_core_and_cache(self):
+        before = self.config.read_bytes()
+        cache = {path.name: path.read_bytes() for path in (self.directory / 'cache').iterdir()}
+        boundary = '''import fcntl,os,sys
+from pathlib import Path
+root=Path(os.environ['SUB_TEST_ROOT'])
+assert '--check-ready' in sys.argv
+candidate=Path(sys.argv[sys.argv.index('--config')+1])
+(root/'readiness-candidate').write_bytes(candidate.read_bytes())
+with (root/'lock/mihomo-maintenance.lock').open('a') as lock:
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError: (root/'readiness-lock-held').touch()
+sys.exit(1)
+'''
+        command = self.directory / 'bin/mihomo-media-guard'
+        command.write_text('#!' + sys.executable + '\n' + boundary)
+        result = self.run_cli()
+        self.assertTrue((self.directory / 'readiness-candidate').exists(), result.stderr)
+        self.assertTrue((self.directory / 'readiness-lock-held').exists(), 'readiness ran outside the maintenance lock')
+        candidate = yaml.safe_load((self.directory / 'readiness-candidate').read_text())
+        self.assertEqual(candidate['proxies'][0]['server'], '203.0.113.20')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertEqual({path.name: path.read_bytes() for path in (self.directory / 'cache').iterdir()}, cache)
+        calls = self.directory / 'calls'
+        mutations = [line for line in calls.read_text().splitlines() if line.startswith(('restart ', 'reload '))] if calls.exists() else []
+        self.assertFalse(mutations, mutations)
+
+    def test_corrected_local_config_is_not_cooled_as_the_previous_failed_candidate(self):
+        current = yaml.safe_load(self.config.read_text())
+        current['tun'] = {'enable': True, 'stack': 'gvisor'}
+        self.config.write_text(yaml.safe_dump(current))
+        failed = self.run_cli(mode='health')
+        self.assertNotEqual(failed.returncode, 0)
+        current = yaml.safe_load(self.config.read_text())
+        self.assertNotEqual(current['proxies'][0]['server'], '203.0.113.20')
+        current['tun']['stack'] = 'system'
+        self.config.write_text(yaml.safe_dump(current))
+        retried = self.run_cli()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        installed = yaml.safe_load(self.config.read_text())
+        self.assertEqual(installed['tun']['stack'], 'system')
+        self.assertEqual(installed['proxies'][0]['server'], '203.0.113.20')
+        self.assertFalse((self.directory / 'backups/failed-candidate').exists())
+
+    def test_same_failed_candidate_stays_cooled_until_forced(self):
+        self.assertNotEqual(self.run_cli(mode='health').returncode, 0)
+        before = self.config.read_bytes()
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.assertIn('cooling down', (self.directory / 'messages').read_text())
+        forced = self.run_cli('--force')
+        self.assertEqual(forced.returncode, 0, forced.stderr)
+        self.assertEqual(yaml.safe_load(self.config.read_text())['proxies'][0]['server'], '203.0.113.20')
 
     def test_primary_base64_and_extra_uri_inputs_are_normalized_before_prepare_and_cache(self):
         for path in (self.directory / 'downloads').iterdir():

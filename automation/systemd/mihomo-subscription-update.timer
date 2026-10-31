@@ -1,10 +1,10 @@
 [Unit]
-Description=Daily Mihomo subscription update during the low-traffic window
+Description=Refresh Mihomo subscriptions every 48 hours
 
 [Timer]
-OnCalendar=*-*-* 04:30:00
-RandomizedDelaySec=15min
-Persistent=true
+OnBootSec=10min
+OnUnitInactiveSec=2d
+RandomizedDelaySec=0
 Unit=mihomo-subscription-update.service
 
 [Install]
