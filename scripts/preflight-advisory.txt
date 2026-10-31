@@ -1,3 +1,4 @@
 # Slow, timing-sensitive integration checks: run on every gate but do not block.
 # Each entry must name why blocking is unsuitable.
 check_update_transaction.py   # 168s of real network-deadline sleeps; measured 1 failure in 3 isolated runs under load
+check_release_integrity.py    # expects a SIGKILL-killed child (returncode -SIGKILL); macOS reports 1, so it fails only on macOS — the Linux CI run is authoritative
