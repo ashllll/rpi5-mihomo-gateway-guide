@@ -242,7 +242,8 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
       mosdns-binary-update.timer \
       dnsmasq-vlan-pilot.service \
       dnsmasq.service \
-      homeassistant-access-guard.service; do
+      homeassistant-access-guard.service \
+      rp5-agent.service; do
     service_action systemctl enable "$unit"
   done
   # Rule and retired quality timers remain dormant. Subscription refresh is
@@ -268,7 +269,10 @@ Still required before the gateway is fully functional:
        install -m 0600 $here/env/automation.env.example /etc/mihomo-automation.env
        install -m 0600 $here/env/mihomo-alert.env.example /etc/mihomo-alert.env
   2. Store the subscription link in /etc/mihomo/secrets/subscription.url and the
-     dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).
+     dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).  Create
+     the status-agent bearer token when rp5-agent.service is enabled:
+       install -m 0600 /dev/null /etc/mihomo/secrets/rp5-agent.token
+       python3 -c 'import secrets;print(secrets.token_urlsafe(32))' > /etc/mihomo/secrets/rp5-agent.token
   3. Fill the curated-pool node labels in the overlay section of
      /etc/mihomo/adaptive/capabilities.yaml, and write
      /etc/mihomo/reconcile-targets.conf for mihomo-reconcile-policy.

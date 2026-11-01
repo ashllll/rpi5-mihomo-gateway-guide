@@ -424,7 +424,7 @@ record_failure() {
   schedule_next "$delay"
   failure_tmp=$failure_file.tmp.$$
   printf 'at=%s step=%s rc=%s candidate=%s reason=%s retry=%s retry_in=%s\n' \
-    "$(date -Is)" "$failure_step" "$failure_rc" "${candidate:-none}" "$failure_reason" \
+    "$(date -Iseconds)" "$failure_step" "$failure_rc" "${candidate:-none}" "$failure_reason" \
     "$retry" "$delay" >"$failure_tmp"
   chmod 600 "$failure_tmp"
   mv -f "$failure_tmp" "$failure_file"

@@ -40,3 +40,7 @@ _scratch/
 
 # Local MCP tool state (Serena); never published.
 .serena/
+
+# Short-lived temp roots used by the gate when TMPDIR is too long for AF_UNIX.
+.preflight-tmp/
+.audit-tmp/

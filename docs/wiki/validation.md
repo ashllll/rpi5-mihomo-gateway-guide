@@ -2,32 +2,45 @@
 
 [Wiki 首页](../README.md) · [部署](../deployment.zh-CN.md) · [运维](../operations.zh-CN.md)
 
-## 仓库检查
+## 本地唯一入口
 
 ```sh
-python3 tools/validate_public.py
-python3 tools/check_publication_privacy.py
+scripts/preflight.sh              # 全量：所有门禁检查 + 发布/公开面步骤
+scripts/preflight.sh --list       # 打印这一轮会跑什么，不执行
+scripts/preflight.sh --staged     # pre-commit：按暂存改动映射必跑检查
+scripts/preflight.sh --profile core  # 真核二进制专属检查（CI core-build）
 ```
 
-`validate_public.py` 检查必需文件、无非白名单二进制、SVG 可解析、工作树文本不命中隐私模式
-（MAC / 主机名 / 序列号样式 / 本地绝对路径 / 通用 token / 订阅端点 / 节点标签 / 凭据型 URL / base64 载荷），
-文档里的私网地址必须落在仓库自己声明的网段内，并把发布门扩到整改基线之后的提交树与提交信息；
-历史作用域记录在 `scripts/privacy-history-baseline.txt`，第 3 阶段重写完成后删除该文件，门会自动扫描全部历史
-（重写前可用 `--history-all` 做一次全历史审计）。
-`check_publication_privacy.py` 回归隐私规则本身（25 类合成反例，值在运行时拼接）。其余合成检查按改动范围选用：
+`scripts/preflight.sh` 是薄壳，逻辑在 `scripts/preflight.py`；hook、开发机和两个 CI 都调用
+同一个脚本，不再各自维护检查清单。检查清单与「改动→必跑检查」映射的唯一来源是
+[`tools/verification-matrix.yaml`](../../tools/verification-matrix.yaml)：
 
-| 命令 | 覆盖 |
-|---|---|
-| `check_automation.py` | 脚本语法、env 变量与模板双向匹配、沙箱安装保留本地数据 |
-| `check_overlay.py` | 业务池权限、扁平 URLTest、域名路由与空池拒绝 |
-| `check_measurement_policy.py` | 原生检测所有权、账户映射、账本键与锁 |
-| `check_native_budget.py` | socket 准入、预扣、截止时间、失联拒绝 |
-| `check_subscription_candidate.py` / `check_subscription_update.py` | 候选生成与事务更新/回滚 |
-| `check_update_rules.py` | 规则更新事务与 reload 门禁 |
-| `check_stability.py` | 恢复动作不额外发起业务探测 |
-| `check_image.py` | 恢复镜像、首次启动种子、脱敏与磁盘拒绝检查 |
+- 新增 `tools/check_*.py` 会自动进入全量门与 CI；`--staged` 通过组映射找到受影响检查，
+  未映射的路径回落全量，不会出现「改了这个、却没跑那个」。
+- `check_media_core.py` 需要真实核心二进制，单独放在 `--profile core`；CI 的 `core-build`
+  构建 pinned 核心后调用同一个入口。没有二进制时它非 0 退出并说明缺依赖，不再静默 SKIP。
+- 检查以 `exit 77` 声明 SKIP。preflight 会打印 `SKIP` 并把门判红：没跑的断言不是通过。
+- `scripts/preflight-baseline.txt` 与 `scripts/preflight-advisory.txt` 默认必须为空。非空条目
+  必须写成 `名字 YYYY-MM-DD 原因`；过期、缺日期或指向不存在的检查都会让门红。
+- `check_release_integrity.py` 等检查在受限环境需要的临时目录从 `AUDIT_TMP_ROOT` / `TMPDIR`
+  读取；路径过长时回落到仓库内短路径 `.preflight-tmp/`，不再写死 `/tmp`、`/var/tmp`。
 
-CI 在 [`.github/workflows/validate.yml`](../../.github/workflows/validate.yml) 里跑这些命令。
+门禁自身由 `tools/check_gate_integrity.py` 保护：它验证矩阵覆盖、CI 是否仍调用同一入口、
+Gitea token 是否离开 URL、PR 是否仍在自托管 runner 上执行，以及 SKIP / 过期白名单在合成
+小仓库里确实会变红。
+
+## 检查的分类
+
+全量门包含三类入口：
+
+1. `tools/check_*.py`：逻辑层回归（脚本决策、状态机、安装事务、隐私/发布门、agent/HA/nftables
+   工件）。大多数用真脚本 + 桩替代外部系统，能证明「决策正确」，不证明目标机上的 systemd、
+   nftables、dnsmasq、真核或真实网络。
+2. `automation/check-release.py`：发布包身份与受管文件清单。
+3. `tools/validate_public.py`：公开树扫描（设备标识、凭据、订阅端点、节点标签、本地路径、
+   历史基线之后的作用域）。
+
+具体某一轮跑哪些检查，以 `scripts/preflight.sh --list` 的输出为准；不要手抄清单到文档里。
 
 ## 目标机门禁（真机做，离线检查代替不了）
 
@@ -36,9 +49,13 @@ CI 在 [`.github/workflows/validate.yml`](../../.github/workflows/validate.yml) 
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 cat /run/mihomo-healthcheck/status
 sudo /usr/local/sbin/mihomo-healthcheck --egress
+sudo scripts/preflight.sh --profile core   # 需要 MIHOMO_TEST_BINARY 指向真核
+sudo systemctl show nftables.service -p ExecStop
+sudo tools/check_nftables_override.py --live
 ```
 
-前三步证明配置、四要素与运行状态；`--egress` 证明经代理端口能取到 204（不花预算）。
+前三步证明配置、四要素与运行状态；`--egress` 证明经代理端口能取到 204（不花预算）；
+`nftables` 的 loaded ExecStop 必须是两条 `destroy table`，不能出现 `flush ruleset`。
 `systemctl is-active` 不算通过——2026-10-25 的 gVisor 事故就是进程活着而 TUN 缺失。
 
 ## 仍需人工验收

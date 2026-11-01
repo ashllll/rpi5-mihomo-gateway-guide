@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shutil
 import re
 import socket
 import struct
@@ -26,6 +27,11 @@ import sys
 import tempfile
 import threading
 import time
+
+if shutil.which('dig') is None:
+    print('MISSING DEPENDENCY: dig not found; install dnsutils (Debian) or bind9-dnsutils',
+          file=sys.stderr)
+    raise SystemExit(2)
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'automation/sbin/mihomo-healthcheck'

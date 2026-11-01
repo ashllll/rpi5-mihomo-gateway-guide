@@ -26,6 +26,6 @@
 
 ## 单元数量
 
-发布层 enable 13 个单元（六个 service、七个 timer），订阅刷新在开机 1 分钟后运行，之后 timer 每 10 分钟 tick；更新程序成功后排 48 小时，失败后 10 分钟重试。
+发布层 enable 15 个单元（七个 service、八个 timer），订阅刷新在开机 1 分钟后运行，之后 timer 每 10 分钟 tick；更新程序成功后排 48 小时，失败后 10 分钟重试。
 `mihomo-rules-update`、`download-quality`、`social-quality` 三个 timer 随仓库安装但保持 disabled。
 清单、失败恢复与手动操作见[运维文档](../operations.zh-CN.md)。

@@ -58,7 +58,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 
 ## 2. 单元清单
 
-发布层 14 个 enabled（6 个 service + 8 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
+发布层 15 个 enabled（7 个 service + 8 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
 其余 worker service 是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，不算 enabled。
 
 | 单元 | 作用 | 触发 |
@@ -88,8 +88,8 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mihomo-social-quality.timer` | 同上，仅 X 视频场景，每 2 分钟一轮 | `sudo /usr/local/sbin/mihomo-social-quality` |
 
 `homeassistant-access-guard.service` 也在发布层（oneshot，开机跑一次）。
-本机另有 1 个不在发布层的单元：`rp5-agent.service`（T-Display 监控的只读指标，tcp/8799），
-由部署端单独维护，仓库不发布（2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`）。
+`rp5-agent.service` 在发布层内（T-Display 监控的只读指标，tcp/8799；`/health` 公开，状态端点要求
+Bearer token，token 文件由部署端创建）。2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`。
 
 订阅定时任务使用树莓派本机 systemd，不依赖管理电脑。私有地址准备好后执行 `sudo systemctl enable --now mihomo-subscription-update.timer`，用 `systemctl list-timers mihomo-subscription-update.timer` 核对下一次执行。开机超过十分钟后首次启用会立即检查；任务结束（包括失败或无变化）后等待 48 小时，重启后十分钟再次检查。手动检查用 `sudo systemctl start mihomo-subscription-update.service`。
 

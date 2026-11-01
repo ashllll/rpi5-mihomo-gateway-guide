@@ -54,6 +54,7 @@
 | `mosdns-rollout-rollback` | 只接受 `/var/backups/mosdns-rollout-*.tar.gz` 的回滚点，回退单元与脚本 |
 | `mosdns-emergency-direct` | 紧急旁路：停用 MosDNS 及其 timer，DNS 走直连 |
 | `mosdns-resume-auto` | 恢复 MosDNS 服务与三个 timer |
+| `rp5-agent.py` | 8799 只读状态 agent；状态端点要求 Bearer token，controller 目标固定为 loopback |
 | `homeassistant-access-guard` | 拒绝上游接口访问 Home Assistant UI（tcp/8123），保持容器/主机数据库与配置独立备份 |
 
 ## systemd 单元与定时任务
@@ -61,7 +62,7 @@
 服务单元：`mihomo.service`（含 `hardening.conf`、`ucg-link.conf`、`dns-failover.conf`、`measurement-budget.conf`、
 `zz-startup-probe.conf`、`zz-alert.conf` 六个 drop-in）、`mihomo-measurement-budget.service`、`mihomo-watch.service`、
 `mosdns.service`、`dnsmasq-vlan-pilot.service`、`dnsmasq.service.d/boot-safe.conf`、`homeassistant-access-guard.service`、
-`mihomo-alert@.service`，以及下表脚本对应的一次性 `.service`。
+`rp5-agent.service`、`mihomo-alert@.service`，以及下表脚本对应的一次性 `.service`。
 预算准入服务在真机上启用，`measurement-budget.conf` 把核心的 `ExecStart` 换成 `--run-core` 包装；
 预算 drop-in 就是 `systemd/mihomo.service.d/measurement-budget.conf`，不再有单独的 `optional/` 副本。
 带 `Exec*` 且依赖部署参数的单元统一加载 `EnvironmentFile=-/etc/mihomo-automation.env`；`mihomo-watch.service`
@@ -89,7 +90,7 @@
 MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto` 选择，国内解析正常即可保留 MosDNS。
 这里的 `mihomo-dns-mode` 只管理本机环回 dnsmasq；VLAN 客户端的 dnsmasq 仍按部署配置选择上游。
 因此本机 `127.0.0.1:53` 或 `5335` 正常不能代替 VLAN 客户端的 UDP/TCP DNS 与实际流量验收。
-`automation/install.sh` 默认 `enable` 13 个单元（上表七个 timer 加六个服务，不 `start`），三个休眠 timer 显式 `disable`。
+`automation/install.sh` 默认 `enable` 15 个单元（八个 timer 加七个服务，不 `start`），三个休眠 timer 显式 `disable`。
 `measurement.enabled` 默认 false，Mihomo 原生 URLTest 暂停；显式启用时仍须配置原生预算服务与账户，周期下限 900 秒。
 下载、GitHub、模型和 Package Download 在授权叶节点间自动选择；YouTube/Instagram 的 Streaming 与 X 的 Social
 保留部署顺序并使用原生 fallback。完整契约见[运维手册](../docs/operations.zh-CN.md)。
@@ -100,11 +101,15 @@ MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto`
 不会删除主机上已退役的 adaptive 单元文件。管理员应先人工核对旧单元是否在运行、是否有在途作业，
 再按维护窗口停用并移除它们；本轮没有对真实主机执行删除。
 
+`systemd/nftables.service.d/override.conf` 不属于上方单元表，却随 unit 树安装：它把 Debian 的
+`ExecStop=/usr/sbin/nft flush ruleset` 改成只 destroy `inet rp_filter` 与 `ip rp_nat`，避免停 nftables
+时清掉 Mihomo 的运行期表。
+
 ## 安装
 
 ```sh
 sudo automation/install.sh --dry-run        # 只打印计划，不碰文件系统
-sudo automation/install.sh                  # 安装 24 个 sbin 与整棵 unit 树，enable 13 个单元（不 start）
+sudo automation/install.sh                  # 安装 27 个 sbin 与整棵 unit 树，enable 15 个单元（不 start）
 GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，也不装到真实系统）
 ```
 
@@ -116,7 +121,7 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - `route-defaults.yaml` 独立安装为 0644 公共数据，不写入或替换已有私有 `capabilities.yaml`；旧清单缺少路由表时使用这份默认表；
 - 创建 0700 权限的 `/etc/mihomo/{secrets,adaptive,providers}` 与 `/var/lib/mihomo-{measurements,extra-subscriptions,subscription-backups}`；
 - 若 `/etc/dnsmasq-upstreams.conf` 不存在，用 `etc/dnsmasq/upstreams.conf` 播种，保证代理栈启动前 DNS 可用；
-- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 13 个单元、`disable` 三个休眠 timer；
+- 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 15 个单元、`disable` 三个休眠 timer；
   `enable` 只决定开机自启，首次部署仍需手工 `start` 常驻单元；
 - dispatcher 只在 `/etc/NetworkManager` 存在时装成 0700；仍不改动 sshd、路由、sysctl 或 nftables（管理无线源路由由 dispatcher 在 NetworkManager 事件里自己加）。
 
@@ -295,7 +300,7 @@ python3 tools/check_update_rules.py # 规则更新事务与回滚
 python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
 
-`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、24 个脚本全部安装、`enable` 集合恰好是发布层 13 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
+`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、27 个脚本全部安装、`enable` 集合恰好是发布层 15 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
 上述合成检查不替代真实 Linux 数据面、目标机 systemd 行为与客户端验收。
 安装到目标系统前，先在目标系统上做语法检查（`nft -c -f`、`dnsmasq --test`、`mihomo -t`），见
 [分阶段部署](../docs/deployment.zh-CN.md)。

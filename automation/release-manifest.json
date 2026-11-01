@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "7fa0a0adebf72bef3fc4714eb9fd039206db8e50b5a875a424c88ea91fec42ed",
+  "release_id": "572e7fa0091d1d7fe83845aa7731fc8df79ad539f6e39ea575f1060e7a2a4631",
   "files": [
     {
       "source": "check-release.py",
@@ -10,7 +10,7 @@
     {
       "source": "env/automation.env.example",
       "target": null,
-      "sha256": "02d28bef8bde28c0860db92c95720116140aa5c969e171cd65b07b6f1fd222f2"
+      "sha256": "62f2e9792914158bd70e3646ceeec27f2bc68e195f0e9c5e27e12c477a861f56"
     },
     {
       "source": "env/health-probes.conf.example",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "d110879cac0d1a5c2c8a32b273685d00f55318b87655ad7c018629da23f9962f"
+      "sha256": "09ced0336f81bcff1e4af40a25ad2e4b1f0753dfbf5d2613a232cd4420c9e35a"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -241,7 +241,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "698a3466a937b1bc115f3ae69eb3416dce9e716150474e7be3f5396d89923e42",
+      "sha256": "6dcc565d1b94656cc6dfca6d7a38e73b7e9063dc9f06499d5f35a04f95b6e218",
       "mode": 493
     },
     {
@@ -284,6 +284,12 @@
       "source": "sbin/mosdns-update-rules",
       "target": "/usr/local/sbin/mosdns-update-rules",
       "sha256": "4ae72456b731cffb25d65cf13fc99632411b5cd462d5db004883c432c5991c35",
+      "mode": 493
+    },
+    {
+      "source": "sbin/rp5-agent.py",
+      "target": "/usr/local/sbin/rp5-agent.py",
+      "sha256": "840643d9a14f876ddd32040de4a4ba19646a9036d3017cfe6dcc104fd404597a",
       "mode": 493
     },
     {
@@ -518,6 +524,18 @@
       "source": "systemd/mosdns.service",
       "target": "/etc/systemd/system/mosdns.service",
       "sha256": "b1f3ec60dbf5c0712bf77fccf4bb162a4f5fa05471a2b47cd258bc9ab0bf867d",
+      "mode": 420
+    },
+    {
+      "source": "systemd/nftables.service.d/override.conf",
+      "target": "/etc/systemd/system/nftables.service.d/override.conf",
+      "sha256": "ba61283c3d014ad96c1d8a3c42964bb4b9f7f58ff01d5e4499ae1077bebe7cbe",
+      "mode": 420
+    },
+    {
+      "source": "systemd/rp5-agent.service",
+      "target": "/etc/systemd/system/rp5-agent.service",
+      "sha256": "26e9eba99b70a5fe57028f803763ca5729f9f15c6587c7102caeab612f94d20f",
       "mode": 420
     }
   ]

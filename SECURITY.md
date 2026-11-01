@@ -16,10 +16,10 @@ stay in `/etc/mihomo-automation.env`, `/etc/mihomo/secrets`,
 | `0.0.0.0` | 9090/tcp | Mihomo external controller (bearer secret) | `lo`; other interfaces filtered by `inet rp_filter` input |
 | `0.0.0.0` | 46225/tcp | Mihomo auto-redirect listener | `proxy20`, `wg-ucg-pilot` |
 | `127.0.0.1` | 1053, 5335, 9091 | Mihomo DNS, MosDNS DNS, MosDNS/prometheus API | loopback |
-| `0.0.0.0` | 8799/tcp | rp5-agent read-only metrics (Bearer secret from env) | `wan0`/`wlan0`, source `192.168.0.0/24` |
+| `0.0.0.0` | 8799/tcp | rp5-agent read-only status (`/health` public metadata; `/api/v1/status` requires a Bearer token from `/etc/mihomo/secrets/rp5-agent.token`, 0600) | `wan0`/`wlan0`, source `192.168.0.0/24` |
 | `0.0.0.0` | 22/tcp | SSH | `wan0`/`wlan0`, source `192.168.0.0/24`; `proxy20` via the pilot include |
 | `wan0` | 51891/udp | WireGuard (`wg-ucg-pilot`) | upstream `192.168.0.1` only |
-| — | 8123/tcp | Home Assistant UI | **rejected** from `wan0`/`wlan0` by `homeassistant-access-guard.service`; no upstream path reaches it |
+| — | 8123/tcp | Home Assistant UI | **rejected** from `wan0`/`wlan0` by `homeassistant-access-guard.service`; no upstream path reaches it. The compose template pins the image by digest and drops `/run/dbus`; `privileged`/host networking remain until the stage-3 integration regression |
 
 IPv6 forwarding and DNS are disabled; `inet rp_filter` rejects IPv6 input on the
 service interface and drops MPTCP TCP options that would bypass redirection.
@@ -40,6 +40,8 @@ carries VLAN1 (upstream and management) and VLAN20 (`proxy20`, the UCG-broadcast
 core's `redirect`, not on accepting a whole interface, and management calls are pinned
 to loopback. Mihomo listens on `bind-address: "*"` and restricts the mixed port with
 `lan-allowed-ips`; neither replaces network isolation for untrusted clients.
+
+The status agent pins its controller target to `127.0.0.1:9090` in the unit and refuses any non-loopback value at startup.
 
 The published layer writes only files it owns (scripts, units, dnsmasq/MosDNS/locality
 skeletons) and never edits sshd, NetworkManager, sysctl or `/etc/nftables.conf`.

@@ -12,7 +12,7 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the unit tree is the recorded gateway's tree: exactly the thirteen units that
+* the unit tree is the recorded gateway's tree: exactly the fifteen units that
   box enabled, three timers installed but left off, the startup evidence gate and
   the budget wrapper drop-in, and none of the retired adaptive units,
 * the scripts and units are the recorded set (no adaptive selector), every
@@ -21,7 +21,7 @@ is checked the way it is shipped:
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, enables exactly the thirteen recorded units and
+  operator-edited deployment data, enables exactly the fifteen recorded units and
   disables exactly the three dormant timers, and changes nothing in --dry-run
   mode,
 * the gateway address and ports really come from the environment at runtime.
@@ -88,6 +88,7 @@ ENABLED_UNITS = (
     "dnsmasq-vlan-pilot.service",
     "dnsmasq.service",
     "homeassistant-access-guard.service",
+    "rp5-agent.service",
 )
 DORMANT_TIMERS = (
     "mihomo-rules-update.timer",
@@ -116,6 +117,7 @@ SBIN_SCRIPTS = (
     "mihomo-update-subscription",
     "mihomo-watch",
     "mosdns-emergency-direct",
+    "rp5-agent.py",
     "mosdns-healthcheck",
     "mosdns-resume-auto",
     "mosdns-rollout-rollback",

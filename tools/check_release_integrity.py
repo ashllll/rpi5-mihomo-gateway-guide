@@ -85,6 +85,11 @@ class ReleaseCLI(unittest.TestCase):
             old_gid = next((gid for gid in os.getgroups() if gid != os.getegid()), os.getegid())
             os.chown(private, os.geteuid(), old_gid)
             private.chmod(0o755)
+            # A noowners filesystem (the audit volume) accepts chown and keeps
+            # the old gid.  Record what the filesystem can actually represent;
+            # the property under test is "recovery preserves the pre-crash gid",
+            # not "this host can change gids".
+            effective_gid = private.stat().st_gid
             begun = subprocess.run([sys.executable, str(tool), '--root', str(private_root), '--begin'],
                                    capture_output=True, text=True)
             self.assertEqual(begun.returncode, 0, begun.stderr)
@@ -107,19 +112,33 @@ class ReleaseCLI(unittest.TestCase):
                                        capture_output=True, text=True)
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
             self.assertEqual(private.stat().st_mode & 0o777, 0o755)
-            self.assertEqual(private.stat().st_gid, old_gid)
+            self.assertEqual(private.stat().st_gid, effective_gid)
             self.assertFalse((private_root / 'var/lib/mihomo-automation/.install-pending').exists())
 
             new_root.mkdir()
             new_root.chmod(0o2755)
+            # noowners/external volumes silently drop the setgid bit.  The
+            # crash/recovery property still holds; only the exact mode the
+            # filesystem can represent differs.  Linux CI/ext4 asserts 0o2755.
+            setgid_expected = 0o2755 if new_root.stat().st_mode & 0o2000 else 0o755
+            if setgid_expected == 0o755:
+                print('LIMITED: this filesystem drops the setgid bit; Linux CI asserts 0o2755',
+                      file=sys.stderr)
             begun = subprocess.run([sys.executable, str(tool), '--root', str(new_root), '--begin'],
                                    capture_output=True, text=True)
             self.assertEqual(begun.returncode, 0, begun.stderr)
             sitecustomize.write_text(
                 'import os, signal\n'
                 'original = os.mkdir\n'
-                'def mkdir(path, *args, **kwargs):\n'
-                '    result = original(path, *args, **kwargs)\n'
+                'def mkdir(*args, **kwargs):\n'
+                # pathlib copies os.mkdir into _NormalAccessor at import time;\n
+                # sitecustomize runs first, so a bound call arrives as\n
+                # (accessor, path, mode).  Strip the accessor before calling.\n
+                '    if len(args) == 3 and type(args[0]).__name__ == "_NormalAccessor":\n'
+                '        path, mode = args[1], args[2]\n'
+                '    else:\n'
+                '        path, mode = args[0], args[1]\n'
+                '    result = original(path, mode, **kwargs)\n'
                 '    if os.fspath(path) == os.environ["R4_KILL_PATH"]:\n'
                 '        os.chmod(path, 0o2755)\n'
                 '        os.kill(os.getpid(), signal.SIGKILL)\n'
@@ -132,7 +151,7 @@ class ReleaseCLI(unittest.TestCase):
                 preexec_fn=lambda: os.umask(0o077), capture_output=True, text=True,
             )
             self.assertEqual(interrupted.returncode, -signal.SIGKILL)
-            self.assertEqual((new_root / 'etc').stat().st_mode & 0o7777, 0o2755)
+            self.assertEqual((new_root / 'etc').stat().st_mode & 0o7777, setgid_expected)
             recovered = subprocess.run([sys.executable, str(tool), '--root', str(new_root), '--recover'],
                                        capture_output=True, text=True)
             self.assertEqual(recovered.returncode, 0, recovered.stderr)
