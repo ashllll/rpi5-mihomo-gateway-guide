@@ -134,7 +134,7 @@ cat /run/mihomo-healthcheck/status
 | 规则 | `mosdns-update-rules`（或 timer 04:20） | `/etc/mosdns/rules/releases/` 保留旧版本，重指 `current` |
 | 手工紧急直连 | `mosdns-emergency-direct` | `mosdns-resume-auto` |
 
-`mosdns-rollout-rollback` 先切 DNS 到 direct，切换失败立即退出并保持 mosdns 运行；拿到维护锁后发现安装、二进制或规则更新留有 pending 记录时拒绝执行，避免删掉别人恢复所需的文件。二进制/规则更新在 `/etc/mosdns` 下留有 pending 记录（旧/新/阶段），开机或下一轮先按记录恢复，健康检查通过才提交；交换内核前 `mihomo-core-swap` 会先把「准备换/旧核/新核」fsync 落盘。
+`mosdns-rollout-rollback` 先切 DNS 到 direct，切换失败立即退出并保持 mosdns 运行；拿到维护锁后发现安装、订阅、二进制或规则更新留有 pending 记录时拒绝执行，避免删掉别人恢复所需的文件。二进制/规则更新在 `/etc/mosdns` 下留有 pending 记录（旧/新/阶段），开机或下一轮先按记录恢复，健康检查通过才提交；交换内核前 `mihomo-core-swap` 会先把「准备换/旧核/新核」fsync 落盘。
 
 ### 4.3 订阅与策略
 

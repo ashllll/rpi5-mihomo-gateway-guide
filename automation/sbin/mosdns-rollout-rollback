@@ -29,6 +29,7 @@ lock_file=$root/run/lock/mihomo-maintenance.lock
 install_pending=var/lib/mihomo-automation/.install-pending
 binary_pending=etc/mosdns/backups/transaction.pending
 rules_pending=etc/mosdns/rules/pending
+subscription_pending=var/lib/mihomo-subscription-backups/transaction.pending
 
 mkdir -p -- "$(dirname "$lock_file")"
 exec 8>"$lock_file"
@@ -40,7 +41,7 @@ fi
 # Another tool's transaction may be mid-write (or crashed mid-write).  Its
 # recovery owns these files; deleting them here would strand the DNS service
 # between two half-applied states.
-for pending in "$install_pending" "$binary_pending" "$rules_pending"; do
+for pending in "$install_pending" "$binary_pending" "$rules_pending" "$subscription_pending"; do
   if [ -e "$pending" ]; then
     echo "mosdns-rollout-rollback: pending transaction ($pending); refusing to continue" >&2
     exit 1

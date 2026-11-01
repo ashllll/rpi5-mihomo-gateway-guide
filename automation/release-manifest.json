@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "041823360d89266296e4e3fdbe4c6868edd24c6a9a18f68e5fd614142d8a9c57",
+  "release_id": "4dbbe96207133d4424782a6cfc3ba77a7b1f8244c3ffcf0799ea402f3495795a",
   "files": [
     {
       "source": "check-release.py",
@@ -271,7 +271,7 @@
     {
       "source": "sbin/mosdns-rollout-rollback",
       "target": "/usr/local/sbin/mosdns-rollout-rollback",
-      "sha256": "bbc0825427a3b310df94f86632b6c2f89b5d82d54ea26d96b8f846d4dae50849",
+      "sha256": "d77a08ed593f6089df34feddea164227ca09305c1c595c9143a66a3298f010c0",
       "mode": 493
     },
     {
