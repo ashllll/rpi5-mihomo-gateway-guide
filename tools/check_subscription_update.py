@@ -233,11 +233,11 @@ def check_case(mode):
         updater = root / 'update.sh'
         updater.write_text(script.replace('\n', '\nexport SUB_TEST_UPDATER_PID=$$\n', 1))
         arguments = {'force': ['--force'], 'manual-force': ['--force'],
-                     'recover-only': ['--recover-only']}.get(mode, [])
+                     'recover-only': ['--recover-only'], 'due-only': ['--due-only']}.get(mode, [])
         result = subprocess.run(['sh', str(updater), *arguments],
                                 env=environment, capture_output=True, text=True, timeout=45)
         success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked',
-                           'manual', 'manual-force', 'recover-only'}
+                           'manual', 'manual-force', 'recover-only', 'due-only'}
         assert (result.returncode == 0) == success, (mode, result.stderr)
         rolled_back = mode in {'installed-validation', 'reload', 'inactive', 'health',
                                'dns-1053', 'dns-1053-wrong-fake', 'recover-only'} or mode.startswith('revoke-')
@@ -304,6 +304,21 @@ def check_case(mode):
             assert not (root / 'downloads-requested').exists(), 'recovery fetched a new subscription'
             assert 'restart mihomo' in calls, calls
             assert not failure_state.exists(), 'recovery recorded a failure'
+        if mode == 'due-only':
+            # The timer tick honours the schedule; a manual invocation does not.
+            scheduled = next_update.read_text()
+            requested_before = (root / 'downloads-requested').read_text().splitlines()
+            tick = subprocess.run(['sh', str(updater), '--due-only'], env=environment,
+                                  capture_output=True, text=True, timeout=45)
+            assert tick.returncode == 0, (mode, tick.stderr)
+            assert next_update.read_text() == scheduled, 'a not-due tick moved the schedule'
+            assert (root / 'downloads-requested').read_text().splitlines() == requested_before, \
+                'a not-due tick fetched the subscription'
+            manual = subprocess.run(['sh', str(updater)], env=environment,
+                                    capture_output=True, text=True, timeout=45)
+            assert manual.returncode == 0, (mode, manual.stderr)
+            assert (root / 'downloads-requested').read_text().splitlines() != requested_before, \
+                'a manual run did not override the schedule'
 
 
 if __name__ == '__main__':
@@ -311,7 +326,7 @@ if __name__ == '__main__':
              'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked',
              'revoke-health', 'revoke-reload', 'revoke-write', 'revoke-signal', 'revoke-invalid-policy',
              'manual', 'manual-force', 'manual-no-cache', 'dns-1053', 'dns-1053-wrong-fake',
-             'prepare-fail', 'recover-only')
+             'prepare-fail', 'recover-only', 'due-only')
     failures = []
     for case in cases:
         try:

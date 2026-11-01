@@ -874,6 +874,8 @@ def check_subscription_schedule() -> None:
     check("--recover-only" in source, "the updater must expose an independent pending recoverer")
     check("record_failure" in source, "hard failures must record a structured reason")
     check("next-update" in source, "the updater must own the success/failure schedule")
+    service = (AUTOMATION / "systemd/mihomo-subscription-update.service").read_text(encoding="utf-8")
+    check("--due-only" in service, "the timer tick must ask the updater to honour its schedule")
 
 
 def main() -> int:

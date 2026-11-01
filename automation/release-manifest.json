@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "f45c74002d2f121bbfb8d16c70065c74b8e11920cf409a470a76fcae249ff8ab",
+  "release_id": "7fa0a0adebf72bef3fc4714eb9fd039206db8e50b5a875a424c88ea91fec42ed",
   "files": [
     {
       "source": "check-release.py",
@@ -241,7 +241,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "df21d676df743bb6c8dc70f83bc330557459fbf48efb25370a57c0aeb3bddcb0",
+      "sha256": "698a3466a937b1bc115f3ae69eb3416dce9e716150474e7be3f5396d89923e42",
       "mode": 493
     },
     {
@@ -403,7 +403,7 @@
     {
       "source": "systemd/mihomo-subscription-update.service",
       "target": "/etc/systemd/system/mihomo-subscription-update.service",
-      "sha256": "600e3bd0a952f31cacf06adf527f378e7e945a429f756cb6f71f53252994bc1a",
+      "sha256": "65ae1b1268d6b8c78ad6339ff1371a06697f4ac9c208334f4edd06cb1874ebb2",
       "mode": 420
     },
     {

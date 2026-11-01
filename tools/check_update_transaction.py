@@ -145,7 +145,7 @@ class UpdateTransactionCLI(unittest.TestCase):
                 proxy['server'] = 'old.example.invalid'
             (self.directory / 'cache' / (source_id + '.yaml')).write_text(yaml.safe_dump(data))
         boundary = UPDATE_BOUNDARY.replace('def fault():', LOCK_BOUNDARY + '\ndef fault():')
-        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs',
+        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs',
                      'mihomo-reconcile-policy', 'mihomo-healthcheck', 'mihomo-subscription-normalize'):
             path = self.directory / 'bin' / name
             path.write_text('#!' + sys.executable + '\n' + boundary)

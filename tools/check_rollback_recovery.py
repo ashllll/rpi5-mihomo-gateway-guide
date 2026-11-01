@@ -29,6 +29,10 @@ elif name=='systemctl':
         p=r/'restarts'; n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
         if (r/'rollback-phase').exists() and mode=='restart': sys.exit(1)
     if a[0]=='is-active' and (r/'rollback-phase').exists() and mode=='inactive': sys.exit(1)
+elif name=='dig':
+    host=next((x for x in a if not x.startswith(('+','-','@')) and x not in ('A','IN')),'probe.invalid')
+    print(';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1')
+    print('%s. 60 IN A %s' % (host,'198.18.0.1' if 'baidu' not in host else '203.0.113.10'))
 elif name=='mihomo-healthcheck':
     (r/'observed').touch()
     if mode=='structure': sys.exit(1)
@@ -55,7 +59,7 @@ class Rollback(unittest.TestCase):
                     (root/name).mkdir(parents=True)
                 (root/'etc/config.yaml').write_text('proxies: []\nmarker: previous\n')
                 (root/'etc/secrets/subscription.url').write_text('http://fixture.invalid/config\n')
-                for name in ['curl','mihomo','systemctl','install','logger','sleep','flock','find','xargs',
+                for name in ['curl','dig','mihomo','systemctl','install','logger','sleep','flock','find','xargs',
                              'mihomo-subscription-normalize','mihomo-subscription-candidate','mihomo-policy-overlay',
                              'mihomo-reconcile-policy','mihomo-healthcheck','mihomo-media-guard']:
                     p=root/'bin'/name
