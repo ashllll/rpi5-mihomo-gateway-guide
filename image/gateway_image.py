@@ -136,7 +136,7 @@ def install_packages(root):
             chroot(root, "apt-get", "-o", "Acquire::Retries=3", "-o", "Acquire::http::Timeout=30", "update")
             chroot(root, "apt-get", "-y", "--no-install-recommends", "install",
                    "python3-yaml", "nftables", "dnsmasq", "curl", "rsync", "dnsutils",
-                   "wireguard-tools")
+                   "wireguard-tools", "jq")
             chroot(root, "apt-get", "clean")
     finally:
         resolver.unlink(missing_ok=True)
