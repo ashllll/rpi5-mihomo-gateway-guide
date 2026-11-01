@@ -8,7 +8,7 @@ recorded: 2026-10-26
 [ADR 索引](README.md) · [Wiki 首页](../README.md)
 
 生产部署已改成「树莓派只有一根网线接 UCG 交换机」：VLAN1 承载上游与管理（`wan0`），802.1Q VLAN20 的
-`proxy20` 服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端（DHCP/DNS 由 `dnsmasq-vlan-pilot` 提供），
+`proxy20` 服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端（DHCP/DNS 由 `dnsmasq-vlan-pilot` 提供），
 树莓派不再接独立 LAN 口，也不再自建 AP。于是 `lan0` / `192.168.1.0/24` 的 DHCP、DNS 作用域、masquerade
 和 input 整口放行全部失去服务对象；它们还把核心与管理端口钉在一个会消失的地址上——`bind-address`
 指向 `192.168.1.1` 时，混合端口与控制器不可达，健康门禁的出口抽样永远 `fail`，`business` 永久
@@ -24,6 +24,10 @@ recorded: 2026-10-26
   （暴露面仍由 `inet rp_filter` input 收口），`lan-allowed-ips` 必须含 `127.0.0.1/32`；脚本删掉
   `GATEWAY_LAN_IP`，本机调用一律 `127.0.0.1`。出口抽样固定先走环回，因此 LAN 口状态不再影响门禁判定。
 - **VLAN20 的管理入口**写在 include 的 `vlan-pilot.nft`（`proxy20` 上的 `tcp/22`），不靠整段放行。
+
+## 修订（2026-11）
+
+上文「管理面钉在环回」「混合端口 `127.0.0.1:7890`」描述的是回调地址与脚本取值，不是监听地址：核心为 `bind-address: "*"`，`7890`/`9090` 监听所有接口，来源由 `lan-allowed-ips` 与 `inet rp_filter` input 链收口，网关自身调用仍走 `127.0.0.1`。退役 lan0、删除 `GATEWAY_LAN_IP` 的决策不变。
 
 ## 替代方案
 

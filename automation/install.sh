@@ -62,6 +62,33 @@ else
   python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --prepare
 fi
 
+# The whole-machine rollback point must exist before the first installed file
+# is replaced.  A staged install (GATEWAY_ROOT) leaves systemd alone and is
+# exercised by the offline checks; on the gateway the point is mandatory.
+# It is named with the release that is installed *now*, so a later deliberate
+# install undo has to say --allow-cross-release on gateway-restore.
+if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ]; then
+  rollback_release=$(python3 -c 'import json,os,sys
+package, installed = sys.argv[1], sys.argv[2]
+release = None
+if os.path.isfile(installed):
+    try:
+        release = json.load(open(installed)).get("release_id")
+    except (OSError, ValueError):
+        release = None
+if not release:
+    release = json.load(open(package))["release_id"]
+print(release)' "$here/release-manifest.json" \
+    "/var/lib/mihomo-automation/installed-manifest.json") || {
+    echo 'error: cannot determine the release_id for the rollback point' >&2
+    exit 1
+  }
+  if ! "$here/sbin/gateway-backup" --reason install --release-id "$rollback_release"; then
+    echo 'error: could not create the pre-install rollback point; nothing was installed' >&2
+    exit 1
+  fi
+fi
+
 say() {
   if [ "$dry_run" = true ]; then
     echo "[dry-run] $*"
@@ -242,7 +269,8 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
       mosdns-binary-update.timer \
       dnsmasq-vlan-pilot.service \
       dnsmasq.service \
-      homeassistant-access-guard.service; do
+      homeassistant-access-guard.service \
+      rp5-agent.service; do
     service_action systemctl enable "$unit"
   done
   # Rule and retired quality timers remain dormant. Subscription refresh is
@@ -268,7 +296,10 @@ Still required before the gateway is fully functional:
        install -m 0600 $here/env/automation.env.example /etc/mihomo-automation.env
        install -m 0600 $here/env/mihomo-alert.env.example /etc/mihomo-alert.env
   2. Store the subscription link in /etc/mihomo/secrets/subscription.url and the
-     dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).
+     dashboard token in /etc/mihomo/secrets/dashboard.secret (both 0600).  Create
+     the status-agent bearer token when rp5-agent.service is enabled:
+       install -m 0600 /dev/null /etc/mihomo/secrets/rp5-agent.token
+       python3 -c 'import secrets;print(secrets.token_urlsafe(32))' > /etc/mihomo/secrets/rp5-agent.token
   3. Fill the curated-pool node labels in the overlay section of
      /etc/mihomo/adaptive/capabilities.yaml, and write
      /etc/mihomo/reconcile-targets.conf for mihomo-reconcile-policy.

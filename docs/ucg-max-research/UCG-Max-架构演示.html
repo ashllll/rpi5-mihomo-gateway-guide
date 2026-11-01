@@ -204,8 +204,7 @@
   <h2><span class="num">03</span>架构图（可交互）</h2>
   <p class="lead">由 <code>archify</code> 生成：支持缩放、拖动、深浅色、节点高亮；这是单文件 HTML，可独立打开。</p>
   <div class="frame">
-    <iframe src=".archify/architecture-ucg-max-20261031-131054/ucg-max-architecture.html" title="UCG Max 架构图" loading="lazy"></iframe>
-    <div class="cap">图内节点：Internet / UCG Max（Traffic Flow Engine）/ LAN / Clients / NVMe / Site Manager / Cloud Connector / Local API / Site Manager API</div>
+    <div class="cap">本节原嵌入 <code>archify</code> 生成的交互架构图；该构建产物含本机绝对路径与示例 UUID，已随公开树脱敏移除（历史版本仍留在 git 历史，第 3 阶段重写）。架构节点：Internet / UCG Max（Traffic Flow Engine）/ LAN / Clients / NVMe / Site Manager / Cloud Connector / Local API / Site Manager API。</div>
   </div>
 </section>
 
@@ -377,7 +376,7 @@
      r:'{\n  "applicationVersion": "10.6.109"\n}',
      n:'Cloud Connector 代理：console 与云端保持出站长连接，所以不需要端口转发。'},
     {m:'GET',u:'…/proxy/network/integration/v1/sites',t:'④ 取本地 siteId',
-     r:'{\n  "count": 1,\n  "data": [{ "id": "88f7af54-98f8-306a-a1c7-c9349722b1f6", "name": "Default" }],\n  "limit": 25, "offset": 0, "totalCount": 1\n}',
+     r:'{\n  "count": 1,\n  "data": [{ "id": "<UUID-EXAMPLE>", "name": "Default" }],\n  "limit": 25, "offset": 0, "totalCount": 1\n}',
      n:'注意：Network 的 siteId 是 UUID，与 Site Manager 的 24 位 hex siteId 不是同一个东西。'},
     {m:'GET',u:'…/v1/sites/{siteId}/devices?filter=state.eq(\u0027ONLINE\u0027)&limit=50',t:'⑤ 过滤在线设备',
      r:'{\n  "data": [\n    { "id": "…", "name": "Cloud Gateway Max", "model": "UCG Max", "firmwareVersion": "5.1.33", "state": "ONLINE" },\n    { "id": "…", "name": "U7 Lite", "model": "U7 Lite", "state": "ONLINE" }\n  ],\n  "limit": 50, "totalCount": 2\n}',

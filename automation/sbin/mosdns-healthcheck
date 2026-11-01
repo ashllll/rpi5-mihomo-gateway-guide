@@ -6,6 +6,13 @@ umask 027
 exec 8>/run/lock/mosdns-healthcheck.lock
 flock -n 8 || exit 0
 
+# Restarting mosdns is a destructive path.  When an update or rollback holds
+# the maintenance lock we still probe and pick a safe DNS mode, but leave the
+# restart to that operation (or to the next timer tick).
+maintenance=0
+exec 9>/run/lock/mihomo-maintenance.lock
+flock -n 9 || maintenance=1
+
 state_dir=/run/mosdns-healthcheck
 status_file=$state_dir/status
 install -d -m 755 "$state_dir"
@@ -73,27 +80,32 @@ else
 
   restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
   if [ "$restart_due" = 1 ] && [ $(( now - restarted_at )) -ge 3600 ]; then
-    printf '%s\n' "$now" >"$state_dir/restarted_at"
-    action=restart
-    logger -t mosdns-healthcheck "mosdns inactive or all probes failed; requesting bounded restart"
-    systemctl restart mosdns.service || true
-    sleep 2
-    probe_mosdns
-    unit_state=$(systemctl is-active mosdns.service 2>/dev/null || true)
-    active=0; transitional=0
-    case "$unit_state" in
-      active) active=1 ;;
-      activating|reloading|deactivating) transitional=1 ;;
-    esac
-    if [ "$active" = 1 ] && [ "$cn_ok" = 1 ] && [ "$proxy_ok" = 1 ] && [ "$metrics_ok" = 1 ]; then
-      mode=recovered
-      printf '0\n' >"$state_dir/fail_streak"
-    elif { [ "$active" = 1 ] || [ "$transitional" = 1 ]; } && [ "$alive" = 1 ]; then
-      mode=degraded
-      printf '0\n' >"$state_dir/fail_streak"
+    if [ "$maintenance" = 1 ]; then
+      action=deferred
+      logger -t mosdns-healthcheck "mosdns restart deferred: maintenance is active"
     else
-      mode=failed
-      action=fallback
+      printf '%s\n' "$now" >"$state_dir/restarted_at"
+      action=restart
+      logger -t mosdns-healthcheck "mosdns inactive or all probes failed; requesting bounded restart"
+      systemctl restart mosdns.service || true
+      sleep 2
+      probe_mosdns
+      unit_state=$(systemctl is-active mosdns.service 2>/dev/null || true)
+      active=0; transitional=0
+      case "$unit_state" in
+        active) active=1 ;;
+        activating|reloading|deactivating) transitional=1 ;;
+      esac
+      if [ "$active" = 1 ] && [ "$cn_ok" = 1 ] && [ "$proxy_ok" = 1 ] && [ "$metrics_ok" = 1 ]; then
+        mode=recovered
+        printf '0\n' >"$state_dir/fail_streak"
+      elif { [ "$active" = 1 ] || [ "$transitional" = 1 ]; } && [ "$alive" = 1 ]; then
+        mode=degraded
+        printf '0\n' >"$state_dir/fail_streak"
+      else
+        mode=failed
+        action=fallback
+      fi
     fi
   fi
 fi

@@ -5,7 +5,7 @@
 | 本目录文件 | 真机目标路径 | 说明 |
 | --- | --- | --- |
 | `resolver.conf` | `/etc/dnsmasq.d/resolver.conf` | 环回 resolver（`interface=lo`、`listen-address=127.0.0.1`）：只给网关自身工具与健康检查用，`servers-file` 指向动态上游文件 |
-| `vlan-pilot.conf` | `/etc/dnsmasq-vlan-pilot.conf` | 独立进程（`dnsmasq-vlan-pilot.service`）上的 VLAN20 试点作用域：服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端，DNS 直投 Mihomo `:1053` |
+| `vlan-pilot.conf` | `/etc/dnsmasq-vlan-pilot.conf` | 独立进程（`dnsmasq-vlan-pilot.service`）上的 VLAN20 试点作用域：服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端，DNS 直投 Mihomo `:1053` |
 | `upstreams.conf` | `/etc/dnsmasq-upstreams.conf` | 上游解析器，真机当时生效的那份（mosdns `:5335`）；`install.sh` 只在文件不存在时种子一次 |
 
 仓库历史上还有一份下游 LAN 作用域（`lan.conf`），已随独立 LAN 口与 Pi 自建 AP 一起退役：dnsmasq 不再承担 LAN DHCP，只剩上面两个作用域。

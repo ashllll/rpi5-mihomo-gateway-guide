@@ -1,5 +1,6 @@
 #!/bin/sh
-# Observe the configured client DNS path; only recover its own silent dnsmasq.
+# Observe the configured client DNS path; recover its silent dnsmasq, and after a
+# run of silent upstream answers escalate to the resolver unit that owns 1053.
 set -eu
 umask 027
 observe=false
@@ -15,7 +16,17 @@ unit=${DNS_CLIENT_UNIT:-dnsmasq}
 upstream=${DNS_UPSTREAM_SERVER:-127.0.0.1}
 upstream_port=${DNS_UPSTREAM_PORT:-5335}
 domains=${DNS_PROBE_DOMAINS:-'www.baidu.com www.qq.com'}
+resolver_unit=${DNS_RESOLVER_UNIT:-mihomo}
+resolver_threshold=${DNS_RESOLVER_FAIL_THRESHOLD:-3}
+resolver_gap=${DNS_RESOLVER_RESTART_GAP:-120}
+resolver_budget=${DNS_RESOLVER_RESTART_BUDGET:-3}
+resolver_window=${DNS_RESOLVER_RESTART_WINDOW:-900}
 case "$unit" in ''|-*|*[!A-Za-z0-9_@.:-]*) echo 'invalid DNS client unit' >&2; exit 2 ;; esac
+case "$resolver_unit" in ''|-*|*[!A-Za-z0-9_@.:-]*) echo 'invalid DNS resolver unit' >&2; exit 2 ;; esac
+for number in "$resolver_threshold" "$resolver_gap" "$resolver_budget" "$resolver_window"; do
+  case "$number" in ''|*[!0-9]*) echo 'invalid resolver recovery parameters' >&2; exit 2 ;; esac
+done
+[ "$resolver_threshold" -ge 1 ] && [ "$resolver_budget" -ge 1 ] && [ "$resolver_window" -ge 1 ] || exit 2
 for port in "$client_port" "$upstream_port"; do
   case "$port" in ''|*[!0-9]*) echo 'invalid DNS port' >&2; exit 2 ;; esac
   [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || exit 2
@@ -91,8 +102,57 @@ notify() {
   fi
   return 1
 }
+
+# The resolver that owns the client upstream (1053 on this gateway) is a second
+# failure domain.  A single silent observation only alerts: restarting a core
+# because of one lost packet drops every live connection.  A run of failures
+# escalates to the resolver unit, under the same maintenance lock and a separate
+# budget so client recovery and resolver recovery cannot exhaust each other.
+resolver_action=none
+resolver_fail_streak=$(cat "$state_dir/resolver-failures" 2>/dev/null || echo 0)
+case "$resolver_fail_streak" in ''|*[!0-9]*) resolver_fail_streak=0 ;; esac
+if [ "$observe" = false ] && [ "$maintenance" = 0 ]; then
+  case "$action" in
+    chain-down|escalate-resolver)
+      resolver_fail_streak=$((resolver_fail_streak + 1))
+      printf '%s\n' "$resolver_fail_streak" >"$state_dir/resolver-failures"
+      if [ "$resolver_fail_streak" -ge "$resolver_threshold" ]; then
+        cutoff=$((now - resolver_window))
+        if [ -f "$state_dir/resolver-restarts" ]; then
+          awk -v cutoff="$cutoff" '$1 >= cutoff' "$state_dir/resolver-restarts" >"$state_dir/resolver-restarts.tmp"
+          mv "$state_dir/resolver-restarts.tmp" "$state_dir/resolver-restarts"
+        fi
+        used=0; last=0
+        [ ! -f "$state_dir/resolver-restarts" ] || used=$(wc -l <"$state_dir/resolver-restarts" | tr -d ' ')
+        [ ! -f "$state_dir/resolver-last-restart" ] || last=$(cat "$state_dir/resolver-last-restart")
+        case "$last" in *[!0-9]*|'') last=0 ;; esac
+        if [ "$used" -ge "$resolver_budget" ]; then
+          resolver_action=throttled
+          grep -Fxq resolver-guard-exhausted "$last_notified_file" 2>/dev/null || \
+            notify resolver-guard-exhausted "DNS resolver $resolver_unit exhausted recovery budget; client=$client_udp/$client_tcp upstream=$upstream_udp/$upstream_tcp" || true
+        elif [ $((now - last)) -lt "$resolver_gap" ]; then
+          resolver_action=gap
+        else
+          printf '%s\n' "$now" >>"$state_dir/resolver-restarts"
+          printf '%s\n' "$now" >"$state_dir/resolver-last-restart"
+          if systemctl restart "$resolver_unit"; then
+            resolver_action=restart
+            resolver_fail_streak=0
+            printf '0\n' >"$state_dir/resolver-failures"
+            notify resolver-restart "Requested DNS resolver recovery: $resolver_unit; client=$client_udp/$client_tcp upstream=$upstream_udp/$upstream_tcp" || true
+          else
+            resolver_action=restart-failed
+            notify resolver-guard-exhausted "DNS resolver recovery failed: $resolver_unit" || true
+          fi
+        fi
+      fi ;;
+    *)
+      printf '0\n' >"$state_dir/resolver-failures"
+      resolver_fail_streak=0 ;;
+  esac
+fi
 if [ "$action" = restart ]; then
-  if [ "$observe" = true ]; then action=observe-only
+  if [ "$observe" = true ]; then action='observe-only'
   elif [ "$maintenance" = 1 ]; then action=maintenance
   else
     cutoff=$((now - restart_window))
@@ -134,7 +194,8 @@ elif [ "$reason" = healthy ] && [ "$observe" = false ] && [ -s "$last_notified_f
 fi
 mode=stopped
 systemctl is-active --quiet "$unit" && mode=running
-printf '%s mode=%s reason=%s lan=%s/%s resolver=%s/%s client_udp=%s client_tcp=%s upstream_udp=%s upstream_tcp=%s host_mosdns=%s unit=%s upstream=%s:%s maintenance=%s action=%s\n' \
+printf '%s mode=%s reason=%s lan=%s/%s resolver=%s/%s client_udp=%s client_tcp=%s upstream_udp=%s upstream_tcp=%s host_mosdns=%s unit=%s upstream=%s:%s maintenance=%s action=%s resolver_unit=%s resolver_fail_streak=%s resolver_action=%s\n' \
   "$(date -Is)" "$mode" "$reason" "$lan_answers" "$checks" "$resolver_answers" "$checks" \
-  "$client_udp" "$client_tcp" "$upstream_udp" "$upstream_tcp" "$host_mosdns" "$unit" "$upstream" "$upstream_port" "$maintenance" "$action" >"$status_file"
+  "$client_udp" "$client_tcp" "$upstream_udp" "$upstream_tcp" "$host_mosdns" "$unit" "$upstream" "$upstream_port" "$maintenance" "$action" \
+  "$resolver_unit" "$resolver_fail_streak" "$resolver_action" >"$status_file"
 exit 0

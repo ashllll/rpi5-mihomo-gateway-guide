@@ -1,0 +1,29 @@
+[Unit]
+Description=rp5 read-only status agent for the T-Display monitor
+Documentation=https://github.com/example/rpi5-mihomo-gateway-guide
+After=network-online.target mihomo.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rp5-agent.py
+EnvironmentFile=-/etc/mihomo-automation.env
+# The controller endpoint is pinned to loopback here; the agent refuses any
+# non-loopback value at startup and never falls back to a network default.
+Environment=RP5_MIHOMO_API=http://127.0.0.1:9090
+Environment=RP5_STATUS_TOKEN_FILE=/etc/mihomo/secrets/rp5-agent.token
+Restart=on-failure
+RestartSec=5s
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/mihomo /proc /sys /run/mihomo-healthcheck /var/lib/mihomo-measurements
+
+[Install]
+WantedBy=multi-user.target

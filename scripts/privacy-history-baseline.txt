@@ -1,0 +1,8 @@
+# Privacy gate history scope.
+#
+# Commits reachable from this SHA predate the remediation and still contain real
+# device identifiers; they are scheduled for the phase-3 history rewrite.  The
+# gate scans every commit after this SHA (trees and messages).  Deleting this
+# file makes the gate scan the entire reachable history, so phase 3 ends by
+# removing it after the rewrite and the full-history run comes back green.
+74be18b824a79421b29b592f87f1cbb842f5086b

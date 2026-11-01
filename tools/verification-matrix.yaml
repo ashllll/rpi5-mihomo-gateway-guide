@@ -1,0 +1,214 @@
+# Machine-readable verification matrix.
+#
+# One source for: which checks exist, which run in the default gate, which need
+# the real core (CI core-build), and which checks a changed path must trigger in
+# the fast local gate.  scripts/preflight.py consumes this file; both CI
+# workflows call scripts/preflight.sh instead of enumerating checks.
+#
+# Rules:
+# * every tools/check_*.py runs in the default profile unless it is listed under
+#   profiles.core (new checks are discovered, not registered by hand);
+# * every check file must appear in one group below (the gate-integrity check
+#   enforces this, so a new check cannot silently sit outside the change map);
+# * a changed path that matches no rule runs the full gate.  A catch-all rule
+#   keeps that behaviour explicit;
+# * "self" means the changed check itself plus the gate-integrity check.
+
+version: 1
+
+profiles:
+  # Checks that need the real core binary built by CI core-build.
+  core_only:
+    - tools/check_media_core.py
+  # Checks that also have a real-core section when the binary is available.
+  core_extra:
+    - tools/check_legacy_stt.py
+
+steps:
+  - automation/check-release.py
+  - tools/validate_public.py
+
+timeouts_s:
+  tools/check_subscription_update.py: 1800
+  tools/check_update_transaction.py: 900
+  tools/check_release_integrity.py: 600
+
+groups:
+  gate:
+    - tools/check_gate_integrity.py
+    - tools/check_publication_privacy.py
+    - tools/check_publication_tree.py
+  install:
+    - tools/check_automation.py
+    - tools/check_release_integrity.py
+  agent:
+    - tools/check_status_agent.py
+  nftables:
+    - tools/check_nftables_override.py
+  homeassistant:
+    - tools/check_ha_compose.py
+  subscription:
+    - tools/check_change_chain.py
+    - tools/check_rollback_recovery.py
+    - tools/check_subscription_candidate.py
+    - tools/check_subscription_normalize.py
+    - tools/check_subscription_update.py
+    - tools/check_update_rules.py
+    - tools/check_update_transaction.py
+  dns:
+    - tools/check_alert_delivery.py
+    - tools/check_client_dns.py
+    - tools/check_client_dns_guard.py
+    - tools/check_dns_resilience.py
+    - tools/check_dnsmasq_guard.py
+    - tools/check_gateway_resilience.py
+    - tools/check_scoped_probes.py
+    - tools/check_stability.py
+    - tools/check_watch_notifications.py
+  policy:
+    - tools/check_legacy_stt.py
+    - tools/check_mihomo_policy.py
+    - tools/check_overlay.py
+    - tools/check_overlay_drift.py
+    - tools/check_reconcile_policy.py
+  media:
+    - tools/check_media_guard.py
+    - tools/check_media_policy.py
+  measurement:
+    - tools/check_measurement_policy.py
+    - tools/check_native_admission_load.py
+    - tools/check_native_budget.py
+  image:
+    - tools/check_image.py
+  core:
+    - tools/check_media_core.py
+  ops:
+    - tools/check_config_install.py
+  rollout:
+    - tools/check_gateway_rollout.py
+  docfacts:
+    - tools/check_doc_facts.py
+
+changes:
+  # Gate definitions and shared helpers: always run everything.
+  - paths:
+      - "scripts/**"
+      - ".github/**"
+      - ".gitea/**"
+      - "tools/verification-matrix.yaml"
+      - "tools/_tempdirs.py"
+      - "tools/publication_privacy.py"
+      - "tools/validate_public.py"
+    run: all
+
+  # A changed check runs itself plus the gate-integrity check.
+  - paths: ["tools/check_*.py"]
+    run: self
+
+  # Release/install layer.
+  - paths:
+      - "automation/install.sh"
+      - "automation/check-release.py"
+      - "automation/release-manifest.json"
+      - "automation/systemd/dnsmasq.service.d/**"
+      - "automation/systemd/homeassistant-access-guard.service"
+    run: [install, gate, docfacts]
+
+  # Status agent and firewall drop-in.
+  - paths:
+      - "automation/sbin/rp5-agent.py"
+      - "automation/systemd/rp5-agent.service"
+    run: [agent, install]
+  - paths: ["automation/systemd/nftables.service.d/**"]
+    run: [nftables, install]
+
+  # Subscription / core-swap / mosdns transaction paths.
+  - paths:
+      - "automation/sbin/mihomo-subscription-*"
+      - "automation/sbin/mihomo-update-subscription"
+      - "automation/sbin/mihomo-core-swap"
+      - "automation/sbin/mosdns-*"
+      - "automation/systemd/mihomo-subscription-*"
+      - "automation/systemd/mihomo-subscription-update.service.d/**"
+      - "automation/systemd/mosdns*"
+    run: [subscription, install, rollout]
+
+  # Health, DNS, watch and alerting.
+  - paths:
+      - "automation/sbin/mihomo-healthcheck"
+      - "automation/sbin/mihomo-dnsmasq-guard"
+      - "automation/sbin/mihomo-watch"
+      - "automation/sbin/mihomo-alert"
+      - "automation/sbin/dnsmasq-safe-start"
+      - "automation/systemd/mihomo-healthcheck*"
+      - "automation/systemd/mihomo-dnsmasq-guard*"
+      - "automation/systemd/mihomo-watch*"
+      - "automation/systemd/mihomo-alert*"
+    run: [dns, install]
+
+  # Retired maintenance units and the vlan-pilot service still ship.
+  - paths:
+      - "automation/README.zh-CN.md"
+      - "automation/sbin/homeassistant-access-guard"
+      - "automation/sbin/mihomo-download-quality"
+      - "automation/sbin/mihomo-social-quality"
+      - "automation/sbin/mihomo-update-rules"
+      - "automation/systemd/dnsmasq-vlan-pilot.service"
+      - "automation/systemd/mihomo-download-quality.*"
+      - "automation/systemd/mihomo-social-quality.*"
+      - "automation/systemd/mihomo-rules-update.*"
+      - "automation/systemd/mihomo-rules-update.service.d/**"
+    run: [install, gate, docfacts]
+
+  # Route/policy generation and DNS mode.
+  - paths:
+      - "automation/sbin/mihomo-dns-mode"
+      - "automation/sbin/mihomo-policy-overlay"
+      - "automation/sbin/mihomo-reconcile-policy"
+      - "automation/systemd/mihomo.service"
+      - "automation/systemd/mihomo.service.d/**"
+    run: [policy, dns, install]
+
+  # Media admission and measurement budget.
+  - paths:
+      - "automation/sbin/mihomo-media-*"
+      - "automation/systemd/mihomo-media-*"
+    run: [media, install]
+  - paths:
+      - "automation/sbin/mihomo-measurement-*"
+      - "automation/systemd/mihomo-measurement-*"
+    run: [measurement, install]
+  - paths: ["automation/policy/**"]
+    run: [policy, media, measurement, install]
+  - paths: ["automation/env/**", "automation/etc/**"]
+    run: all
+
+  # Operator tools, recovery image, core source.
+  - paths: ["ops/**"]
+    run: [ops, install, gate]
+  - paths: ["image/**"]
+    run: [image, gate]
+  - paths: ["core/**"]
+    run: [policy, gate]
+  - paths: ["procedures/**"]
+    run: [gate]
+
+  # Publication surface.
+  - paths:
+      - "docs/**"
+      - "README.md"
+      - "SECURITY.md"
+      - "GLOSSARY.md"
+      - "assets/**"
+      - "examples/**"
+    run: [gate, docfacts]
+
+  # Whole-machine rollback points: the producer and the consumer.
+  - paths:
+      - "automation/sbin/gateway-backup"
+      - "automation/sbin/gateway-restore"
+    run: [rollout, install]
+
+  # Explicit catch-all: an unknown path runs the full gate.
+  - paths: ["**"]
+    run: all

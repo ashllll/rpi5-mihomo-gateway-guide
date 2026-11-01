@@ -8,7 +8,8 @@
 
 - 入站不再整口放行：`lo` 与 established/related 之外，`wan0`/`wlan0` 只允许来自
   `192.168.0.0/24` 的 SSH（tcp/22）与 rp5-agent（tcp/8799），以及 DHCP、ICMP 与
-  上游 WireGuard 握手（udp/51891）。透明代理靠 `ip rule 9000` 与 `redirect`，
+  上游 WireGuard 握手（udp/51891）。rp5-agent 的 `/health` 只返回公开元数据，状态端点要求
+  `/etc/mihomo/secrets/rp5-agent.token`（0600）里的 Bearer token。透明代理靠 `ip rule 9000` 与 `redirect`，
   不靠“整口可信”。
 - `proxy20` 是单台 PC 试点：放行 DHCP、DNS、`ct status dnat` 与 `tcp/22`（管理口）；
   转发限去 `192.168.0.0/24`。`wg-ucg-pilot` 只允许进 Mihomo 或出 `wan0`。
@@ -21,7 +22,8 @@
 - “端口少 = 更安全”：动态 redirect 端口不由静态规则表达。
 - “有 controller secret = 可以放进不可信 LAN”：secret 不等于隔离。
 - “离线检查通过 = 目标机已收紧”：有效规则以 `nft list ruleset` 与真实监听为准。
-- 仓库不安装 Landscape、容器控制面或特权容器；相关研究只存在于
-  [`docs/research/`](../research/)。
+- 仓库不安装 Landscape 或容器控制面。Home Assistant 的 compose 模板在 `ops/homeassistant/`，
+  镜像按 digest 固定并去掉 `/run/dbus`；`privileged` 与 host network 是记录态，移除需要第 3 阶段的
+  集成回归，不在本轮翻动。
 
 凭据、订阅、节点标签、私钥与真实 MAC 的发布规则见 [SECURITY.md](../../SECURITY.md)。

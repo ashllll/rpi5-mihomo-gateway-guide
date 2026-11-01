@@ -36,13 +36,7 @@
 
 ## 3. 已执行：Mihomo 一侧真实进程隔离验证
 
-可复跑入口：[check_landscape_mihomo.py](../../tools/check_landscape_mihomo.py)。显式传入已核验的 Mihomo 程序：
-
-```sh
-python3 -B tools/check_landscape_mihomo.py --mihomo /path/to/verified/mihomo
-```
-
-脚本只使用标准库。合成规则包含 DOMAIN、RULE-SET、MATCH，包含本地文件 provider 和带空格的 Selector 名称。请求经显式 SOCKS 进入测试核心，仅用于验证 fake-IP 反向恢复与规则执行，**不能当作 TProxy 透明入站证据**。
+本节是 2026-10-14 用一次性隔离脚本跑出的结果记录；方案作废后该脚本已删除，本节不再是可复跑入口，结论仅作历史留档。当时脚本只依赖标准库。合成规则包含 DOMAIN、RULE-SET、MATCH，包含本地文件 provider 和带空格的 Selector 名称。请求经显式 SOCKS 进入测试核心，仅用于验证 fake-IP 反向恢复与规则执行，**不能当作 TProxy 透明入站证据**。
 
 | 编号 | 验证内容 | 结果 |
 |---|---|---|

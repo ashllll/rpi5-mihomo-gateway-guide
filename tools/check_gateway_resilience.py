@@ -28,6 +28,9 @@ with open(os.environ['TEST_ACTIONS'], 'a') as stream:
 if name == 'systemctl':
     if args[0] == 'restart' and os.environ.get('TEST_RESTART_EXIT') == '1': sys.exit(1)
     if args[0] == 'restart' and os.environ.get('TEST_RECOVER_ON_RESTART') == '1': recovered.touch()
+    if args[0] == 'is-failed':
+        sys.exit(0 if os.environ.get('TEST_UNIT_FAILED') == '1' else 1)
+    if args[0] == 'reset-failed': sys.exit(0)
     if args[0] == 'show': print('2026-10-29 12:00:00')
     elif args[0] == 'is-active':
         state = 'active' if recovered.exists() else os.environ.get('TEST_PROCESS', 'active')
@@ -57,6 +60,10 @@ if name == 'curl':
     sys.exit(0 if ok else 7)
 if name == 'date':
     print(os.environ.get('TEST_NOW', '1800000000') if '+%s' in args else '2026-10-29T12:00:00+00:00')
+if name == 'dig':
+    print(';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1')
+    print('probe.invalid. 60 IN A 203.0.113.10')
+    sys.exit(0)
 if name == 'ss': print('LISTEN 0 128 127.0.0.1:5335 0.0.0.0:*')
 if name == 'alert': sys.exit(int(os.environ.get('TEST_ALERT_EXIT', '0')))
 sys.exit(0)
@@ -70,7 +77,7 @@ class HealthcheckCLI(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.commands = self.directory / 'bin'
         self.commands.mkdir()
-        for name in ('systemctl', 'ip', 'nft', 'curl', 'date', 'ss',
+        for name in ('systemctl', 'ip', 'nft', 'curl', 'date', 'ss', 'dig',
                      'flock', 'logger', 'journalctl', 'alert'):
             path = self.commands / name
             path.write_text('#!' + sys.executable + '\n' + BOUNDARY)

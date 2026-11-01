@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "504b7917aebf5102171ad8440bea7520e4d62774e82c2a89f4dfc1c32a8ade6d",
+  "release_id": "5ec7ce1bcfd20ee86069046f4377590f41c9b9c891dab31995255134ecaa3ba3",
   "files": [
     {
       "source": "check-release.py",
@@ -10,7 +10,7 @@
     {
       "source": "env/automation.env.example",
       "target": null,
-      "sha256": "29e60f5e56b58a503253503bab75676c84dad5fe79e7921f3b2262ddb36d50d0"
+      "sha256": "62f2e9792914158bd70e3646ceeec27f2bc68e195f0e9c5e27e12c477a861f56"
     },
     {
       "source": "env/health-probes.conf.example",
@@ -52,7 +52,7 @@
     {
       "source": "etc/dnsmasq/README.md",
       "target": null,
-      "sha256": "f97cd360b1713db5c1e6b882b55cb917a9192b7befbc729c811a9d214fab7d42"
+      "sha256": "f6aa0575e8b66d4387604c29dfd1eca3ebb582218f79999a3546c98b584b5015"
     },
     {
       "source": "etc/dnsmasq/resolver.conf",
@@ -72,7 +72,7 @@
     {
       "source": "etc/mihomo/README.md",
       "target": null,
-      "sha256": "6f7ecbda35020dafa2c73416fb48a971ca1b1e142ee7feaa7433bc132bf2ab7d"
+      "sha256": "bb1c60da314ef37842b033a4fb3926c8744c424129fac0a1d836585ec6540249"
     },
     {
       "source": "etc/mihomo/config.local.yaml",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "d110879cac0d1a5c2c8a32b273685d00f55318b87655ad7c018629da23f9962f"
+      "sha256": "419e0cdb9b8e8348782b4aa0c9f9f7128da94c1ed1e798bcbaa1b3645d8bab4d"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -128,12 +128,24 @@
     {
       "source": "policy/route-defaults.yaml",
       "target": null,
-      "sha256": "0da181b64dac18113aef6e7853aecf1f3710b43d47dd9ef7f845262ed58df16f"
+      "sha256": "f96826d73f8710f1f236c5b71c415393f76172cbf73271075f0cc75359f2ec70"
     },
     {
       "source": "sbin/dnsmasq-safe-start",
       "target": "/usr/local/sbin/dnsmasq-safe-start",
       "sha256": "5975926b6ed0fa688e6e3a7aefb3d7aa448a26632dc2535571da523dda92b256",
+      "mode": 493
+    },
+    {
+      "source": "sbin/gateway-backup",
+      "target": "/usr/local/sbin/gateway-backup",
+      "sha256": "692a69b6994f689c2c5fabd5579df6e9897436414618d694eaee30147cf5b033",
+      "mode": 493
+    },
+    {
+      "source": "sbin/gateway-restore",
+      "target": "/usr/local/sbin/gateway-restore",
+      "sha256": "bf66ed29cbccced5efe074ab3a03534dbae03b2c19ddbdbf4b87bd69af7e9ed9",
       "mode": 493
     },
     {
@@ -151,19 +163,19 @@
     {
       "source": "sbin/mihomo-core-swap",
       "target": "/usr/local/sbin/mihomo-core-swap",
-      "sha256": "18ceec31958e3e42583dff6582cff7155d81a1f72e88fbc45c357a9446f9a1aa",
+      "sha256": "9aa9931ad166b08c5abfa277b07272fb903bbd6c3ea0f3856adc40d087615749",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-dns-mode",
       "target": "/usr/local/sbin/mihomo-dns-mode",
-      "sha256": "33630218f2c8b4459fcacb6e7678975de4b2987c1ba53e945effb1ddd87dc337",
+      "sha256": "e4b82bc90b9465bcb47d8308bda96284934edd3d3ac7abd931066002d7b307af",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-dnsmasq-guard",
       "target": "/usr/local/sbin/mihomo-dnsmasq-guard",
-      "sha256": "dbb90baf1983ba320729a4618ce466ff641928d87dff9e192fd3f13a6bceb05b",
+      "sha256": "d0997f477a07c7ae86f5d5c675c13a89e7a49e7842de9d9091605cfb8a988ec5",
       "mode": 493
     },
     {
@@ -175,7 +187,7 @@
     {
       "source": "sbin/mihomo-healthcheck",
       "target": "/usr/local/sbin/mihomo-healthcheck",
-      "sha256": "239ea36bd4d4d6491c8d3c5263391a6140a903b0175c98ac64d152546832bf47",
+      "sha256": "4b8dab60b3645aefcdcc5c11bd9f046ce1fbda112cbc33bb6906f75be93fc2b8",
       "mode": 493
     },
     {
@@ -241,7 +253,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "8d491de34052e7f0306df494f1f2f04750bdb55613e89a26cd404c663f70ef16",
+      "sha256": "128c94c9ff9a95314732c313fe95fb8b1c8f93cbdfcb6470746dfc083ee82e2b",
       "mode": 493
     },
     {
@@ -253,37 +265,49 @@
     {
       "source": "sbin/mosdns-emergency-direct",
       "target": "/usr/local/sbin/mosdns-emergency-direct",
-      "sha256": "48aa53af2b893db9c7a397da3e2f5bb304a10dfbdb9b9f907ab0e6de40bf6149",
+      "sha256": "0cf99d32a3c53b354f93d16231e64f289c4679a74ab57a47d4afd815c6f0bc63",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-healthcheck",
       "target": "/usr/local/sbin/mosdns-healthcheck",
-      "sha256": "dc1c68eca970bfea8a8f5b40dda00db3a7e4437146a1714fa1e41170e247a4c2",
+      "sha256": "64081b88c39f7dbad0d2a422feaf6a07ac7791757191e24ec2f4121c52ad55a8",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-resume-auto",
       "target": "/usr/local/sbin/mosdns-resume-auto",
-      "sha256": "ddd7c315496bf6d2659927a721475412afec5e61ec47e0698bc7eb62838289f4",
+      "sha256": "79049b9029791a6579165ff4f7c1f83a0dbff392219ff8223e175e5c63c6da17",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mosdns-rollout-backup",
+      "target": "/usr/local/sbin/mosdns-rollout-backup",
+      "sha256": "24da8ed000a3282c1aa3d4ff8a8a502ec4186e892208e1333ee561b6d16b1c83",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-rollout-rollback",
       "target": "/usr/local/sbin/mosdns-rollout-rollback",
-      "sha256": "9cf0dc860bae625195b7404364ab2ef4b0c5f6d6bb8bb42c30a47695ca00f1e5",
+      "sha256": "3e0c39cfeb2157125f5822eed0fe12849360969d4a2fba022465c8c0fc07d504",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-update-binary",
       "target": "/usr/local/sbin/mosdns-update-binary",
-      "sha256": "d51a768e4218c5bc2737e8f11733c06a25c07d6dffbf629e7f1f62aaad98ce7c",
+      "sha256": "ee7ccbf47b667bf0f3c28d36df9cfc0a905886bd60e0efb852857cb18dcc4693",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-update-rules",
       "target": "/usr/local/sbin/mosdns-update-rules",
-      "sha256": "8eab0ef7655d59a4730d3121e07d0221929d1c5a8b29bff7cf88f149c54a0600",
+      "sha256": "c86e02dc46d304700dafe4e96611d332961b8e2f3d465738cecc43c7b86a7aea",
+      "mode": 493
+    },
+    {
+      "source": "sbin/rp5-agent.py",
+      "target": "/usr/local/sbin/rp5-agent.py",
+      "sha256": "840643d9a14f876ddd32040de4a4ba19646a9036d3017cfe6dcc104fd404597a",
       "mode": 493
     },
     {
@@ -403,7 +427,7 @@
     {
       "source": "systemd/mihomo-subscription-update.service",
       "target": "/etc/systemd/system/mihomo-subscription-update.service",
-      "sha256": "600e3bd0a952f31cacf06adf527f378e7e945a429f756cb6f71f53252994bc1a",
+      "sha256": "65ae1b1268d6b8c78ad6339ff1371a06697f4ac9c208334f4edd06cb1874ebb2",
       "mode": 420
     },
     {
@@ -415,7 +439,7 @@
     {
       "source": "systemd/mihomo-subscription-update.timer",
       "target": "/etc/systemd/system/mihomo-subscription-update.timer",
-      "sha256": "7be4bfc55eb061519f4f2e65d3d2e1620e0bda0ec91407205b90d6305adb4c9c",
+      "sha256": "aab4e8d42ec147858886924193ac19e38372e364abf90f1adfbeb5355ea399ff",
       "mode": 420
     },
     {
@@ -469,7 +493,7 @@
     {
       "source": "systemd/mihomo.service.d/zz-alert.conf",
       "target": "/etc/systemd/system/mihomo.service.d/zz-alert.conf",
-      "sha256": "1ad7cbd444a5de9fc77751bca50740a0c9d69736f4607e96f2d0fa5a6646f043",
+      "sha256": "84359a11b7fa0ed132efd47da98f1c3de5a1c065d8b8528d4f4ae2672c8beac7",
       "mode": 420
     },
     {
@@ -518,6 +542,18 @@
       "source": "systemd/mosdns.service",
       "target": "/etc/systemd/system/mosdns.service",
       "sha256": "b1f3ec60dbf5c0712bf77fccf4bb162a4f5fa05471a2b47cd258bc9ab0bf867d",
+      "mode": 420
+    },
+    {
+      "source": "systemd/nftables.service.d/override.conf",
+      "target": "/etc/systemd/system/nftables.service.d/override.conf",
+      "sha256": "ba61283c3d014ad96c1d8a3c42964bb4b9f7f58ff01d5e4499ae1077bebe7cbe",
+      "mode": 420
+    },
+    {
+      "source": "systemd/rp5-agent.service",
+      "target": "/etc/systemd/system/rp5-agent.service",
+      "sha256": "26e9eba99b70a5fe57028f803763ca5729f9f15c6587c7102caeab612f94d20f",
       "mode": 420
     }
   ]

@@ -50,7 +50,7 @@ class DNSResilienceCLI(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.commands = self.directory / 'bin'
         self.commands.mkdir()
-        for name in ('systemctl', 'dig', 'curl', 'date', 'flock', 'logger',
+        for name in ('systemctl', 'dig', 'curl', 'date', 'flock', 'logger', 'gateway-backup',
                      'alert', 'dns-mode', 'sleep', 'install', 'chown', 'dnsmasq'):
             path = self.commands / name
             path.write_text('#!' + sys.executable + '\n' + BOUNDARY)
@@ -60,9 +60,12 @@ class DNSResilienceCLI(unittest.TestCase):
         source, count = re.subn(r'(?m)^state_dir=.*$',
                                'state_dir=' + shlex.quote(str(self.directory)), source)
         self.assertEqual(count, 1)
-        source, count = re.subn(r'/run/lock/[A-Za-z0-9._-]+\.lock',
-                               str(self.directory / 'healthcheck.lock'), source)
-        self.assertEqual(count, 1)
+        for pattern, name in (
+            (r'/run/lock/mosdns-healthcheck\.lock', 'healthcheck.lock'),
+            (r'/run/lock/mihomo-maintenance\.lock', 'maintenance.lock'),
+        ):
+            source, count = re.subn(pattern, str(self.directory / name), source)
+            self.assertEqual(count, 1, 'fixture cannot rebase ' + pattern)
         for original, replacement in (
             ('/usr/local/sbin/mihomo-alert', str(self.commands / 'alert')),
             ('/usr/local/sbin/mihomo-dns-mode', str(self.commands / 'dns-mode')),
@@ -75,6 +78,7 @@ class DNSResilienceCLI(unittest.TestCase):
     def run_cli(self, script=None, args=(), timeout=10, **settings):
         self.actions.write_text('')
         env = dict(PATH=str(self.commands) + ':/usr/bin:/bin:/usr/sbin:/sbin',
+                   GATEWAY_BACKUP_BIN=str(self.commands / 'gateway-backup'),
                    TEST_ACTIONS=str(self.actions), **settings)
         result = subprocess.run(['sh', str(script or self.script), *args], env=env,
                                 capture_output=True, text=True, timeout=timeout)

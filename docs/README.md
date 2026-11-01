@@ -13,12 +13,14 @@ README 回答“它在跑什么”，这里回答“为什么这样、怎么装�
 | 状态文件怎么读、timer 清单、更新与回滚、账本位置 | [运维](operations.zh-CN.md) |
 | 历史上的故障、误判与调试过程（档案，不是当前配置真值） | [调试档案](deployment-debugging-summary.zh-CN.md) |
 | 术语（TUN、fake-IP、auto-redirect、预算准入、门禁、包装器、休眠单元） | [术语表](../GLOSSARY.md) |
-| UCG 点对点链路（`wg-ucg-pilot`）的现状与边界 | [UCG WireGuard 试点](ucg-wireguard-pilot.zh-CN.md) |
+| UCG 点对点链路（`wg-ucg-pilot`）的 2026-10 试点记录（拓扑部分已被 ADR-0008 取代） | [UCG WireGuard 试点（历史）](ucg-wireguard-pilot.zh-CN.md) · [ADR-0008](adr/0008-retire-downstream-lan.md) |
 | 恢复介质怎么准备、能恢复什么 | [恢复镜像边界](recovery-image.zh-CN.md) |
 | 暴露面与发布红线 | [SECURITY.md](../SECURITY.md) |
 | 外部项目调研（Landscape、能力报告、验收计划） | [research/](research/) |
 | 分主题的常读文档（入门、架构、运维、安全、验证等） | [wiki/](wiki/) |
 | 设计决策与历史取舍 | [ADR 索引](adr/README.md) |
+| 拓扑、设备清单与本地 CI | [网络拓扑与设备清单](网络拓扑与设备清单.md) |
+| UCG Max 调研结论与端点清单（原始抓取不随仓库发布） | [ucg-max-research/](ucg-max-research/) |
 
 ## 文档的权威范围
 
@@ -39,5 +41,3 @@ README 回答“它在跑什么”，这里回答“为什么这样、怎么装�
 - 检测周期不等于恢复时间；连接切换不能迁移既有 TCP / WebSocket 会话。
 - 可信 LAN 防火墙不是访客隔离或公网管理方案。
 - 恢复镜像与发布工件不等于本机已通过整机重刷验收。
-| 拓扑与设备清单（含 NAS 本地 CI） | [网络拓扑与设备清单](网络拓扑与设备清单.md) |
-| UCG Max 调研资料 | [ucg-max-research/](ucg-max-research/) |

@@ -127,6 +127,35 @@ class ClientDNSGuardCLI(unittest.TestCase):
         self.assertEqual(status.get('host_mosdns'), '2')
         self.assertFalse([a for a in actions if a[:2] == ['systemctl', 'restart']])
 
+    def test_consecutive_chain_down_samples_escalate_to_the_resolver(self):
+        replies = {endpoint + ':' + protocol: 'timeout'
+                   for endpoint in ('192.0.2.53:53', '127.0.0.1:1053') for protocol in ('udp', 'tcp')}
+        restarts = []
+        for step in range(3):
+            result, status, actions = self.run_cli(replies=replies, now=str(1800000000 + step * 30))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            restarts.extend(a for a in actions if a[:2] == ['systemctl', 'restart'])
+            if step < 2:
+                self.assertEqual(status.get('action'), 'chain-down')
+                self.assertEqual(status.get('resolver_action'), 'none')
+        self.assertEqual(status.get('resolver_action'), 'restart')
+        self.assertEqual(status.get('resolver_fail_streak'), '0')
+        self.assertEqual(restarts, [['systemctl', 'restart', 'mihomo']])
+        self.assertTrue([a for a in actions if a[0] == 'alert' and 'resolver-restart' in a],
+                        'resolver recovery must keep the alert')
+
+    def test_resolver_silent_alone_reaches_the_resolver_after_three_samples(self):
+        replies = {'127.0.0.1:1053:' + protocol: 'timeout' for protocol in ('udp', 'tcp')}
+        for step in range(2):
+            result, status, actions = self.run_cli(replies=replies, now=str(1800000000 + step * 30))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(status.get('action'), 'escalate-resolver')
+            self.assertFalse([a for a in actions if a[:2] == ['systemctl', 'restart']])
+        result, status, actions = self.run_cli(replies=replies, now='1800000060')
+        self.assertEqual(status.get('resolver_action'), 'restart')
+        self.assertEqual([a for a in actions if a[:2] == ['systemctl', 'restart']],
+                         [['systemctl', 'restart', 'mihomo']])
+
     def test_error_text_cname_invalid_a_or_servfail_are_not_valid_client_answers(self):
         for reply in ('timeout', 'cname', 'bad-a', 'servfail-a'):
             with self.subTest(reply=reply):

@@ -1,6 +1,9 @@
 # UCG → WireGuard → Mihomo：单设备链路迭代
 
 记录日期：2026-10-20。本文发布脱敏的配置差异、操作顺序、验收证据与待办。
+
+> **历史记录**：文中的下游 LAN（`lan0` / `192.168.1.0/24`）已由 [ADR-0008](adr/0008-retire-downstream-lan.md) 退役；当前基线是 `wan0` / `proxy20` / `wg-ucg-pilot` 三接口，以 `automation/etc/mihomo/config.local.yaml` 为准。本文只记录当时的过程与判断，配置片段不要照抄。
+
 真实地址、客户端标识、订阅、WireGuard 密钥、完整配置和截图留在部署端的私有归档。
 这是已有网关的手动整合记录，尚未接入项目的一键安装器。
 
@@ -38,7 +41,7 @@ flowchart LR
 | UCG 入口 | 已有试验 VPN / 路由对象，但需核对启用状态与真实流量 | 保持单 PC 策略经 VPN；Kill Switch 启用 |
 | Pi WireGuard | 本轮实机脚本要求目标接口不存在才创建 | 复用已有试验密钥，单对端，MTU 1380；写入私有持久配置 |
 | Pi 防火墙 | 原有 LAN 透明代理与上游出口 | 为 WG 握手、透明重定向、转发及对端 NAT 增加限定规则 |
-| Mihomo 接管 | `include-interface` 仅有原下游接口 | 增加 WG 接口，保留原 LAN；`mode: rule` 与 1266 条规则不变 |
+| Mihomo 接管 | `include-interface` 仅有原下游接口 | 增加 WG 接口（当时保留原 LAN；ADR-0008 已退役）；`mode: rule` 与 1266 条规则不变 |
 | PC DNS | 缺少完整的单 PC DNS 接管证据 | UCG 对该 PC 的 TCP/UDP 53 做 DNAT 到隧道内 Pi 地址 |
 | IPv6 | IPv4 策略不保证覆盖 IPv6 | UCG 仅对该 PC 的 MAC 拒绝 IPv6 外网及访问网关的 IPv6 DNS |
 | 域名识别 | 仅靠现有 DNS / 连接元数据 | 增加单 WG 对端范围的嗅探，禁用目标地址覆盖 |
@@ -100,7 +103,8 @@ WireGuard 私有配置存于 `/etc/wireguard/<WG_INTERFACE>.conf`，权限为 ro
 mode: rule
 tun:
   include-interface:
-    - <EXISTING_LAN_INTERFACE>
+    # 2026-10-20 的记录：当时在既有下游接口上追加 WG 接口。
+    # ADR-0008 已退役下游 LAN；当前基线是 wg-ucg-pilot + proxy20（见 config.local.yaml）。
     - <WG_INTERFACE>
   # 保留已有 auto-route、auto-redirect、strict-route 等设置
   dns-hijack:

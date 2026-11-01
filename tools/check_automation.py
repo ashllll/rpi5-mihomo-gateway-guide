@@ -12,7 +12,7 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the unit tree is the recorded gateway's tree: exactly the thirteen units that
+* the unit tree is the recorded gateway's tree: exactly the fifteen units that
   box enabled, three timers installed but left off, the startup evidence gate and
   the budget wrapper drop-in, and none of the retired adaptive units,
 * the scripts and units are the recorded set (no adaptive selector), every
@@ -21,7 +21,7 @@ is checked the way it is shipped:
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, enables exactly the thirteen recorded units and
+  operator-edited deployment data, enables exactly the fifteen recorded units and
   disables exactly the three dormant timers, and changes nothing in --dry-run
   mode,
 * the gateway address and ports really come from the environment at runtime.
@@ -88,6 +88,7 @@ ENABLED_UNITS = (
     "dnsmasq-vlan-pilot.service",
     "dnsmasq.service",
     "homeassistant-access-guard.service",
+    "rp5-agent.service",
 )
 DORMANT_TIMERS = (
     "mihomo-rules-update.timer",
@@ -96,6 +97,8 @@ DORMANT_TIMERS = (
 )
 SBIN_SCRIPTS = (
     "dnsmasq-safe-start",
+    "gateway-backup",
+    "gateway-restore",
     "homeassistant-access-guard",
     "mihomo-alert",
     "mihomo-core-swap",
@@ -116,8 +119,10 @@ SBIN_SCRIPTS = (
     "mihomo-update-subscription",
     "mihomo-watch",
     "mosdns-emergency-direct",
+    "rp5-agent.py",
     "mosdns-healthcheck",
     "mosdns-resume-auto",
+    "mosdns-rollout-backup",
     "mosdns-rollout-rollback",
     "mosdns-update-binary",
     "mosdns-update-rules",
@@ -241,6 +246,10 @@ NOT_DEPLOYMENT_PARAMETERS = {
     "MIHOMO_UPDATE_OWNER_START",
     # Set only by the installer lock supervisor across its exec into install.sh.
     "MIHOMO_INSTALL_LOCK_HELD",
+    # Per-run seams used by the verification harnesses to point a destructive
+    # script at a stub producer.  The shipped default stays absolute.
+    "GATEWAY_BACKUP_BIN",
+    "MOSDNS_ROLLOUT_BACKUP_BIN",
 }
 
 SHELL_VAR = re.compile(r'\$\{([A-Z_][A-Z0-9_]*):[-=]')
@@ -866,10 +875,16 @@ def check_subscription_schedule() -> None:
     unit = configparser.ConfigParser(interpolation=None)
     unit.read(AUTOMATION / "systemd/mihomo-subscription-update.timer")
     timer = unit["Timer"]
-    check(timer.get("OnBootSec") == "10min", "subscription refresh must run after boot")
-    check(timer.get("OnUnitInactiveSec") == "2d", "subscription refresh must wait 48 hours after completion")
-    check(not timer.get("OnCalendar"), "subscription refresh must not retain the daily trigger")
+    check(timer.get("OnBootSec") == "1min", "subscription recovery must run one minute after boot")
+    check(timer.get("OnCalendar") == "*-*-* *:0/10", "subscription recovery must tick every ten minutes")
+    check(not timer.get("OnUnitInactiveSec"), "a fixed inactivity interval cannot express success and failure clocks")
     check(timer.get("Unit") == "mihomo-subscription-update.service", "subscription timer must use the transactional updater")
+    source = (AUTOMATION / "sbin/mihomo-update-subscription").read_text(encoding="utf-8")
+    check("--recover-only" in source, "the updater must expose an independent pending recoverer")
+    check("record_failure" in source, "hard failures must record a structured reason")
+    check("next-update" in source, "the updater must own the success/failure schedule")
+    service = (AUTOMATION / "systemd/mihomo-subscription-update.service").read_text(encoding="utf-8")
+    check("--due-only" in service, "the timer tick must ask the updater to honour its schedule")
 
 
 def main() -> int:

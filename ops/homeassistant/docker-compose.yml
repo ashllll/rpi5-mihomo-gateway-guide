@@ -1,0 +1,28 @@
+# Home Assistant on the gateway, managed as an operator template.
+#
+# The image must be an immutable digest.  `HA_IMAGE` is required (the `:?`
+# operator makes `docker compose config` fail closed when it is unset); stage 3
+# pins the digest read from the running container before the first apply:
+#   docker inspect --format '{{index .RepoDigests 0}}' homeassistant
+#   export HA_IMAGE='ghcr.io/home-assistant/home-assistant@sha256:<64 hex>'
+#
+# STAGE3(SC-06): privileged and host networking are the recorded state.  They
+# are *not* safe defaults: removing them needs a Home Assistant integration
+# regression (Zigbee/Z-Wave/MQTT/automations) and a rollback point.  Do not flip
+# them without that drill; the stage-3 checklist owns the decision.
+#
+# /run/dbus is deliberately absent: Home Assistant does not need the host bus
+# for the integrations recorded on this gateway.
+services:
+  homeassistant:
+    image: "${HA_IMAGE:?set HA_IMAGE to ghcr.io/home-assistant/home-assistant@sha256:<digest>}"
+    container_name: homeassistant
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    security_opt:
+      - label=disable
+    volumes:
+      - /srv/homeassistant:/config
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
