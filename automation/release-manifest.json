@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "d89f1e531664ce1a9d76fc6567e4642cfe38703631a704df806e0c132f2eb5bb",
+  "release_id": "5ec7ce1bcfd20ee86069046f4377590f41c9b9c891dab31995255134ecaa3ba3",
   "files": [
     {
       "source": "check-release.py",
@@ -72,7 +72,7 @@
     {
       "source": "etc/mihomo/README.md",
       "target": null,
-      "sha256": "6f7ecbda35020dafa2c73416fb48a971ca1b1e142ee7feaa7433bc132bf2ab7d"
+      "sha256": "bb1c60da314ef37842b033a4fb3926c8744c424129fac0a1d836585ec6540249"
     },
     {
       "source": "etc/mihomo/config.local.yaml",

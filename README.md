@@ -59,7 +59,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
 | `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
-| `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 |
 | `mihomo-media-guard.timer` | 对 Social / Streaming 做有界媒体采样；仅合格节点进入原生 fallback，默认策略关闭 | 每分钟唤醒，采样间隔由策略控制 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
@@ -102,11 +102,11 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 # 1. 网络身份（手工一次性）：wan0 DHCP（VLAN1）、proxy20 = 同一根线上的 802.1Q VLAN 20、
 #    wg-quick@wg-ucg-pilot，及 /etc/sysctl.d/99-router.conf
 sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有地址（TUN 由核心创建）
-# 2. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
-sudo nft -c -f /etc/nftables.conf
-# 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
+# 2. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架（同时播种 /etc/nftables.conf）
 sudo automation/install.sh --dry-run
 sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 15 个单元
+# 3. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
+sudo nft -c -f /etc/nftables.conf
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 sudo cat /run/mihomo-healthcheck/status
@@ -120,8 +120,8 @@ sudo cat /run/mihomo-healthcheck/status
 
 | 范围 | 文件 | 状态 |
 | --- | --- | --- |
-| 机制实现 | `automation/sbin/*`（22 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
-| 单元与 drop-in | `automation/systemd/**`（32 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
+| 机制实现 | `automation/sbin/*`（30 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
+| 单元与 drop-in | `automation/systemd/**`（41 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
 | 数据与解析 | `automation/etc/mosdns/**`、`automation/etc/dnsmasq-upstreams.*`、`automation/policy/route-defaults.yaml`、NetworkManager dispatcher | **逐字节一致** |
 | 脱敏模板 | `automation/etc/dnsmasq/{resolver.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实地址，**按设计不同** |
 | 站点态 | `automation/policy/capabilities.yaml`、`automation/etc/mihomo/config.local.yaml` | 账号、开关与私有覆写只在真机 `/etc/mihomo/adaptive/` 与合并后的 `config.yaml` 里 |

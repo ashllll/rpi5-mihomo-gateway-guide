@@ -70,12 +70,12 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mihomo-dnsmasq-guard.timer` | 每 30 秒检查配置的设备查询入口和实际上游，分别测试两个域名的两种查询方式。只有入口全无应答而上游有应答才重启入口服务；链路全无响应、上游无响应或部分失败分别告警，不重启上游。重启预算 3 次/15 分钟，最短间隔 20 秒；全部查询通过后报告恢复 | 定时 |
 | `mihomo.service` | 核心（`--run-core` 校验后拉起；`ExecStartPre` 先 `mihomo -t`） | 常驻，`Restart=always` |
 | `mihomo-measurement-budget.service` | 预算准入 broker（建 socket；账本首扣创建） | 常驻（enabled） |
-| `mosdns.service` | 国内直连/代理分流 DNS | 常驻，`After=mihomo` |
+| `mosdns.service` | 国内直连/代理分流 DNS | 常驻；不声明 `After=mihomo`，上游由 `mihomo-dns-mode auto` 收敛 |
 | `mihomo-healthcheck.timer` | 每分钟四要素 + 计数（随机延迟 3s） | 每分钟 |
 | `mihomo-watch.timer` | 单元失败/温度/磁盘/内存/WAN（边沿触发） | 开机 90s，之后每 120s |
 | `mosdns-healthcheck.timer` | mosdns 健康 | 开机 30s，之后每分钟 |
 | `mosdns-rules-update.timer` | 规则集每日 04:20±30min | 每日 |
-| `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 |
 | `mihomo-media-guard.timer` | 媒体速度准入，私有策略启用才采样；详见[媒体路由](wiki/x-video-routing.md) | 开机 2 分钟，之后每分钟唤醒 |
 | `mosdns-binary-update.timer` | MosDNS 二进制每周日 05:10±1h | 每周 |
 
@@ -91,7 +91,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 `rp5-agent.service` 在发布层内（T-Display 监控的只读指标，tcp/8799；`/health` 公开，状态端点要求
 Bearer token，token 文件由部署端创建）。2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`。
 
-订阅定时任务使用树莓派本机 systemd，不依赖管理电脑。私有地址准备好后执行 `sudo systemctl enable --now mihomo-subscription-update.timer`，用 `systemctl list-timers mihomo-subscription-update.timer` 核对下一次执行。开机超过十分钟后首次启用会立即检查；任务结束（包括失败或无变化）后等待 48 小时，重启后十分钟再次检查。手动检查用 `sudo systemctl start mihomo-subscription-update.service`。
+订阅定时任务使用树莓派本机 systemd，不依赖管理电脑。私有地址准备好后执行 `sudo systemctl enable --now mihomo-subscription-update.timer`，用 `systemctl list-timers mihomo-subscription-update.timer` 核对下一次执行。开机 1 分钟后首跑，之后 timer 每 10 分钟 tick，service 以 `--due-only` 判断这次是否到期；更新成功排 48 小时，硬失败 10 分钟后重试、连续三次后退到 1 小时，pending 事务每个 tick 都会先恢复。手动检查用 `sudo systemctl start mihomo-subscription-update.service`。
 
 无变化不重启核心；候选有变化时现有更新器会重启 Mihomo，活动连接可能短暂中断。下载或校验失败保留当前主节点或最后可用额外缓存，不能仅凭服务退出成功认定所有来源已更新。新地址只保存在私有订阅文件中。
 

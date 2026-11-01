@@ -77,7 +77,7 @@
 
 `measurement-<16hex>` 内联 provider 由 `configure_measurement` 生成，不是本地段的一部分；它们与
 `/var/lib/mihomo-measurements/quality-budget.json` 的账户额度配套，准入逻辑和 systemd 接线见
-[`core/README.md`](../../core/README.md#预算外壳接线)。`unified-delay: false` 必须保留：
+[`core/README.md`](../../../core/README.md#预算外壳接线)。`unified-delay: false` 必须保留：
 开启后一次检测会打两次 HEAD，预算按两次预扣，且真机策略依赖单次语义。
 
 ## 安装

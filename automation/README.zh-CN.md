@@ -77,7 +77,7 @@
 | `mihomo-dnsmasq-guard.timer` | 启动 30 秒后，之后每 30 秒（抖动 5 秒） | 客户端 UDP/TCP 与实际上游分层观测，只恢复满足条件的客户端解析器 |
 | `mosdns-rules-update.timer` | 04:20（抖动 30min） | MosDNS 路由数据更新 |
 | `mosdns-binary-update.timer` | 周日 05:10（抖动 1h） | MosDNS 二进制更新 |
-| `mihomo-subscription-update.timer` | 开机 10 分钟，任务结束后每 48 小时 | 主订阅及非手动额外来源刷新，候选校验、备份、业务检查和失败恢复 |
+| `mihomo-subscription-update.timer` | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 | 主订阅及非手动额外来源刷新，候选校验、备份、业务检查和失败恢复 |
 | `mosdns-healthcheck.timer` | 启动 30s 后，之后每 1 分钟 | MosDNS 分流自检与回退选择 |
 
 另有三个随仓库安装、保持 disabled 的 timer：`mihomo-rules-update.timer`、
@@ -109,7 +109,7 @@ MosDNS 不依赖 Mihomo 启动成功，其启动/停止 hook 使用有界 `auto`
 
 ```sh
 sudo automation/install.sh --dry-run        # 只打印计划，不碰文件系统
-sudo automation/install.sh                  # 安装 27 个 sbin 与整棵 unit 树，enable 15 个单元（不 start）
+sudo automation/install.sh                  # 安装 30 个 sbin 与整棵 unit 树，enable 15 个单元（不 start）
 GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，也不装到真实系统）
 ```
 
@@ -123,14 +123,14 @@ GATEWAY_ROOT=/tmp/gw automation/install.sh  # 沙箱演练（不需要 root，�
 - 若 `/etc/dnsmasq-upstreams.conf` 不存在，用 `etc/dnsmasq/upstreams.conf` 播种，保证代理栈启动前 DNS 可用；
 - 只有在运行 systemd 的主机上才 `systemctl daemon-reload`，随后 `enable` 发布层 15 个单元、`disable` 三个休眠 timer；
   `enable` 只决定开机自启，首次部署仍需手工 `start` 常驻单元；
-- dispatcher 只在 `/etc/NetworkManager` 存在时装成 0700；仍不改动 sshd、路由、sysctl 或 nftables（管理无线源路由由 dispatcher 在 NetworkManager 事件里自己加）。
+- dispatcher 只在 `/etc/NetworkManager` 存在时装成 0700；不改动 sshd 配置与 sysctl；`/etc/nftables.conf` 与 `/etc/nftables.d/*` 只在目标缺失时播种（`install_default`），已有内容保留；dispatcher 只装文件，管理无线源路由由它在 NetworkManager 事件里自己加。
 
 安装后仍需人工完成：把 `env/automation.env.example` 与 `env/mihomo-alert.env.example` 复制成 `/etc/mihomo-automation.env`、
 `/etc/mihomo-alert.env`（0600）并填入真实值；放入订阅链接与面板 token；
 填写 `capabilities.yaml` 的 `overlay` 段与 `reconcile-targets.conf`；改写 dnsmasq 配置里的文档占位地址；确认 dispatcher 已按 NetworkManager 连接事件生效；
 按需 `systemctl start` 常驻单元（`enable` 只决定开机自启）。私有订阅准备完成后执行
 `sudo systemctl enable --now mihomo-subscription-update.timer`。超过开机十分钟首次启用会立即检查；
-任务结束后等待 48 小时，重启后十分钟重新检查。手动刷新用 `sudo systemctl start mihomo-subscription-update.service`。
+开机 1 分钟后首跑，之后 timer 每 10 分钟 tick，service 以 `--due-only` 判断这次是否到期；更新成功排 48 小时，硬失败 10 分钟后重试、连续三次后退到 1 小时，pending 事务每个 tick 都会先恢复。手动刷新用 `sudo systemctl start mihomo-subscription-update.service`。
 
 安装前，`check-release.py` 先核对包内文件与 `release-manifest.json`，再按上一份安装记录检查受管文件漂移。
 安装器持有维护锁，在 `/var/lib/mihomo-automation/.install-pending` 持久保存旧文件与权限后逐文件原子替换；
@@ -300,7 +300,7 @@ python3 tools/check_update_rules.py # 规则更新事务与回滚
 python3 tools/check_publication_privacy.py  # 隐私扫描覆盖与检查器格式回归
 ```
 
-`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、27 个脚本全部安装、`enable` 集合恰好是发布层 15 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
+`check_automation.py` 会把 `install.sh` 装进临时目录，断言安装结果与文档一致、30 个脚本全部安装、`enable` 集合恰好是发布层 15 个单元、三个休眠 timer 保持 `disable`、dnsmasq 三个文件按 `dnsmasq.d` / pilot 独立路径落位、升级时保留既有 `capabilities.yaml`、安装并保留独立的 `route-defaults.yaml`、`--dry-run` 不产生任何文件，并验证两个清单路径都能经环境传入订阅候选 overlay。
 上述合成检查不替代真实 Linux 数据面、目标机 systemd 行为与客户端验收。
 安装到目标系统前，先在目标系统上做语法检查（`nft -c -f`、`dnsmasq --test`、`mihomo -t`），见
 [分阶段部署](../docs/deployment.zh-CN.md)。

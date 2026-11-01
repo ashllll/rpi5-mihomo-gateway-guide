@@ -14,7 +14,7 @@
 | [0005：可信 LAN 与动态透明入口](0005-trusted-lan.md) | superseded by 0008 | 容纳动态 redirect，明确不提供访客隔离 |
 | [0006：下载工作负载与 provider 排序](0006-download-provider-ranking.md) | superseded by 0007 | 归档有界下载采样与 provider 排序决策 |
 | [0007：使用原生路由与单一检测预算](0007-native-routing-budget.md) | accepted | 原生 URLTest/fallback、授权池与单一账户预算 |
-| [0008：退役下游 LAN](0008-retire-downstream-lan.md) | accepted | 单线双 VLAN；管理钉环回，不再有 lan0 网段 |
+| [0008：退役下游 LAN](0008-retire-downstream-lan.md) | accepted | 单线双 VLAN；管理调用走环回、监听面由 nft 收口，不再有 lan0 网段 |
 
 只有代价较高、有真实替代方案、未来容易被误改的取舍进入 ADR。探测 URL、端口和 timer 值属于配置参考，
 不为每个常数建立 ADR。Landscape 等未上线方向进入[路线图](../wiki/roadmap.md)，不是既有决策。
