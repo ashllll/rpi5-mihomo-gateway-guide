@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "c7140f81ee22ed9a5bb234b98538856b24a7454b2e6b1294611bbc85139d9156",
+  "release_id": "5b29a89da8ec04b2aa7edef2a22665363faccfdd5f80f5e11e688a3b6af0bd19",
   "files": [
     {
       "source": "check-release.py",
@@ -151,7 +151,7 @@
     {
       "source": "sbin/mihomo-core-swap",
       "target": "/usr/local/sbin/mihomo-core-swap",
-      "sha256": "18ceec31958e3e42583dff6582cff7155d81a1f72e88fbc45c357a9446f9a1aa",
+      "sha256": "c36944044a68bc8cff48a2026ecf1ded8ced71bf2fbd8d29a4aa8e4465b4c69e",
       "mode": 493
     },
     {

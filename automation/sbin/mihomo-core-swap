@@ -35,6 +35,22 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def fsync_path(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def fsync_dir(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def read_state():
     try:
         with open(STATE, "r", encoding="utf-8") as handle:
@@ -48,8 +64,12 @@ def write_state(state):
     staging = STATE + ".stage"
     with open(staging, "w", encoding="utf-8") as handle:
         json.dump(state, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(staging, 0o600)
+    fsync_path(staging)
     os.replace(staging, STATE)
+    fsync_dir(BASE)
 
 
 def exchange(first, second):
@@ -79,12 +99,14 @@ def main(argv):
         staging = SLOTS[slot] + ".stage"
         shutil.copyfile(source, staging)
         os.chmod(staging, 0o755)
+        fsync_path(staging)
         got = sha256(staging)
         want = argv[3] if len(argv) > 3 else sha256(source)
         if got != want:
             os.unlink(staging)
             return emit({"error": "sha256 mismatch", "want": want, "got": got}, 2)
         os.replace(staging, SLOTS[slot])
+        fsync_dir(BASE)
         state.update({"staged": slot, "staged_sha256": got})
         write_state(state)
         return emit({"staged": slot, "sha256": got})
@@ -94,26 +116,101 @@ def main(argv):
         slot = state.get("staged")
         if slot not in SLOTS:
             return emit({"error": "nothing staged"}, 2)
+        new_sha = state.get("staged_sha256")
+        if not os.path.exists(SLOTS[slot]) or sha256(SLOTS[slot]) != new_sha:
+            return emit({"error": "staged slot does not match the recorded sha256"}, 2)
+        old_sha = sha256(LIVE) if os.path.exists(LIVE) else None
+        # Write-ahead intent: fsynced before the exchange, so a crash between
+        # the swap and the post-swap state write has one recoverable direction.
+        intent = dict(state)
+        intent.update({"phase": "swapping", "swap_slot": slot,
+                       "old_sha256": old_sha, "new_sha256": new_sha})
+        write_state(intent)
         exchange(LIVE, SLOTS[slot])
+        fsync_dir(os.path.dirname(LIVE))
+        fsync_dir(BASE)
         got = sha256(LIVE)
-        if got != state.get("staged_sha256"):
+        if got != new_sha:
             exchange(LIVE, SLOTS[slot])
+            fsync_dir(os.path.dirname(LIVE))
+            fsync_dir(BASE)
+            write_state(state)
             return emit({"error": "post-swap verify failed", "got": got}, 1)
         state.update({"live": slot, "live_sha256": got, "rollback_slot": slot, "staged": None})
+        state.pop("phase", None)
+        state.pop("swap_slot", None)
+        state.pop("old_sha256", None)
+        state.pop("new_sha256", None)
         write_state(state)
         return emit({"live": slot, "sha256": got})
 
     if command == "rollback":
         state = read_state()
+        live_sha = sha256(LIVE) if os.path.exists(LIVE) else None
+        phase = state.get("phase")
+
+        def finish(old_sha):
+            state.update({"live": None, "live_sha256": old_sha,
+                          "rollback_slot": None, "staged": None})
+            for key in ("phase", "swap_slot", "old_sha256", "new_sha256"):
+                state.pop(key, None)
+            write_state(state)
+            return emit({"rolled_back_from": live_sha, "now": sha256(LIVE)})
+
+        if phase == "swapping":
+            slot = state.get("swap_slot")
+            old_sha = state.get("old_sha256")
+            new_sha = state.get("new_sha256")
+            if slot not in SLOTS:
+                return emit({"error": "swap intent names an unknown slot"}, 2)
+            if live_sha == old_sha:
+                # The intent was durable but the exchange never happened.
+                return finish(old_sha)
+            if live_sha != new_sha:
+                return emit({"error": "live core matches neither side of the swap intent",
+                             "live": live_sha, "old": old_sha, "new": new_sha}, 2)
+            exchange(LIVE, SLOTS[slot])
+            fsync_dir(os.path.dirname(LIVE))
+            fsync_dir(BASE)
+            if sha256(LIVE) != old_sha:
+                return emit({"error": "rollback exchange did not restore the old core",
+                             "now": sha256(LIVE)}, 2)
+            return finish(old_sha)
+
         slot = state.get("rollback_slot") or state.get("live")
+        staged = state.get("staged")
+        if slot not in SLOTS and staged in SLOTS:
+            # A crash image from before the intent phase existed: the recorded
+            # staged slot tells us which side of the exchange to inspect.
+            staged_sha = state.get("staged_sha256")
+            slot_sha = sha256(SLOTS[staged]) if os.path.exists(SLOTS[staged]) else None
+            if live_sha != staged_sha and slot_sha == staged_sha:
+                return emit({"error": "nothing to roll back: staged core was never activated"}, 2)
+            if live_sha != staged_sha:
+                return emit({"error": "live core does not match the staged transaction"}, 2)
+            # The exchange happened and the slot now holds the previous core.
+            exchange(LIVE, SLOTS[staged])
+            fsync_dir(os.path.dirname(LIVE))
+            fsync_dir(BASE)
+            old_sha = sha256(LIVE)
+            if old_sha == staged_sha:
+                return emit({"error": "rollback exchange did not replace the staged core"}, 2)
+            return finish(old_sha)
         if slot not in SLOTS:
             return emit({"error": "no rollback target"}, 2)
-        before = sha256(LIVE)
+        if live_sha != state.get("live_sha256"):
+            # The state says a different core is live.  Refuse instead of
+            # moving the "new" core back over a core we cannot name.
+            return emit({"error": "live core does not match the recorded state",
+                         "live": live_sha, "recorded": state.get("live_sha256")}, 2)
+        before = live_sha
         exchange(LIVE, SLOTS[slot])
-        state.update({"live": None if state.get("live") == slot else state.get("live"),
-                      "live_sha256": None, "rollback_slot": None})
-        write_state(state)
-        return emit({"rolled_back_from": before, "now": sha256(LIVE), "slot": slot})
+        fsync_dir(os.path.dirname(LIVE))
+        fsync_dir(BASE)
+        now = sha256(LIVE)
+        if now == before:
+            return emit({"error": "rollback exchange did not change the live core"}, 2)
+        return finish(now)
 
     if command == "status":
         return emit({"slots": {name: sha256(path) if os.path.exists(path) else None
