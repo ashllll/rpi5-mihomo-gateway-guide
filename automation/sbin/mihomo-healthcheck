@@ -18,6 +18,29 @@ alert_failures=${EGRESS_ALERT_FAILURES:-1}
 recovery_successes=${EGRESS_RECOVERY_SUCCESSES:-1}
 alert=/usr/local/sbin/mihomo-alert
 
+# Client-facing DNS probe (F-21).  LAN clients resolve through one upstream,
+# 127.0.0.1:1053, owned by mihomo.  A running core with a silent 1053 listener
+# leaves every client without DNS while every process-level signal stays green.
+# One good answer per transport is enough: a single flaky name must not restart
+# a healthy core.  The updater uses a stricter two-name check before accepting
+# a new configuration.
+dns_1053_server=${DNS_1053_SERVER:-127.0.0.1}
+dns_1053_port=${DNS_1053_PORT:-1053}
+dns_1053_domestic=${DNS_1053_DOMESTIC_DOMAIN:-www.baidu.com}
+dns_1053_fakeip=${DNS_1053_FAKEIP_DOMAIN:-example.com}
+dns_1053_fake_prefix=${DNS_1053_FAKEIP_PREFIX:-198.18. 198.19.}
+dns_1053_timeout=${DNS_1053_TIMEOUT:-2}
+dns_1053_threshold=${DNS_1053_FAIL_THRESHOLD:-3}
+
+# Recovery pacing (F-22).  An attempt is stamped before the restart so a core
+# that never comes back cannot be hammered; only a restart that leaves the core
+# active, forwarding and answering 1053 clears the cooldown.  A unit stuck at
+# systemd's start limit is reset once per boot window and retried once, instead
+# of being misread as a failed recovery for the next hour.
+restart_interval=${MIHOMO_RESTART_INTERVAL_SECONDS:-3600}
+verified_streak_to_clear=${MIHOMO_RECOVERY_VERIFIED_STREAK:-3}
+boot_reset_budget=${MIHOMO_BOOT_RESET_BUDGET:-2}
+
 usage='usage: mihomo-healthcheck [--observe-only|--startup-check [seconds]|--egress|--state]'
 case "${1:-}" in
   '') mode=timer; wait_s=0 ;;
@@ -36,10 +59,16 @@ case "${1:-}" in
 esac
 
 if [ "$mode" = timer ]; then
-for threshold in "$alert_failures" "$recovery_successes"; do
+for threshold in "$alert_failures" "$recovery_successes" "$dns_1053_timeout" "$dns_1053_threshold" \
+  "$restart_interval" "$verified_streak_to_clear"; do
   case "$threshold" in ''|*[!0-9]*) exit 2 ;; esac
   [ "$threshold" -ge 1 ] || exit 2
 done
+case "$boot_reset_budget" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$restart_interval" -ge 60 ] || exit 2
+case "$dns_1053_port" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$dns_1053_port" -ge 1 ] && [ "$dns_1053_port" -le 65535 ] || exit 2
+[ "$dns_1053_timeout" -le 10 ] || exit 2
 fi
 
 if [ "$mode" = state ]; then
@@ -58,6 +87,19 @@ fi
 
 started=$(systemctl show mihomo -p ActiveEnterTimestamp --value 2>/dev/null || true)
 [ -n "$started" ] || started=-5min
+
+# The reset budget is per boot: a bad unit may need one reset after the boot
+# burst, but the same bad unit must not be reset on every timer tick forever.
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
+recorded_boot=$(cat "$state_dir/boot_id" 2>/dev/null || echo '')
+if [ "$boot_id" != "$recorded_boot" ]; then
+  printf '%s\n' "$boot_id" >"$state_dir/boot_id"
+  printf '0\n' >"$state_dir/boot_resets"
+fi
+boot_resets=$(cat "$state_dir/boot_resets" 2>/dev/null || echo 0)
+case "$boot_resets" in ''|*[!0-9]*) boot_resets=0 ;; esac
+restart_path=none
+last_restart_error=
 probe() {
   tun_ok=0; redirect_ok=0; filter_ok=0; route_ok=0
   ip link show Mihomo >/dev/null 2>&1 && tun_ok=1
@@ -70,6 +112,101 @@ probe() {
 kernel_ok() {
   [ "$tun_ok" = 1 ] && [ "$redirect_ok" = 1 ] &&
     [ "$filter_ok" = 1 ] && [ "$route_ok" = 1 ]
+}
+dns_answer() {
+  # dns_answer <server> <port> <name> <transport> <any|fake>
+  dig @"$1" -p "$2" "$3" A +time="$dns_1053_timeout" +tries=1 \
+    +noall +answer "$4" 2>/dev/null |
+    awk -v prefixes="$dns_1053_fake_prefix" -v expect="$5" '
+      $3 == "IN" && $4 == "A" {
+        count = split($5, octets, ".")
+        valid = (count == 4)
+        for (i = 1; i <= count; i++)
+          if (octets[i] !~ /^[0-9]+$/ || octets[i] > 255) valid = 0
+        if (!valid) next
+        if (expect == "fake") {
+          matched = 0
+          ranges = split(prefixes, range, " ")
+          for (j = 1; j <= ranges; j++)
+            if (substr($5, 1, length(range[j])) == range[j]) matched = 1
+          if (!matched) next
+        }
+        found = 1
+      }
+      END { exit !found }'
+}
+probe_dns_1053() {
+  dns_udp=0
+  dns_tcp=0
+  dns_answer "$dns_1053_server" "$dns_1053_port" "$dns_1053_domestic" +notcp any && dns_udp=$((dns_udp + 1))
+  dns_answer "$dns_1053_server" "$dns_1053_port" "$dns_1053_fakeip" +notcp fake && dns_udp=$((dns_udp + 1))
+  dns_answer "$dns_1053_server" "$dns_1053_port" "$dns_1053_domestic" +tcp any && dns_tcp=$((dns_tcp + 1))
+  dns_answer "$dns_1053_server" "$dns_1053_port" "$dns_1053_fakeip" +tcp fake && dns_tcp=$((dns_tcp + 1))
+  if [ "$dns_udp" -gt 0 ] && [ "$dns_tcp" -gt 0 ]; then
+    dns_1053=ok
+  else
+    dns_1053=fail
+  fi
+}
+refresh_dns_1053() {
+  [ "$dns_1053_enabled" = 1 ] || { dns_1053=skipped; return 0; }
+  probe_dns_1053
+  case "$dns_1053" in
+    ok) dns_fail_streak=0 ;;
+    fail) dns_fail_streak=$((dns_fail_streak + 1)) ;;
+  esac
+  printf '%s\n' "$dns_fail_streak" >"$state_dir/dns_fail_streak"
+  if [ "$dns_1053" = fail ]; then
+    if [ "$dns_fail_streak" -ge "$dns_1053_threshold" ]; then
+      business=failed
+      # Let the shared three-strike restart path fire on this very sample.
+      streak_now=$(cat "$state_dir/fail_streak" 2>/dev/null || echo 0)
+      case "$streak_now" in ''|*[!0-9]*) streak_now=0 ;; esac
+      [ "$streak_now" -ge $((dns_1053_threshold - 1)) ] || \
+        printf '%s\n' "$((dns_1053_threshold - 1))" >"$state_dir/fail_streak"
+    elif [ "$business" != failed ]; then
+      # One bad sample is an observation, not an outage: keep the core.
+      business=degraded
+    fi
+  fi
+}
+recheck_dns_after_restart() {
+  # The pre-restart sample cannot prove the new listener. Re-observe without
+  # advancing the three-strike counter: this run already counts one sample.
+  [ "$dns_1053_enabled" = 1 ] || return 0
+  probe_dns_1053
+  [ "$dns_1053" != fail ] || business=failed
+}
+restart_unit_with_start_limit() {
+  # Returns 0 when systemd accepted the restart, including the single retry
+  # after clearing an exhausted start limit.  Sets restart_path for diagnosis.
+  restart_path=direct
+  last_restart_error=
+  rc=0
+  last_restart_error=$(systemctl restart mihomo 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  limited=0
+  case "$last_restart_error" in
+    *"start request repeated too quickly"*|*"Start request repeated too quickly"*|*"start-limit-hit"*)
+      limited=1 ;;
+  esac
+  if [ "$limited" -eq 0 ] && systemctl is-failed --quiet mihomo 2>/dev/null; then
+    limited=1
+  fi
+  if [ "$limited" -eq 1 ] && [ "$boot_resets" -lt "$boot_reset_budget" ]; then
+    boot_resets=$((boot_resets + 1))
+    printf '%s\n' "$boot_resets" >"$state_dir/boot_resets"
+    restart_path=reset-failed
+    logger -t mihomo-healthcheck "reason=start-limit action=reset-failed; systemd refused the restart"
+    if systemctl reset-failed mihomo 2>/dev/null; then
+      rc=0
+      last_restart_error=$(systemctl restart mihomo 2>&1) || rc=$?
+      [ "$rc" -eq 0 ] && return 0
+    fi
+  else
+    [ "$limited" -eq 0 ] || restart_path=start-limit-blocked
+  fi
+  return 1
 }
 base_business() {
   case "$mode_name" in
@@ -174,6 +311,17 @@ case "$process_state" in
 esac
 base_business
 
+dns_1053_enabled=0
+dns_1053=skipped
+dns_udp=0
+dns_tcp=0
+dns_fail_streak=$(cat "$state_dir/dns_fail_streak" 2>/dev/null || echo 0)
+case "$dns_fail_streak" in ''|*[!0-9]*) dns_fail_streak=0 ;; esac
+if [ "$mode" = timer ] && [ "$maintenance" = 0 ] && [ "$process_state" = active ]; then
+  dns_1053_enabled=1
+fi
+refresh_dns_1053
+
 egress=$(cat "$state_dir/egress" 2>/dev/null || echo unknown)
 if [ "$mode" = timer ] && [ "$maintenance" = 0 ] && [ "$business" != failed ]; then
   last_at=$(cat "$state_dir/egress_at" 2>/dev/null || echo 0)
@@ -185,6 +333,24 @@ if [ "$mode" = timer ] && [ "$maintenance" = 0 ] && [ "$business" != failed ]; t
   fi
 fi
 [ "$business" = failed ] || { { [ "$egress" != fail ] && [ "$egress" != partial ]; } || business=degraded; }
+
+# One structured reason per sample.  Operators and mihomo-watch read this instead
+# of inferring a cause from several booleans; the restart line repeats it.
+reason=none
+if [ "$business" = failed ]; then
+  case "$mode_name" in
+    process-inactive|process-stopping) reason=process-inactive ;;
+    *)
+      if kernel_ok && [ "$dns_1053" = fail ]; then reason=dns-1053
+      elif kernel_ok; then reason=structure
+      elif [ "$dns_1053" = fail ]; then reason=structure+dns-1053
+      else reason=structure
+      fi ;;
+  esac
+elif [ "$business" = degraded ]; then
+  reason=egress
+fi
+last_restart_reason=$(cat "$state_dir/last_restart_reason" 2>/dev/null || echo none)
 
 # A stopped core gets an immediate bounded recovery attempt. A running core with
 # broken local forwarding structure needs three observations before restarting.
@@ -209,17 +375,21 @@ if [ "$mode" = timer ] && [ "$maintenance" = 0 ]; then
 
   if [ "$restart_due" = 1 ]; then
     now=$(date +%s)
-    restarted_at=$(cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
-    if [ $(( now - restarted_at )) -ge 3600 ]; then
-      logger -t mihomo-healthcheck "gateway process or forwarding structure failed; requesting restart"
-      printf '%s\n' "$now" >"$state_dir/restarted_at"
+    attempted_at=$(cat "$state_dir/restart_attempted_at" 2>/dev/null || cat "$state_dir/restarted_at" 2>/dev/null || echo 0)
+    case "$attempted_at" in ''|*[!0-9]*) attempted_at=0 ;; esac
+    if [ $(( now - attempted_at )) -ge "$restart_interval" ]; then
+      last_restart_reason=$reason
+      printf '%s\n' "$last_restart_reason" >"$state_dir/last_restart_reason"
+      logger -t mihomo-healthcheck "reason=$reason action=restart; gateway process, forwarding structure or client DNS 1053 failed"
+      printf '%s\n' "$now" >"$state_dir/restart_attempted_at"
       action=restart
-      if systemctl restart mihomo; then
+      if restart_unit_with_start_limit; then
         if systemctl is-active --quiet mihomo; then
           mode_name=process-restarted
           probe
           mode_name=process-restarted
           base_business
+          recheck_dns_after_restart
         else
           mode_name=process-inactive
           business=failed
@@ -230,12 +400,24 @@ if [ "$mode" = timer ] && [ "$maintenance" = 0 ]; then
           active)
             probe
             mode_name=process-running
-            base_business ;;
+            base_business
+            recheck_dns_after_restart ;;
           activating) mode_name=process-activating; base_business ;;
           reloading) mode_name=process-reloading; base_business ;;
           deactivating) mode_name=process-stopping; business=failed ;;
           *) mode_name=process-inactive; business=failed ;;
         esac
+      fi
+      if [ "$business" != failed ]; then
+        # A restart that leaves the core active, forwarding and answering 1053 is
+        # a successful recovery. Clear the attempt stamp: the next, unrelated
+        # transient failure must not wait out the dead attempt's hour.
+        printf '%s\n' "$now" >"$state_dir/restart_succeeded_at"
+        printf '0\n' >"$state_dir/restart_attempted_at"
+        printf '0\n' >"$state_dir/verified_streak"
+        reason=none
+      else
+        logger -t mihomo-healthcheck "reason=$last_restart_reason action=restart-ineffective; cooldown retained"
       fi
       # The old core's cached egress result cannot verify the restarted core.
       printf 'unknown\n' >"$state_dir/egress"
@@ -246,11 +428,29 @@ if [ "$mode" = timer ] && [ "$maintenance" = 0 ]; then
       [ "$business" = failed ] || { { [ "$egress" != fail ] && [ "$egress" != partial ]; } || business=degraded; }
     fi
   fi
+
+  # Sustained verified samples also clear an old attempt stamp (for example when
+  # the restart looked idle because no traffic crossed the box yet).
+  verified_streak=$(cat "$state_dir/verified_streak" 2>/dev/null || echo 0)
+  case "$verified_streak" in ''|*[!0-9]*) verified_streak=0 ;; esac
+  if [ "$business" = verified ]; then
+    verified_streak=$((verified_streak + 1))
+    printf '%s\n' "$verified_streak" >"$state_dir/verified_streak"
+    if [ "$verified_streak" -ge "$verified_streak_to_clear" ]; then
+      printf '0\n' >"$state_dir/restart_attempted_at"
+    fi
+  else
+    printf '0\n' >"$state_dir/verified_streak"
+  fi
 fi
 
-printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s maintenance=%s fatal=%s\n' \
+printf '%s mode=%s action=%s business=%s tun=%s redirect=%s filter=%s route=%s egress=%s packets=%s maintenance=%s fatal=%s reason=%s dns_1053=%s dns_udp=%s dns_tcp=%s dns_fail_streak=%s last_restart_reason=%s restart_path=%s restart_attempted_at=%s restart_succeeded_at=%s verified_streak=%s boot_resets=%s\n' \
   "$(date -Is)" "$mode_name" "$action" "$business" "$tun_ok" "$redirect_ok" "$filter_ok" "$route_ok" \
-  "$egress" "$cur" "$maintenance" "${fatal:-none}" >"$state_dir/status"
+  "$egress" "$cur" "$maintenance" "${fatal:-none}" "$reason" "$dns_1053" "$dns_udp" "$dns_tcp" \
+  "$dns_fail_streak" "$last_restart_reason" "$restart_path" \
+  "$(cat "$state_dir/restart_attempted_at" 2>/dev/null || echo 0)" \
+  "$(cat "$state_dir/restart_succeeded_at" 2>/dev/null || echo 0)" \
+  "$(cat "$state_dir/verified_streak" 2>/dev/null || echo 0)" "$boot_resets" >"$state_dir/status"
 
 # Notify only from the timer. Keep a pending edge until delivery succeeds so a
 # temporary notifier outage cannot erase it when the gateway later recovers.

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "87cd4c4fdc8ed5d4ed3ae1ad4ffd897207e056994d97f0594b2f15dd1d0e05a1",
+  "release_id": "f45c74002d2f121bbfb8d16c70065c74b8e11920cf409a470a76fcae249ff8ab",
   "files": [
     {
       "source": "check-release.py",
@@ -10,7 +10,7 @@
     {
       "source": "env/automation.env.example",
       "target": null,
-      "sha256": "29e60f5e56b58a503253503bab75676c84dad5fe79e7921f3b2262ddb36d50d0"
+      "sha256": "02d28bef8bde28c0860db92c95720116140aa5c969e171cd65b07b6f1fd222f2"
     },
     {
       "source": "env/health-probes.conf.example",
@@ -163,7 +163,7 @@
     {
       "source": "sbin/mihomo-dnsmasq-guard",
       "target": "/usr/local/sbin/mihomo-dnsmasq-guard",
-      "sha256": "dbb90baf1983ba320729a4618ce466ff641928d87dff9e192fd3f13a6bceb05b",
+      "sha256": "d0997f477a07c7ae86f5d5c675c13a89e7a49e7842de9d9091605cfb8a988ec5",
       "mode": 493
     },
     {
@@ -175,7 +175,7 @@
     {
       "source": "sbin/mihomo-healthcheck",
       "target": "/usr/local/sbin/mihomo-healthcheck",
-      "sha256": "239ea36bd4d4d6491c8d3c5263391a6140a903b0175c98ac64d152546832bf47",
+      "sha256": "4b8dab60b3645aefcdcc5c11bd9f046ce1fbda112cbc33bb6906f75be93fc2b8",
       "mode": 493
     },
     {
@@ -241,7 +241,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "8d491de34052e7f0306df494f1f2f04750bdb55613e89a26cd404c663f70ef16",
+      "sha256": "df21d676df743bb6c8dc70f83bc330557459fbf48efb25370a57c0aeb3bddcb0",
       "mode": 493
     },
     {
@@ -415,7 +415,7 @@
     {
       "source": "systemd/mihomo-subscription-update.timer",
       "target": "/etc/systemd/system/mihomo-subscription-update.timer",
-      "sha256": "7be4bfc55eb061519f4f2e65d3d2e1620e0bda0ec91407205b90d6305adb4c9c",
+      "sha256": "aab4e8d42ec147858886924193ac19e38372e364abf90f1adfbeb5355ea399ff",
       "mode": 420
     },
     {
@@ -469,7 +469,7 @@
     {
       "source": "systemd/mihomo.service.d/zz-alert.conf",
       "target": "/etc/systemd/system/mihomo.service.d/zz-alert.conf",
-      "sha256": "1ad7cbd444a5de9fc77751bca50740a0c9d69736f4607e96f2d0fa5a6646f043",
+      "sha256": "84359a11b7fa0ed132efd47da98f1c3de5a1c065d8b8528d4f4ae2672c8beac7",
       "mode": 420
     },
     {

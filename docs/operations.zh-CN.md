@@ -27,8 +27,12 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 出口抽样固定走 `127.0.0.1:7890`：核心按 `bind-address: "*"` 监听，本机已无独立 LAN 口，环回是唯一不随链路状态变化的入口；`lan-allowed-ips` 必须含 `127.0.0.1/32`，否则核心会重置环回连接。生产拓扑是「一根网线接 UCG 交换机」：上行 VLAN1（`192.168.0.0/24`）+ 下行 VLAN20（`192.168.20.1/24`，UCG 广播的 `<SSID-1>` Wi-Fi 客户端），独立下游 LAN 口与 Pi 自建 AP 已移除。
 
 探针只在状态迁移时推送告警，所以“没新告警”不等于“此刻正常”，仍需看 `egress`。
-黑障自愈：进程还活着但证据连续红 3 次，探针会重启核心一次（`restarted_at` 记录时间，
-每小时至多一次）；三次仍不绿说明重启救不回来，直接查节点/订阅/上游。
+黑障自愈：进程还活着但证据连续红 3 次（含客户端 1053 探针），探针会重启核心一次。
+冷却按「尝试」与「成功」分开记：`restart_attempted_at` 在尝试前写入，只有重启后核心 active、
+转发结构在、1053 有应答才写 `restart_succeeded_at` 并清除冷却；重启无效仍保持每小时至多一次。
+被 systemd start limit 拒绝时先 `reset-failed` 再重试一次（每 boot 有预算），状态里用
+`reason=start-limit|process-inactive|dns-1053|structure` 区分原因。三次仍不绿说明重启救不回来，
+直接查节点/订阅/上游。
 
 ## 手机通知怎么看
 
@@ -171,7 +175,9 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 
 | 路径 | 内容 |
 |---|---|
-| `/run/mihomo-healthcheck/` | `status`、`packets`、`egress`、`egress_at`、`fail_streak`、`restarted_at`（0700，重启清空） |
+| `/run/mihomo-healthcheck/` | `status`、`packets`、`egress`、`egress_at`、`fail_streak`、`dns_fail_streak`、`restart_attempted_at`、`restart_succeeded_at`、`verified_streak`、`boot_resets`、`last_restart_reason`（0700，重启清空） |
+| `/var/lib/mihomo-subscription-backups/` | `transaction.pending`、`failed-candidate`、`next-update`、`last-failure`、`retry-count` 与按时间戳保留的备份（0700） |
+| `/run/mihomo-dnsmasq-guard/` | `status`、`resolver-failures`、`resolver-restarts`、`resolver-last-restart`（guard 状态） |
 | `/run/mosdns-healthcheck/status` | mosdns 健康结论 |
 | `/var/lib/mihomo-measurements/quality-budget.json` | 预算账本（账户、尝试次数、`last_reservation_at`） |
 | `/var/lib/mihomo-download-quality/scores.json` | 下载采样（休眠） |

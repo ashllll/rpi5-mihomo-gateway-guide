@@ -866,10 +866,14 @@ def check_subscription_schedule() -> None:
     unit = configparser.ConfigParser(interpolation=None)
     unit.read(AUTOMATION / "systemd/mihomo-subscription-update.timer")
     timer = unit["Timer"]
-    check(timer.get("OnBootSec") == "10min", "subscription refresh must run after boot")
-    check(timer.get("OnUnitInactiveSec") == "2d", "subscription refresh must wait 48 hours after completion")
-    check(not timer.get("OnCalendar"), "subscription refresh must not retain the daily trigger")
+    check(timer.get("OnBootSec") == "1min", "subscription recovery must run one minute after boot")
+    check(timer.get("OnCalendar") == "*-*-* *:0/10", "subscription recovery must tick every ten minutes")
+    check(not timer.get("OnUnitInactiveSec"), "a fixed inactivity interval cannot express success and failure clocks")
     check(timer.get("Unit") == "mihomo-subscription-update.service", "subscription timer must use the transactional updater")
+    source = (AUTOMATION / "sbin/mihomo-update-subscription").read_text(encoding="utf-8")
+    check("--recover-only" in source, "the updater must expose an independent pending recoverer")
+    check("record_failure" in source, "hard failures must record a structured reason")
+    check("next-update" in source, "the updater must own the success/failure schedule")
 
 
 def main() -> int:

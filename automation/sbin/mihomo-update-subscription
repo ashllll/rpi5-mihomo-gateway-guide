@@ -4,12 +4,13 @@ set -eu
 umask 077
 
 force=false
-if [ "${1:-}" = --force ]; then
-  force=true
-elif [ "$#" -ne 0 ]; then
-  echo "usage: mihomo-update-subscription [--force]" >&2
-  exit 2
-fi
+recover_only=false
+case "${1:-}" in
+  '') ;;
+  --force) force=true ;;
+  --recover-only) recover_only=true ;;
+  *) echo "usage: mihomo-update-subscription [--force|--recover-only]" >&2; exit 2 ;;
+esac
 
 exec 9>/run/lock/mihomo-update-subscription.lock
 if ! flock -n 9; then
@@ -23,11 +24,45 @@ extra_cache_root=/var/lib/mihomo-extra-subscriptions
 backup_root=/var/lib/mihomo-subscription-backups
 pending_file=$backup_root/transaction.pending
 failed_candidate_file=$backup_root/failed-candidate
+next_update_file=$backup_root/next-update
+failure_file=$backup_root/last-failure
+retry_count_file=$backup_root/retry-count
+failure_recorded=false
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
+
+# Client DNS gate (F-21).  Every LAN client resolves through one upstream,
+# 127.0.0.1:1053.  Proxied critical paths can stay green while that listener is
+# silent, so accepting a new config requires both a domestic name and a fake-IP
+# name to answer over UDP and TCP.  Stricter than the liveness probe on purpose:
+# this gate decides whether a whole configuration is accepted.
+dns_1053_server=${DNS_1053_SERVER:-127.0.0.1}
+dns_1053_port=${DNS_1053_PORT:-1053}
+dns_1053_domestic=${DNS_1053_DOMESTIC_DOMAIN:-www.baidu.com}
+dns_1053_fakeip=${DNS_1053_FAKEIP_DOMAIN:-example.com}
+dns_1053_fake_prefix=${DNS_1053_FAKEIP_PREFIX:-198.18. 198.19.}
+dns_1053_timeout=${DNS_1053_TIMEOUT:-2}
+for name in "$dns_1053_server" "$dns_1053_domestic" "$dns_1053_fakeip"; do
+  case "$name" in ''|-*|*[!A-Za-z0-9.:-]*) echo 'invalid DNS gate parameter' >&2; exit 2 ;; esac
+done
+case "$dns_1053_port" in ''|*[!0-9]*) echo 'invalid DNS gate port' >&2; exit 2 ;; esac
+[ "$dns_1053_port" -ge 1 ] && [ "$dns_1053_port" -le 65535 ] || exit 2
+case "$dns_1053_timeout" in ''|*[!0-9]*) echo 'invalid DNS gate timeout' >&2; exit 2 ;; esac
+
+# Failure pacing (F-05).  The timer is a ten-minute tick; the updater owns the
+# schedule so a success waits a full interval while a failure retries in
+# minutes, and a pending transaction is recovered on any tick, including boot.
+: "${MIHOMO_SUBSCRIPTION_INTERVAL_SECONDS:=172800}"
+: "${MIHOMO_SUBSCRIPTION_RETRY_SECONDS:=600}"
+: "${MIHOMO_SUBSCRIPTION_RETRY_MAX_SECONDS:=3600}"
+: "${MIHOMO_SUBSCRIPTION_RETAINED_RETRY_SECONDS:=21600}"
+for number in "$MIHOMO_SUBSCRIPTION_INTERVAL_SECONDS" "$MIHOMO_SUBSCRIPTION_RETRY_SECONDS" \
+  "$MIHOMO_SUBSCRIPTION_RETRY_MAX_SECONDS" "$MIHOMO_SUBSCRIPTION_RETAINED_RETRY_SECONDS"; do
+  case "$number" in ''|*[!0-9]*) echo 'invalid subscription schedule parameter' >&2; exit 2 ;; esac
+done
 # Shell-sourced parameters must also reach the Python overlay on manual runs.
 if [ -n "${MIHOMO_CAPABILITIES:-}" ]; then
   export MIHOMO_CAPABILITIES
@@ -355,6 +390,51 @@ remember_failed_candidate() {
   mv -f "$temporary" "$failed_candidate_file"
 }
 
+schedule_next() {
+  schedule_delay=$1
+  install -d -m 700 "$backup_root"
+  schedule_tmp=$next_update_file.tmp.$$
+  printf '%s\n' "$(( $(date +%s) + schedule_delay ))" >"$schedule_tmp"
+  chmod 600 "$schedule_tmp"
+  mv -f "$schedule_tmp" "$next_update_file"
+}
+
+# Every hard failure names the step, exit code and candidate it was working on,
+# and moves the next attempt to minutes instead of the two-day success interval.
+# The retry delay backs off after three consecutive failures, so an upstream
+# outage cannot turn into a hammering loop.
+record_failure() {
+  failure_step=$1
+  failure_rc=$2
+  failure_reason=$3
+  failure_recorded=true
+  # Journal first: if the backup directory itself is unwritable, the operator
+  # still gets a named step and reason instead of a silent exit.
+  logger -t mihomo-update-subscription \
+    "reason=$failure_reason step=$failure_step rc=$failure_rc candidate=${candidate:-none}"
+  install -d -m 700 "$backup_root"
+  retry=$(cat "$retry_count_file" 2>/dev/null || echo 0)
+  case "$retry" in ''|*[!0-9]*) retry=0 ;; esac
+  retry=$((retry + 1))
+  printf '%s\n' "$retry" >"$retry_count_file"
+  delay=$MIHOMO_SUBSCRIPTION_RETRY_SECONDS
+  [ "$retry" -lt 3 ] || delay=$MIHOMO_SUBSCRIPTION_RETRY_MAX_SECONDS
+  schedule_next "$delay"
+  failure_tmp=$failure_file.tmp.$$
+  printf 'at=%s step=%s rc=%s candidate=%s reason=%s retry=%s retry_in=%s\n' \
+    "$(date -Is)" "$failure_step" "$failure_rc" "${candidate:-none}" "$failure_reason" \
+    "$retry" "$delay" >"$failure_tmp"
+  chmod 600 "$failure_tmp"
+  mv -f "$failure_tmp" "$failure_file"
+  logger -t mihomo-update-subscription \
+    "reason=$failure_reason step=$failure_step retry_in=${delay}s"
+}
+
+clear_failure_state() {
+  printf '0\n' >"$retry_count_file"
+  rm -f "$failure_file"
+}
+
 : "${MIHOMO_MIXED_PORT:=7890}"
 proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mihomo-subscription.XXXXXX)
@@ -456,6 +536,7 @@ recover_pending() {
           logger -t mihomo-update-subscription "Pre-acceptance recovery failed; pending record and backup preserved"
           return 1
         fi
+        logger -t mihomo-update-subscription "reason=recover step=rollback rc=0; pending transaction rolled back under current policy"
       else
         logger -t mihomo-update-subscription "Pending update recovery found a config conflict; preserving pending record"
         return 1
@@ -477,6 +558,7 @@ cleanup() {
       logger -t mihomo-update-subscription \
         "Accepted core remains active; cache rollback failed and pending recovery is preserved" || true
     fi
+    record_failure cache-commit 1 "extra subscription cache commit failed" || true
   fi
   if [ "$update_started" = true ]; then
     result=1
@@ -498,7 +580,11 @@ cleanup() {
       logger -t mihomo-update-subscription "Subscription update failed; previous nodes restored under current policy" || true
     else
       logger -t mihomo-update-subscription "Subscription rollback failed; manual recovery required: $backup_dir" || true
+      record_failure rollback 1 "automatic rollback failed; manual recovery required" || true
     fi
+  fi
+  if [ "$result" -ne 0 ] && [ "$failure_recorded" != true ]; then
+    record_failure trap "$result" "update exited without a named failure step" || true
   fi
   rm -rf "$work_dir"
   exit "$result"
@@ -514,11 +600,34 @@ if ! flock -n 8; then
   exit 0
 fi
 if ! recover_pending; then
+  record_failure recover 1 "pending transaction recovery failed"
   exit 1
 fi
 if [ "${recovered_pending:-false}" = true ]; then
   exec 8>&-
   exit 0
+fi
+if [ "$recover_only" = true ]; then
+  # The independent recoverer: consume a pending transaction, never fetch a new
+  # version and never wait for the two-day refresh.  Called at boot and after a
+  # failed update by the ten-minute timer tick.
+  logger -t mihomo-update-subscription "reason=recover-only step=recovery rc=0; no pending transaction"
+  exec 8>&-
+  exit 0
+fi
+
+# The timer is a tick, not the schedule: a success waits the full interval, a
+# failure retries in minutes, and a pending recovery always runs first.
+if [ "$force" != true ]; then
+  due_at=$(cat "$next_update_file" 2>/dev/null || echo 0)
+  case "$due_at" in ''|*[!0-9]*) due_at=0 ;; esac
+  now_epoch=$(date +%s)
+  if [ "$due_at" -gt "$now_epoch" ]; then
+    logger -t mihomo-update-subscription \
+      "reason=not-due step=schedule rc=0; next attempt at $due_at"
+    exec 8>&-
+    exit 0
+  fi
 fi
 cp -p "$config" "$baseline_config"
 install -d -o root -g root -m 700 "$extra_cache_root"
@@ -670,6 +779,7 @@ if [ -d "$extra_urls_dir" ]; then
     else
       logger -t mihomo-update-subscription \
         "$source_id has no valid downloaded or cached subscription"
+      record_failure extra-source 1 "extra source has no valid subscription"
       exit 1
     fi
 
@@ -680,22 +790,33 @@ fi
 
 remaining=$(remaining_seconds) || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit during preparation"
+  record_failure timeout 1 "time limit during preparation"
   exit 1
 }
+rc=0
 run_bounded "$remaining" /usr/local/sbin/mihomo-subscription-candidate prepare \
-  "$baseline_config" "$remote" "$extra_manifest" "$candidate" "$status"
+  "$baseline_config" "$remote" "$extra_manifest" "$candidate" "$status" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  logger -t mihomo-update-subscription "Subscription candidate preparation failed with rc=$rc"
+  record_failure prepare "$rc" "candidate preparation failed"
+  exit 1
+fi
 remaining_seconds >/dev/null || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit during preparation"
+  record_failure timeout 1 "time limit after preparation"
   exit 1
 }
 
 if [ "$(cat "$status")" = unchanged ] && [ "$force" != true ]; then
   if [ "$(cat "$primary_state")" = fresh ]; then
     logger -t mihomo-update-subscription "Subscription is already current"
+    schedule_next "$MIHOMO_SUBSCRIPTION_INTERVAL_SECONDS"
   else
     logger -t mihomo-update-subscription \
       "Primary subscription unavailable; retained configuration is already current"
+    schedule_next "$MIHOMO_SUBSCRIPTION_RETAINED_RETRY_SECONDS"
   fi
+  clear_failure_state
   exit 0
 fi
 
@@ -703,12 +824,17 @@ current_fingerprint=$(candidate_fingerprint)
 if [ "$force" != true ] && failed_candidate_is_cooled; then
   logger -t mihomo-update-subscription \
     "Previously failed subscription candidate is cooling down; use --force to retry"
+  schedule_next "$MIHOMO_SUBSCRIPTION_RETRY_MAX_SECONDS"
   exit 0
 fi
 
-remaining=$(remaining_seconds) || exit 1
+remaining=$(remaining_seconds) || {
+  record_failure timeout 1 "time limit before candidate validation"
+  exit 1
+}
 if ! run_bounded "$remaining" mihomo -t -d /etc/mihomo -f "$candidate" >/dev/null 2>&1; then
   logger -t mihomo-update-subscription "Downloaded subscription failed candidate validation"
+  record_failure candidate-validation 1 "mihomo -t rejected the candidate"
   remember_failed_candidate
   exit 1
 fi
@@ -723,19 +849,25 @@ fi
 if [ "$(snapshot_inputs)" != "$input_snapshot" ]; then
   logger -t mihomo-update-subscription \
     "Configuration or subscription inputs changed during download; candidate discarded"
+  record_failure input-changed 1 "inputs changed during download"
   exit 1
 fi
 if ! remaining_seconds >/dev/null; then
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  record_failure timeout 1 "time limit before apply"
   exit 1
 fi
 
 # A candidate must retain a qualified media route before replacing a live core.
 # This is a read-only projection; startup materializes only current definitions.
-remaining=$(remaining_seconds) || exit 1
+remaining=$(remaining_seconds) || {
+  record_failure timeout 1 "time limit before media admission"
+  exit 1
+}
 if ! run_bounded "$remaining" /usr/local/sbin/mihomo-media-guard \
     --config "$candidate" --check-ready --valid-for "$remaining" >/dev/null; then
   logger -t mihomo-update-subscription "Media admission is not ready; retained the running configuration"
+  record_failure media-admission 1 "media admission is not ready"
   exit 1
 fi
 
@@ -765,6 +897,7 @@ write_pending prepared "$backup_dir" "$baseline_sha" "$candidate_sha" \
 if ! remaining_seconds >/dev/null; then
   clear_pending
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before apply"
+  record_failure timeout 1 "time limit before config apply"
   exit 1
 fi
 update_started=true
@@ -772,28 +905,33 @@ atomic_install_config "$candidate" "$config"
 
 remaining=$(remaining_seconds) || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after config apply"
+  record_failure timeout 1 "time limit after config apply"
   remember_failed_candidate
   exit 1
 }
 if ! run_bounded "$remaining" mihomo -t -d /etc/mihomo >/dev/null 2>&1; then
   logger -t mihomo-update-subscription "Installed configuration failed validation"
+  record_failure installed-validation 1 "installed configuration failed mihomo -t"
   remember_failed_candidate
   exit 1
 fi
 
 remaining=$(remaining_seconds) || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit before reload"
+  record_failure timeout 1 "time limit before reload"
   remember_failed_candidate
   exit 1
 }
 if ! run_bounded "$remaining" systemctl restart mihomo; then
   logger -t mihomo-update-subscription "Mihomo restart failed after subscription update"
+  record_failure restart 1 "systemctl restart mihomo failed"
   remember_failed_candidate
   exit 1
 fi
 
 remaining=$(remaining_seconds) || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after reload"
+  record_failure timeout 1 "time limit after reload"
   remember_failed_candidate
   exit 1
 }
@@ -802,11 +940,13 @@ sleep_for=2
 sleep "$sleep_for"
 remaining=$(remaining_seconds) || {
   logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit after reload"
+  record_failure timeout 1 "time limit before active check"
   remember_failed_candidate
   exit 1
 }
 if ! run_bounded "$remaining" systemctl is-active --quiet mihomo; then
   logger -t mihomo-update-subscription "Mihomo became inactive after subscription update"
+  record_failure active-check 1 "mihomo is not active after restart"
   remember_failed_candidate
   exit 1
 fi
@@ -836,6 +976,36 @@ critical_probe_code() {
   else
     printf '000'
   fi
+}
+
+critical_dns_answer() {
+  # critical_dns_answer <name> <transport> <any|fake>
+  dig @"$dns_1053_server" -p "$dns_1053_port" "$1" A +time="$dns_1053_timeout" \
+    +tries=1 +noall +answer "$2" 2>/dev/null |
+    awk -v prefixes="$dns_1053_fake_prefix" -v expect="$3" '
+      $3 == "IN" && $4 == "A" {
+        count = split($5, octets, ".")
+        valid = (count == 4)
+        for (i = 1; i <= count; i++)
+          if (octets[i] !~ /^[0-9]+$/ || octets[i] > 255) valid = 0
+        if (!valid) next
+        if (expect == "fake") {
+          matched = 0
+          ranges = split(prefixes, range, " ")
+          for (j = 1; j <= ranges; j++)
+            if (substr($5, 1, length(range[j])) == range[j]) matched = 1
+          if (!matched) next
+        }
+        found = 1
+      }
+      END { exit !found }'
+}
+
+critical_dns_healthy() {
+  critical_dns_answer "$dns_1053_domestic" +notcp any &&
+    critical_dns_answer "$dns_1053_fakeip" +notcp fake &&
+    critical_dns_answer "$dns_1053_domestic" +tcp any &&
+    critical_dns_answer "$dns_1053_fakeip" +tcp fake
 }
 
 critical_paths_healthy() {
@@ -885,12 +1055,20 @@ critical_paths_healthy() {
 
 healthy=false
 attempt=1
+failure=critical-dns
 while [ "$attempt" -le 5 ]; do
-  if critical_paths_healthy; then
+  if ! critical_dns_healthy; then
+    failure=critical-dns
+  elif ! critical_paths_healthy; then
+    failure=critical-path
+  else
     healthy=true
     break
   fi
-  remaining=$(remaining_seconds) || break
+  if ! remaining=$(remaining_seconds); then
+    failure=timeout
+    break
+  fi
   sleep_for=2
   [ "$remaining" -lt "$sleep_for" ] && sleep_for=$remaining
   sleep "$sleep_for"
@@ -898,11 +1076,14 @@ while [ "$attempt" -le 5 ]; do
 done
 
 if [ "$healthy" != true ]; then
-  if remaining_seconds >/dev/null; then
-    logger -t mihomo-update-subscription "A critical service path failed after subscription update"
-  else
-    logger -t mihomo-update-subscription "Subscription update exceeded its configured time limit; restoring the previous config"
-  fi
+  case "$failure" in
+    critical-dns) detail='client DNS listener 1053 failed after subscription update' ;;
+    timeout) detail='subscription update exceeded its configured time limit during acceptance' ;;
+    *) detail='a critical service path failed after subscription update' ;;
+  esac
+  logger -t mihomo-update-subscription \
+    "reason=$failure step=acceptance rc=1; $detail; restoring the previous config"
+  record_failure "$failure" 1 "$detail"
   remember_failed_candidate
   exit 1
 fi
@@ -923,6 +1104,7 @@ while IFS='|' read -r source_id selected fresh; do
         cache_promotion_started=false
         logger -t mihomo-update-subscription \
           "Accepted core remains active; extra subscription cache commit is incomplete: $source_id"
+        record_failure cache-commit 1 "extra subscription cache commit failed: $source_id"
         exit 1
       }
   fi
@@ -939,7 +1121,10 @@ find "$backup_root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
 
 if [ "$(cat "$primary_state")" = fresh ]; then
   logger -t mihomo-update-subscription "Subscription updated successfully"
+  schedule_next "$MIHOMO_SUBSCRIPTION_INTERVAL_SECONDS"
 else
   logger -t mihomo-update-subscription \
     "Extra subscriptions updated successfully; current primary nodes retained"
+  schedule_next "$MIHOMO_SUBSCRIPTION_RETAINED_RETRY_SECONDS"
 fi
+clear_failure_state
