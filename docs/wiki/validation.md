@@ -21,7 +21,7 @@ python3 tools/check_publication_privacy.py
 | `check_subscription_candidate.py` / `check_subscription_update.py` | 候选生成与事务更新/回滚 |
 | `check_update_rules.py` | 规则更新事务与 reload 门禁 |
 | `check_stability.py` | 恢复动作不额外发起业务探测 |
-| `check_image.py` / `check_landscape_mihomo.py` | 恢复镜像与外部方向的离线检查 |
+| `check_image.py` | 恢复镜像、首次启动种子、脱敏与磁盘拒绝检查 |
 
 CI 在 [`.github/workflows/validate.yml`](../../.github/workflows/validate.yml) 里跑这些命令。
 

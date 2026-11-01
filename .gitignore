@@ -37,3 +37,6 @@ image-output/
 # only, never published.
 _live/
 _scratch/
+
+# Local MCP tool state (Serena); never published.
+.serena/
