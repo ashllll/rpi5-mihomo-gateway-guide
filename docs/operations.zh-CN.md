@@ -188,7 +188,7 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 
 | 锁 | 持有者 | 拿不到时 |
 |---|---|---|
-| `/run/lock/mihomo-maintenance.lock` | 无参 `mihomo-healthcheck`、订阅/规则更新、质量采样、`mosdns-update-binary`、`mosdns-update-rules`、`mosdns-rollout-rollback`、`mosdns-emergency-direct`、`mosdns-resume-auto` | 定时任务退出 0 或跳过；手工回滚/紧急直连/恢复退出 1 并说明原因 |
+| `/run/lock/mihomo-maintenance.lock` | 无参 `mihomo-healthcheck`、`mosdns-healthcheck`（restart 路径）、订阅/规则更新、质量采样、`mosdns-update-binary`、`mosdns-update-rules`、`mosdns-rollout-rollback`、`mosdns-emergency-direct`、`mosdns-resume-auto` | 定时任务退出 0 或跳过；手工回滚/紧急直连/恢复退出 1 并说明原因；mosdns 健康检查只延后 restart |
 | `/run/lock/mosdns-healthcheck.lock` | mosdns 健康检查 | 跳过本轮 |
 | `/run/lock/mihomo-download-quality.lock` | 下载采样 | 跳过本轮 |
 

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "4dbbe96207133d4424782a6cfc3ba77a7b1f8244c3ffcf0799ea402f3495795a",
+  "release_id": "32a276b5048cd8f5f2274eee5cef30c656064d9481ace28ca9b39ffed96688f9",
   "files": [
     {
       "source": "check-release.py",
@@ -259,7 +259,7 @@
     {
       "source": "sbin/mosdns-healthcheck",
       "target": "/usr/local/sbin/mosdns-healthcheck",
-      "sha256": "dc1c68eca970bfea8a8f5b40dda00db3a7e4437146a1714fa1e41170e247a4c2",
+      "sha256": "64081b88c39f7dbad0d2a422feaf6a07ac7791757191e24ec2f4121c52ad55a8",
       "mode": 493
     },
     {

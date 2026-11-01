@@ -1041,6 +1041,115 @@ def resume_auto_lock():
 
 
 # ---------------------------------------------------------------------------
+# F-10: the mosdns healthcheck restart is serialized with maintenance too.
+# ---------------------------------------------------------------------------
+
+HEALTHCHECK_SYSTEMCTL = '''#!/bin/sh
+echo "systemctl $*" >> "$CASE_LOG"
+case "$1" in
+  is-active) echo inactive; exit 3 ;;
+esac
+exit 0
+'''
+
+
+def healthcheck_copy(sandbox):
+    text = (SBIN / 'mosdns-healthcheck').read_text(encoding='utf-8')
+    text = text.replace('/run/mosdns-healthcheck', str(sandbox.root / 'state'))
+    text = text.replace('/run/lock', str(sandbox.root / 'run/lock'))
+    text = text.replace('/usr/local/sbin/mihomo-dns-mode', str(sandbox.bin / 'dns-mode'))
+    text = text.replace('/usr/local/sbin/mihomo-alert', str(sandbox.bin / 'alert'))
+    path = sandbox.work / 'mosdns-healthcheck'
+    write(path, text, 0o755)
+    return path
+
+
+def healthcheck_fixture(sandbox):
+    make_stub(sandbox.bin, 'systemctl', HEALTHCHECK_SYSTEMCTL)
+    make_stub(sandbox.bin, 'dig', '#!/bin/sh\nexit 0\n')
+    make_stub(sandbox.bin, 'curl', '#!/bin/sh\nexit 7\n')
+    make_stub(sandbox.bin, 'date', '''#!/usr/bin/env python3
+import sys
+print('1800000000' if '+%s' in sys.argv else '2026-11-01T00:00:00+00:00')
+''')
+    make_stub(sandbox.bin, 'sleep', '#!/bin/sh\nexit 0\n')
+    make_stub(sandbox.bin, 'dns-mode', '#!/bin/sh\necho "dns-mode $*" >> "$CASE_LOG"\nexit 0\n')
+    make_stub(sandbox.bin, 'alert', '#!/bin/sh\nexit 0\n')
+    make_stub(sandbox.bin, 'install', '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+clean, directory, index = [], False, 0
+while index < len(args):
+    item = args[index]
+    if item == '-d':
+        directory = True
+    elif item in ('-o', '-g', '-m'):
+        index += 1
+    else:
+        clean.append(item)
+    index += 1
+os.execv('/usr/bin/install', ['/usr/bin/install'] + (['-d'] if directory else []) + clean)
+''')
+
+
+def healthcheck_run(sandbox, script):
+    result = subprocess.run([SH, str(script)], env=sandbox.env(GATEWAY_ROOT=sandbox.root),
+                            capture_output=True, text=True, timeout=60)
+    log = sandbox.work / 'case.log'
+    calls = log.read_text(encoding='utf-8') if log.exists() else ''
+    return result, calls
+
+
+def healthcheck_restart_deferral():
+    with Sandbox('healthcheck-defer') as sandbox:
+        script = healthcheck_copy(sandbox)
+        healthcheck_fixture(sandbox)
+        lock = sandbox.root / 'run/lock/mihomo-maintenance.lock'
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result, calls = healthcheck_run(sandbox, script)
+        finally:
+            os.close(descriptor)
+        check('systemctl restart' not in calls,
+              'healthcheck restarted mosdns while maintenance was active: %r' % calls)
+        check('restart deferred' in (sandbox.work / 'case.log').read_text(encoding='utf-8'),
+              'healthcheck did not record the deferred restart')
+        # With the lock free the same probe must restart.
+        result, calls = healthcheck_run(sandbox, script)
+        check('systemctl restart mosdns.service' in calls,
+              'healthcheck never restarted a failed mosdns: %r' % calls)
+
+
+def healthcheck_mutation_killed():
+    text = (SBIN / 'mosdns-healthcheck').read_text(encoding='utf-8')
+    marker = 'if [ "$maintenance" = 1 ]; then'
+    check(marker in text, 'healthcheck maintenance guard not found')
+    mutated = text.replace(marker, 'if false; then', 1)
+    with Sandbox('healthcheck-mutation') as sandbox:
+        script = sandbox.work / 'mosdns-healthcheck'
+        rendered = mutated.replace('/run/mosdns-healthcheck', str(sandbox.root / 'state'))
+        rendered = rendered.replace('/run/lock', str(sandbox.root / 'run/lock'))
+        rendered = rendered.replace('/usr/local/sbin/mihomo-dns-mode', str(sandbox.bin / 'dns-mode'))
+        rendered = rendered.replace('/usr/local/sbin/mihomo-alert', str(sandbox.bin / 'alert'))
+        write(script, rendered, 0o755)
+        healthcheck_fixture(sandbox)
+        lock = sandbox.root / 'run/lock/mihomo-maintenance.lock'
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result, calls = healthcheck_run(sandbox, script)
+        finally:
+            os.close(descriptor)
+        try:
+            check('systemctl restart' not in calls,
+                  'mutated healthcheck restarted mosdns during maintenance')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: the maintenance guard is not exercised')
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -1075,6 +1184,8 @@ def main():
     case('F-04 emergency direct fails safe', emergency_direct_fail_safe)
     case('F-04 emergency mutation killed', emergency_mutation_killed)
     case('F-10 resume-auto refuses held lock', resume_auto_lock)
+    case('F-10 healthcheck defers restart', healthcheck_restart_deferral)
+    case('F-10 healthcheck mutation killed', healthcheck_mutation_killed)
     if FAILURES:
         print('change-chain: %d scenario(s) failed: %s' % (len(FAILURES), ', '.join(FAILURES)))
         return 1

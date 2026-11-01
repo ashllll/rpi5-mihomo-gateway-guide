@@ -60,9 +60,12 @@ class DNSResilienceCLI(unittest.TestCase):
         source, count = re.subn(r'(?m)^state_dir=.*$',
                                'state_dir=' + shlex.quote(str(self.directory)), source)
         self.assertEqual(count, 1)
-        source, count = re.subn(r'/run/lock/[A-Za-z0-9._-]+\.lock',
-                               str(self.directory / 'healthcheck.lock'), source)
-        self.assertEqual(count, 1)
+        for pattern, name in (
+            (r'/run/lock/mosdns-healthcheck\.lock', 'healthcheck.lock'),
+            (r'/run/lock/mihomo-maintenance\.lock', 'maintenance.lock'),
+        ):
+            source, count = re.subn(pattern, str(self.directory / name), source)
+            self.assertEqual(count, 1, 'fixture cannot rebase ' + pattern)
         for original, replacement in (
             ('/usr/local/sbin/mihomo-alert', str(self.commands / 'alert')),
             ('/usr/local/sbin/mihomo-dns-mode', str(self.commands / 'dns-mode')),
