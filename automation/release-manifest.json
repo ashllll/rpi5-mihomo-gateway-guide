@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "30c90a6beb61069d1b6933a1f47dca26b5bef8337555639957f38076b6068010",
+  "release_id": "d5084e09c256422f8ca32c8f3eec408d3dc62f2d885beda37bc366c823fbe169",
   "files": [
     {
       "source": "check-release.py",
@@ -52,7 +52,7 @@
     {
       "source": "etc/dnsmasq/README.md",
       "target": null,
-      "sha256": "f97cd360b1713db5c1e6b882b55cb917a9192b7befbc729c811a9d214fab7d42"
+      "sha256": "f6aa0575e8b66d4387604c29dfd1eca3ebb582218f79999a3546c98b584b5015"
     },
     {
       "source": "etc/dnsmasq/resolver.conf",

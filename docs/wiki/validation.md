@@ -9,8 +9,12 @@ python3 tools/validate_public.py
 python3 tools/check_publication_privacy.py
 ```
 
-`validate_public.py` 检查必需文件、无非白名单二进制、SVG 可解析、工作树文本不命中隐私模式；
-`check_publication_privacy.py` 回归隐私规则本身。其余合成检查按改动范围选用：
+`validate_public.py` 检查必需文件、无非白名单二进制、SVG 可解析、工作树文本不命中隐私模式
+（MAC / 主机名 / 序列号样式 / 本地绝对路径 / 通用 token / 订阅端点 / 节点标签 / 凭据型 URL / base64 载荷），
+文档里的私网地址必须落在仓库自己声明的网段内，并把发布门扩到整改基线之后的提交树与提交信息；
+历史作用域记录在 `scripts/privacy-history-baseline.txt`，第 3 阶段重写完成后删除该文件，门会自动扫描全部历史
+（重写前可用 `--history-all` 做一次全历史审计）。
+`check_publication_privacy.py` 回归隐私规则本身（25 类合成反例，值在运行时拼接）。其余合成检查按改动范围选用：
 
 | 命令 | 覆盖 |
 |---|---|

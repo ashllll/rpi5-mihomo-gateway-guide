@@ -8,7 +8,7 @@ recorded: 2026-10-26
 [ADR 索引](README.md) · [Wiki 首页](../README.md)
 
 生产部署已改成「树莓派只有一根网线接 UCG 交换机」：VLAN1 承载上游与管理（`wan0`），802.1Q VLAN20 的
-`proxy20` 服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端（DHCP/DNS 由 `dnsmasq-vlan-pilot` 提供），
+`proxy20` 服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端（DHCP/DNS 由 `dnsmasq-vlan-pilot` 提供），
 树莓派不再接独立 LAN 口，也不再自建 AP。于是 `lan0` / `192.168.1.0/24` 的 DHCP、DNS 作用域、masquerade
 和 input 整口放行全部失去服务对象；它们还把核心与管理端口钉在一个会消失的地址上——`bind-address`
 指向 `192.168.1.1` 时，混合端口与控制器不可达，健康门禁的出口抽样永远 `fail`，`business` 永久

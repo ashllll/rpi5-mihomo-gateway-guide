@@ -20,7 +20,7 @@
 
 | 你关心的事 | 这台机器的做法 |
 |---|---|
-| 四个网段 | 一根网线接 UCG 交换机：`wan0` 192.168.0.117/24（VLAN1，上游 + 管理入口）与 `proxy20` 192.168.20.1/24（同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点）→ Mihomo TUN 198.18.0.1/30 |
+| 四个网段 | 一根网线接 UCG 交换机：`wan0` 192.168.0.117/24（VLAN1，上游 + 管理入口）与 `proxy20` 192.168.20.1/24（同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点）→ Mihomo TUN 198.18.0.1/30 |
 | 三层 DNS | `dnsmasq` 两个作用域：VLAN20 `192.168.20.1:53` 直投 Mihomo DNS `127.0.0.1:1053`（fake-IP）；环回 `127.0.0.1:53`（网关自身）→ `mosdns` 127.0.0.1:5335（国内/海外分流）→ Mihomo DNS |
 | 自编译预算版核心 | `/usr/local/bin/mihomo` = `v1.19.28-budget-status-contract-v3`，`go1.27.2`，tags `no_tailscale, with_gvisor`；补丁与构建说明在 [`core/`](core/README.md) |
 | 预算外壳 | `mihomo-measurement-budget.service` 建 `/run/mihomo-measurements/budget.sock`；drop-in 用 `--run-core` 校验协议与状态后拉起核心，账本首次预扣时创建，协议 `mihomo-budget-v1` |
@@ -173,7 +173,7 @@ python3 tools/check_publication_privacy.py
 
 ## 主仓库与 CI
 
-主仓库是飞牛 NAS 上的 Gitea（`http://192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide`），GitHub 仓库由 Gitea 的推送镜像同步。
+主仓库是飞牛 NAS 上的 Gitea（`http://192.168.20.193:3000/<user-1>/rpi5-mihomo-gateway-guide`），GitHub 仓库由 Gitea 的推送镜像同步。
 
 - 推送进 Gitea 后，`.gitea/workflows/gates.yml` 在 NAS 的 act_runner 上跑全量 `scripts/preflight.sh`；CI 绿了才算这次提交通过。
 - 本机 `pre-push` 只跑 `scripts/preflight.sh --staged`（秒级）与影响面确认，不再跑 35 分钟全量；需要本机全量时用 `PUSH_FULL_GATE=1 git push`。

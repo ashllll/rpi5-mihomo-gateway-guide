@@ -24,14 +24,14 @@
        │ wg-ucg-pilot            │ proxy20
        │ 10.253.254.1/30         │ 192.168.20.1/24
        ▼                         ▼
-   UCG 点对点（WireGuard）       RP5-PC-TEST Wi-Fi 客户端
+   UCG 点对点（WireGuard）       <SSID-1> Wi-Fi 客户端
                                      （UCG 广播，802.1Q id 20）
 ```
 
 | 接口 | 地址 | 归属 | 说明 |
 |---|---|---|---|
 | `wan0` | `192.168.0.117/24`（DHCP，VLAN1） | NetworkManager | 上游出口；管理入口只在这里与 `wlan0` |
-| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `RP5-PC-TEST` Wi-Fi 客户端；DHCP/DNS 由 `dnsmasq-vlan-pilot.service` 提供，租约 12 小时，静态租约 `.10` |
+| `proxy20` | `192.168.20.1/24` | NetworkManager（VLAN） | `wan0` 同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端；DHCP/DNS 由 `dnsmasq-vlan-pilot.service` 提供，租约 12 小时，静态租约 `.10` |
 | `wg-ucg-pilot` | `10.253.254.1/30` | `wg-quick@wg-ucg-pilot` | UCG 点对点；UDP 51891 在 `wan0` 上放行 |
 | `Mihomo` | `198.18.0.1/30` | Mihomo TUN | 网关侧 TUN 地址；客户端看到的是 fake-IP `198.18.0.1/16` |
 
@@ -70,7 +70,7 @@ TCP 走 `redirect` 到 `:46225`（auto-redirect 的动态监听端口），UDP �
   只放行来自 `192.168.0.0/24` 的 `tcp/22`、`tcp/8799`、DHCP（68/546）与上游
   WireGuard 握手 `udp/51891`。`proxy20` 与 `wg-ucg-pilot` 的服务规则全在 include 里：
   VLAN20 的 DHCP、DNS、`ct status dnat` 与 `tcp/22` 由 `vlan-pilot.nft` 放行
-  （笔记本漫游到 `RP5-PC-TEST` SSID 时仍能 SSH 回来），WireGuard 的 dnat 与
+  （笔记本漫游到 `<SSID-1>` SSID 时仍能 SSH 回来），WireGuard 的 dnat 与
   masquerade 由 `ucg-pc-link.nft` 放行。
 - `forward` policy **drop**：基础表只放行 established/related；VLAN20 的
   `proxy20↔Mihomo`、`proxy20→wan0`（限去 `192.168.0.0/24`）与

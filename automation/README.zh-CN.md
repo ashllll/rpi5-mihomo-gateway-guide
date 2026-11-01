@@ -277,7 +277,7 @@ python3 tools/check_dns_resilience.py      # DNS 故障边界与恢复
 python3 tools/check_alert_delivery.py      # 通知重试与冷却
 python3 tools/check_rollback_recovery.py   # 回滚与恢复
 python3 tools/check_mihomo_policy.py       # Mihomo 分组与路由契约
-python3 tools/validate_public.py    # 发布结构、隐私模式（含订阅节点标签分隔符）、图表可解析
+python3 tools/validate_public.py    # 发布结构、设备标识/凭据语义检测、基线后的提交历史、图表可解析
 python3 tools/check_image.py        # 恢复镜像的自检与拒绝写入磁盘
 python3 tools/check_overlay.py      # 用合成配置驱动 policy-overlay：池顺序、备份池、幂等性、空 manifest 时 fail-closed
 python3 tools/check_subscription_candidate.py  # 真实候选生成入口：来源合并、引用重命名、缓存、未变化与失败保护

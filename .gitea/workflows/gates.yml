@@ -15,7 +15,7 @@ jobs:
         run: |
           set -eu
           git init -q .
-          git remote add origin "http://llll:${GITEA_TOKEN}@192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide.git"
+          git remote add origin "http://${{ github.repository_owner }}:${GITEA_TOKEN}@192.168.20.193:3000/${{ github.repository }}.git"
           git fetch -q --depth 1 origin "$GITHUB_SHA"
           git checkout -q FETCH_HEAD
       - name: Full preflight (scripts/preflight.sh)

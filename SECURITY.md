@@ -36,7 +36,7 @@ the nft table named `rp_filter` is a separate object with the same name.
 
 The gateway has no separate downstream LAN interface: one cable into the UCG switch
 carries VLAN1 (upstream and management) and VLAN20 (`proxy20`, the UCG-broadcast
-`RP5-PC-TEST` Wi-Fi clients). Transparent proxying relies on `ip rule 9000` and the
+`<SSID-1>` Wi-Fi clients). Transparent proxying relies on `ip rule 9000` and the
 core's `redirect`, not on accepting a whole interface, and management calls are pinned
 to loopback. Mihomo listens on `bind-address: "*"` and restricts the mixed port with
 `lan-allowed-ips`; neither replaces network isolation for untrusted clients.
@@ -65,7 +65,14 @@ Do not commit:
 - real MAC addresses, UUIDs or public IPv6 addresses
 
 Private IPv4 addresses in the documentation describe this deployment's network
-structure and are not authentication credentials.
+structure and are not authentication credentials; they must still fall inside a
+network the repository documents.
+
+These rules are executable: `tools/validate_public.py` blocks the publication on
+device identifiers, credentials, subscription endpoints, node labels and
+credential-bearing URLs in the tree, and on post-baseline history. The private
+history before that baseline is removed by the phase-3 rewrite.
+
 
 If you find an accidentally published credential, do not open a public issue containing
 it. Revoke it first, then contact the repository owner through a private channel.
