@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "d5084e09c256422f8ca32c8f3eec408d3dc62f2d885beda37bc366c823fbe169",
+  "release_id": "c7140f81ee22ed9a5bb234b98538856b24a7454b2e6b1294611bbc85139d9156",
   "files": [
     {
       "source": "check-release.py",
@@ -157,7 +157,7 @@
     {
       "source": "sbin/mihomo-dns-mode",
       "target": "/usr/local/sbin/mihomo-dns-mode",
-      "sha256": "33630218f2c8b4459fcacb6e7678975de4b2987c1ba53e945effb1ddd87dc337",
+      "sha256": "8c7bd2675ad97de8635b6ff4dda44d694d2aee8ea9cbf12d34b95f314fff3990",
       "mode": 493
     },
     {

@@ -62,15 +62,38 @@ reload_dnsmasq() {
   kill -HUP "$dnsmasq_pid"
 }
 
+sync_path() {
+  python3 -c 'import os, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)' "$1"
+}
+
+# Replace the live upstream file by fsync + rename in its own directory.  A
+# failed write must leave the previous file intact: dnsmasq keeps resolving a
+# file that was never truncated, and the next run can retry from a known state.
 write_active() {
   source=$1
-  if [ -e "$active" ]; then
-    cat "$source" >"$active"
-    chown root:root "$active"
-    chmod 644 "$active"
-  else
-    install -o root -g root -m 644 "$source" "$active"
+  temporary="${active}.tmp.$$"
+  if ! install -o root -g root -m 644 "$source" "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
   fi
+  if ! chown root:root "$temporary" || ! chmod 644 "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! sync_path "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$active"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  sync_path "$(dirname "$active")"
 }
 
 case "$requested_mode" in
@@ -132,7 +155,7 @@ candidate=$(mktemp /run/dnsmasq-upstreams.XXXXXX)
 previous=$(mktemp /run/dnsmasq-upstreams.previous.XXXXXX)
 had_previous=false
 cleanup() {
-  rm -f "$candidate" "$previous"
+  rm -f "$candidate" "$previous" "${active}.tmp.$$"
 }
 trap cleanup EXIT HUP INT TERM
 
