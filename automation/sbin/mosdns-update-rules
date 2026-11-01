@@ -135,6 +135,16 @@ current_target() {
   fi
 }
 
+# Hash the five rule files by content only.  sha256sum prints the path next to
+# each digest, so hashing its whole output would compare directory names and
+# never match even when the downloaded rules are identical.
+content_hash() {
+  directory=$1
+  for file in direct-list.txt proxy-list.txt apple-cn.txt google-cn.txt geoip-cn.txt; do
+    sha256sum "$directory/$file"
+  done | awk '{ print $1 }' | sha256sum | cut -d' ' -f1
+}
+
 switch_current() {
   target=$1
   new_link=$rules_root/.current.new.$$
@@ -297,18 +307,8 @@ if [ -f "$current_link/direct-list.txt" ] &&
    [ -f "$current_link/apple-cn.txt" ] &&
    [ -f "$current_link/google-cn.txt" ] &&
    [ -f "$current_link/geoip-cn.txt" ]; then
-  old_hash=$(sha256sum \
-    "$current_link/direct-list.txt" \
-    "$current_link/proxy-list.txt" \
-    "$current_link/apple-cn.txt" \
-    "$current_link/google-cn.txt" \
-    "$current_link/geoip-cn.txt" | sha256sum | cut -d' ' -f1)
-  new_hash=$(sha256sum \
-    "$work_dir/direct-list.txt" \
-    "$work_dir/proxy-list.txt" \
-    "$work_dir/apple-cn.txt" \
-    "$work_dir/google-cn.txt" \
-    "$work_dir/geoip-cn.txt" | sha256sum | cut -d' ' -f1)
+  old_hash=$(content_hash "$current_link")
+  new_hash=$(content_hash "$work_dir")
   if [ "$old_hash" = "$new_hash" ] &&
      [ "${MOSDNS_UPDATE_DRY_RUN:-0}" != 1 ]; then
     exit 0

@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "32a276b5048cd8f5f2274eee5cef30c656064d9481ace28ca9b39ffed96688f9",
+  "release_id": "87cd4c4fdc8ed5d4ed3ae1ad4ffd897207e056994d97f0594b2f15dd1d0e05a1",
   "files": [
     {
       "source": "check-release.py",
@@ -283,7 +283,7 @@
     {
       "source": "sbin/mosdns-update-rules",
       "target": "/usr/local/sbin/mosdns-update-rules",
-      "sha256": "d8081c913a56b1388a47e74ff3bd4065fa1185052457713c05b8917614907434",
+      "sha256": "4ae72456b731cffb25d65cf13fc99632411b5cd462d5db004883c432c5991c35",
       "mode": 493
     },
     {

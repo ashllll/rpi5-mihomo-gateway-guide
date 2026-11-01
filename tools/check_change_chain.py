@@ -785,6 +785,11 @@ def rules_current(sandbox):
     return os.readlink(link)
 
 
+def rules_restarts(sandbox):
+    path = sandbox.root / 'state/restart_count'
+    return int(path.read_text().strip()) if path.exists() else 0
+
+
 def rules_scenario():
     with Sandbox('mosdns-rules') as sandbox:
         script, launch = rules_copy(sandbox)
@@ -813,6 +818,12 @@ def rules_scenario():
         check(rules_current(sandbox) == 'releases/' + RULES_VERSION,
               'healthy rules update did not switch the current release')
         check(not pending.exists(), 'committed rules update left the pending record behind')
+        # Identical content must not restart mosdns again.
+        restarts = rules_restarts(sandbox)
+        result = rules_run(sandbox, script, launch)
+        check(result.returncode == 0, 'no-op rules run failed: ' + result.stdout + result.stderr)
+        check(rules_restarts(sandbox) == restarts,
+              'identical rule content still restarted mosdns')
 
 
 def rules_mutation_killed():
@@ -1149,6 +1160,34 @@ def healthcheck_mutation_killed():
         raise CaseFailure('mutation survived: the maintenance guard is not exercised')
 
 
+def rules_noop_mutation_killed():
+    text = (SBIN / 'mosdns-update-rules').read_text(encoding='utf-8')
+    marker = "done | awk '{ print $1 }' | sha256sum"
+    check(marker in text, 'rules content-hash mutation point not found')
+    mutated = text.replace(marker, 'done | sha256sum', 1)
+    with Sandbox('rules-noop-mutation') as sandbox:
+        script = sandbox.work / 'update-rules'
+        write(script, rules_rewrite(mutated, sandbox), 0o755)
+        launch = sandbox.work / 'launch.py'
+        write(launch, '''#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.environ['TOP_PID'] = str(os.getpid())
+os.execvp(sys.argv[1], sys.argv[1:])
+''', 0o755)
+        rules_fixture(sandbox)
+        result = rules_run(sandbox, script, launch)
+        check(result.returncode == 0, 'mutated first rules run failed: ' + result.stdout + result.stderr)
+        before = rules_restarts(sandbox)
+        result = rules_run(sandbox, script, launch)
+        try:
+            check(rules_restarts(sandbox) == before,
+                  'mutated rules run restarted mosdns for identical content')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: the content-only hash is not exercised')
+
+
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
@@ -1176,6 +1215,7 @@ def main():
     case('F-06 binary mutation killed', binary_mutation_killed)
     case('F-06 rules pending recovery', rules_scenario)
     case('F-06 rules mutation killed', rules_mutation_killed)
+    case('F-06 rules no-op mutation killed', rules_noop_mutation_killed)
     case('F-04 direct failure aborts', rollout_direct_abort)
     case('F-04 direct failure mutation killed', rollout_mutation_killed)
     case('F-10 rollback refuses pending', rollout_pending_refused)
