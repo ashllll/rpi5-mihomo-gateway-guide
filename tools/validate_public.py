@@ -14,11 +14,10 @@ Privacy is checked in four layers:
                ``PUBLIC_PATTERNS``, plus base64 payloads;
 * docs      -- the public documentation surface against ``DOC_PATTERNS`` and a
                documented-network check for private IPv4 addresses;
-* history   -- commit trees and messages after the audit baseline.  Older
-               commits predate the remediation and still contain real
-               identifiers; they are rewritten in phase 3.  When the baseline
-               commit is not reachable (fresh lab, shallow checkout) the gate
-               fails closed and scans every commit reachable from HEAD.
+* history   -- commit trees and messages for every commit reachable from
+               HEAD.  The published history was rewritten on 2026-11-02, so
+               every commit is clean; there is deliberately no baseline that
+               could keep older commits out of the gate.
 
 Run from the repository root:  python3 tools/validate_public.py
 """
@@ -41,7 +40,6 @@ from publication_privacy import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-HISTORY_BASELINE = ROOT / "scripts/privacy-history-baseline.txt"
 DOC_ROOT_FILES = ("README.md", "SECURITY.md", "GLOSSARY.md")
 DOC_PREFIX = "docs/"
 
@@ -145,24 +143,6 @@ def git_text(*args):
     return completed.returncode, completed.stdout.decode("utf-8", "ignore")
 
 
-def history_baseline():
-    if not HISTORY_BASELINE.is_file():
-        return None
-    for line in HISTORY_BASELINE.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            return line
-    return None
-
-
-def history_scope(scan_all):
-    base = None if scan_all else history_baseline()
-    if not base:
-        return None
-    code, _ = git_text("cat-file", "-e", base + "^{commit}")
-    return base if code == 0 else None
-
-
 def batch_objects(items):
     """Yield (sha, path, bytes-or-None) for blob objects, one git process."""
     if not items:
@@ -188,20 +168,15 @@ def batch_objects(items):
         yield (sha, path, content if header[1] == "blob" else None)
 
 
-def history_findings(scan_all):
+def history_findings():
     findings = []
-    base = history_scope(scan_all)
-    revision_range = "{}..HEAD".format(base) if base else "HEAD"
+    revision_range = "HEAD"
     code, count_text = git_text("rev-list", "--count", revision_range)
     if code != 0:
-        return ["history unavailable: git rev-list failed"], (base, 0, 0)
+        return ["history unavailable: git rev-list failed"], 0
     scanned = int(count_text.strip() or 0)
-    exempt = 0
-    if base:
-        code, exempt_text = git_text("rev-list", "--count", base)
-        exempt = int(exempt_text.strip() or 0) if code == 0 else 0
     if scanned == 0:
-        return findings, (base, scanned, exempt)
+        return findings, scanned
 
     code, log = git_text("log", "--format=%H%x1f%B%x1e", revision_range)
     if code == 0:
@@ -243,17 +218,12 @@ def history_findings(scan_all):
                 labels.append("undocumented private address")
         for label in labels:
             findings.append("commit tree {}:{}: {}".format(sha[:12], path or "(object)", label))
-    return findings, (base, scanned, exempt)
+    return findings, scanned
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--history-all",
-        action="store_true",
-        help="scan all reachable history (phase-3 audit; default: since the audit baseline)",
-    )
-    args = parser.parse_args(argv)
+    parser.parse_args(argv)
     failures = []
 
     for name in REQUIRED:
@@ -314,20 +284,13 @@ def main(argv=None):
         for label in labels:
             failures.append("{}: {} (value redacted)".format(name, label))
 
-    history, (base, scanned, exempt) = history_findings(args.history_all)
+    history, scanned = history_findings()
     for finding in history:
         failures.append("history {} (value redacted)".format(finding))
 
-    if base:
-        print(
-            "history: {} commit(s) scanned since {}; {} earlier commit(s) stay "
-            "out of scope until the phase-3 rewrite".format(scanned, base[:12], exempt)
-        )
-    else:
-        print(
-            "history: {} commit(s) scanned; no reachable audit baseline, full "
-            "reachable history is in scope".format(scanned)
-        )
+    print(
+        "history: {} commit(s) scanned; full reachable history is in scope".format(scanned)
+    )
 
     if failures:
         for failure in failures:
