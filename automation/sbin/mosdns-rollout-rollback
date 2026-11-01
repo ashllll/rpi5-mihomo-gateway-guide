@@ -11,38 +11,94 @@ case "$backup" in
     ;;
 esac
 
+# GATEWAY_ROOT is the same staging knob install.sh uses: on the gateway it is
+# unset, and a sandboxed run keeps the lock, the pending checks and every
+# deletion inside its own tree.  The current directory is the tree root, so
+# the destructive paths below stay relative.
+root=${GATEWAY_ROOT:-}
+root=${root%/}
+case "$root" in
+  ''|/*) ;;
+  *) echo "mosdns-rollout-rollback: invalid GATEWAY_ROOT" >&2; exit 2 ;;
+esac
+if [ "$root" = "/" ]; then
+  root=
+fi
+cd "${root:-/}"
+lock_file=$root/run/lock/mihomo-maintenance.lock
+install_pending=var/lib/mihomo-automation/.install-pending
+binary_pending=etc/mosdns/backups/transaction.pending
+rules_pending=etc/mosdns/rules/pending
+
+mkdir -p -- "$(dirname "$lock_file")"
+exec 8>"$lock_file"
+if ! flock -n 8; then
+  echo "mosdns-rollout-rollback: maintenance is busy; refusing to stop mosdns" >&2
+  exit 1
+fi
+
+# Another tool's transaction may be mid-write (or crashed mid-write).  Its
+# recovery owns these files; deleting them here would strand the DNS service
+# between two half-applied states.
+for pending in "$install_pending" "$binary_pending" "$rules_pending"; do
+  if [ -e "$pending" ]; then
+    echo "mosdns-rollout-rollback: pending transaction ($pending); refusing to continue" >&2
+    exit 1
+  fi
+done
+
 [ -f "$backup" ]
 gzip -t "$backup"
 
-/usr/local/sbin/mihomo-dns-mode direct || true
+# The direct switch is the safety line: until it succeeds, mosdns must keep
+# running.  A failure here leaves DNS pointed at a live mosdns.
+if ! /usr/local/sbin/mihomo-dns-mode direct; then
+  echo "mosdns-rollout-rollback: could not switch DNS to direct; mosdns left running" >&2
+  exit 1
+fi
+
+direct_active=true
+rollback_complete=false
+restore_dns_on_exit() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$direct_active" = true ] && [ "$rollback_complete" != true ]; then
+    /usr/local/sbin/mihomo-dns-mode auto ||
+      echo "mosdns-rollout-rollback: DNS may stay in direct mode" >&2
+  fi
+  exit "$status"
+}
+trap restore_dns_on_exit EXIT HUP INT TERM
+
 systemctl disable --now \
   mosdns-healthcheck.timer \
   mosdns-rules-update.timer \
   mosdns-binary-update.timer \
   mosdns.service || true
 
-tar -xzf "$backup" -C /
+tar -xzf "$backup" -C .
 
 rm -f \
-  /etc/systemd/system/mosdns-healthcheck.service \
-  /etc/systemd/system/mosdns-healthcheck.timer \
-  /etc/systemd/system/mosdns-rules-update.service \
-  /etc/systemd/system/mosdns-rules-update.timer \
-  /etc/systemd/system/mosdns-binary-update.service \
-  /etc/systemd/system/mosdns-binary-update.timer \
-  /etc/systemd/system/dnsmasq.service.d/boot-safe.conf \
-  /etc/mihomo/dnsmasq-upstreams.mosdns \
-  /usr/local/sbin/mosdns-healthcheck \
-  /usr/local/sbin/mosdns-update-rules \
-  /usr/local/sbin/mosdns-update-binary \
-  /usr/local/sbin/dnsmasq-safe-start \
-  /usr/local/sbin/mosdns-emergency-direct \
-  /usr/local/sbin/mosdns-resume-auto
+  "etc/systemd/system/mosdns-healthcheck.service" \
+  "etc/systemd/system/mosdns-healthcheck.timer" \
+  "etc/systemd/system/mosdns-rules-update.service" \
+  "etc/systemd/system/mosdns-rules-update.timer" \
+  "etc/systemd/system/mosdns-binary-update.service" \
+  "etc/systemd/system/mosdns-binary-update.timer" \
+  "etc/systemd/system/dnsmasq.service.d/boot-safe.conf" \
+  "etc/mihomo/dnsmasq-upstreams.mosdns" \
+  "usr/local/sbin/mosdns-healthcheck" \
+  "usr/local/sbin/mosdns-update-rules" \
+  "usr/local/sbin/mosdns-update-binary" \
+  "usr/local/sbin/dnsmasq-safe-start" \
+  "usr/local/sbin/mosdns-emergency-direct" \
+  "usr/local/sbin/mosdns-resume-auto"
 
-rm -rf -- /etc/mosdns/rules
+rm -rf -- etc/mosdns/rules
 
 systemctl daemon-reload
 systemctl enable --now mosdns.service
 /usr/local/sbin/mihomo-dns-mode mihomo
+rollback_complete=true
 
 echo "Original mosdns and Mihomo DNS configuration restored from $backup"

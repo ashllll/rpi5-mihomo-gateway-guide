@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "1e33604a85c9f4de24a66d536b744bb3250ac3ca10c1bb0de425da9898c195b1",
+  "release_id": "041823360d89266296e4e3fdbe4c6868edd24c6a9a18f68e5fd614142d8a9c57",
   "files": [
     {
       "source": "check-release.py",
@@ -253,7 +253,7 @@
     {
       "source": "sbin/mosdns-emergency-direct",
       "target": "/usr/local/sbin/mosdns-emergency-direct",
-      "sha256": "48aa53af2b893db9c7a397da3e2f5bb304a10dfbdb9b9f907ab0e6de40bf6149",
+      "sha256": "0cf99d32a3c53b354f93d16231e64f289c4679a74ab57a47d4afd815c6f0bc63",
       "mode": 493
     },
     {
@@ -265,13 +265,13 @@
     {
       "source": "sbin/mosdns-resume-auto",
       "target": "/usr/local/sbin/mosdns-resume-auto",
-      "sha256": "ddd7c315496bf6d2659927a721475412afec5e61ec47e0698bc7eb62838289f4",
+      "sha256": "79049b9029791a6579165ff4f7c1f83a0dbff392219ff8223e175e5c63c6da17",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-rollout-rollback",
       "target": "/usr/local/sbin/mosdns-rollout-rollback",
-      "sha256": "9cf0dc860bae625195b7404364ab2ef4b0c5f6d6bb8bb42c30a47695ca00f1e5",
+      "sha256": "bbc0825427a3b310df94f86632b6c2f89b5d82d54ea26d96b8f846d4dae50849",
       "mode": 493
     },
     {

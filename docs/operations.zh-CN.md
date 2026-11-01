@@ -134,7 +134,7 @@ cat /run/mihomo-healthcheck/status
 | 规则 | `mosdns-update-rules`（或 timer 04:20） | `/etc/mosdns/rules/releases/` 保留旧版本，重指 `current` |
 | 手工紧急直连 | `mosdns-emergency-direct` | `mosdns-resume-auto` |
 
-`mosdns-rollout-rollback` 先切 DNS 到 direct 再恢复备份，避免回滚过程中 DNS 悬空。
+`mosdns-rollout-rollback` 先切 DNS 到 direct，切换失败立即退出并保持 mosdns 运行；拿到维护锁后发现安装、二进制或规则更新留有 pending 记录时拒绝执行，避免删掉别人恢复所需的文件。二进制/规则更新在 `/etc/mosdns` 下留有 pending 记录（旧/新/阶段），开机或下一轮先按记录恢复，健康检查通过才提交；交换内核前 `mihomo-core-swap` 会先把「准备换/旧核/新核」fsync 落盘。
 
 ### 4.3 订阅与策略
 
@@ -188,7 +188,7 @@ sudo /usr/local/bin/mihomo -t -f /tmp/config.overlay.yaml
 
 | 锁 | 持有者 | 拿不到时 |
 |---|---|---|
-| `/run/lock/mihomo-maintenance.lock` | 无参 `mihomo-healthcheck`、订阅/规则更新、质量采样 | 探针直接退出 0；更新脚本退出 0 或跳过 |
+| `/run/lock/mihomo-maintenance.lock` | 无参 `mihomo-healthcheck`、订阅/规则更新、质量采样、`mosdns-update-binary`、`mosdns-update-rules`、`mosdns-rollout-rollback`、`mosdns-emergency-direct`、`mosdns-resume-auto` | 定时任务退出 0 或跳过；手工回滚/紧急直连/恢复退出 1 并说明原因 |
 | `/run/lock/mosdns-healthcheck.lock` | mosdns 健康检查 | 跳过本轮 |
 | `/run/lock/mihomo-download-quality.lock` | 下载采样 | 跳过本轮 |
 

@@ -843,6 +843,204 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
 
 # ---------------------------------------------------------------------------
+# F-04/F-10: rollout rollback and the other mosdns stop paths.
+# ---------------------------------------------------------------------------
+
+ROLLOUT_LOG = 'case.log'
+
+
+def rollout_fixture(sandbox, dns_rc, tar_rc):
+    import gzip
+    root = sandbox.root
+    backups = root / 'var/backups'
+    backups.mkdir(parents=True, exist_ok=True)
+    (backups / 'mosdns-rollout-test.tar.gz').write_bytes(gzip.compress(b'dummy\n'))
+    for name in ('dnsmasq-safe-start', 'mosdns-healthcheck'):
+        write(root / 'usr/local/sbin' / name, '#!/bin/sh\nexit 0\n', 0o755)
+    make_stub(sandbox.bin, 'dns-mode', '''#!/bin/sh
+echo "dns-mode $*" >> "$CASE_LOG"
+exit %s
+''' % dns_rc)
+    make_stub(sandbox.bin, 'systemctl', '''#!/bin/sh
+echo "systemctl $*" >> "$CASE_LOG"
+exit 0
+''')
+    make_stub(sandbox.bin, 'tar', '''#!/bin/sh
+echo "tar $*" >> "$CASE_LOG"
+exit %s
+''' % tar_rc)
+
+
+def rollout_copy(sandbox, text=None):
+    if text is None:
+        text = (SBIN / 'mosdns-rollout-rollback').read_text(encoding='utf-8')
+    text = text.replace('/var/backups/mosdns-rollout-',
+                        str(sandbox.root / 'var/backups') + '/mosdns-rollout-')
+    text = text.replace('/usr/local/sbin/mihomo-dns-mode', str(sandbox.bin / 'dns-mode'))
+    path = sandbox.work / 'rollback'
+    write(path, text, 0o755)
+    return path
+
+
+def rollout_run(sandbox, script):
+    backup = sandbox.root / 'var/backups/mosdns-rollout-test.tar.gz'
+    env = sandbox.env(GATEWAY_ROOT=sandbox.root)
+    result = subprocess.run([SH, str(script), str(backup)], env=env,
+                            capture_output=True, text=True, timeout=60)
+    log = sandbox.work / ROLLOUT_LOG
+    calls = log.read_text(encoding='utf-8') if log.exists() else ''
+    return result, calls
+
+
+def rollout_witness(sandbox):
+    return (sandbox.root / 'usr/local/sbin/dnsmasq-safe-start').exists()
+
+
+def rollout_direct_abort():
+    with Sandbox('rollout-direct') as sandbox:
+        script = rollout_copy(sandbox)
+        rollout_fixture(sandbox, dns_rc=1, tar_rc=1)
+        result, calls = rollout_run(sandbox, script)
+        check(result.returncode != 0, 'rollback reported success although direct failed')
+        check('dns-mode direct' in calls, 'direct mode was never attempted: %r' % calls)
+        check('systemctl disable' not in calls,
+              'mosdns was disabled after the direct switch failed: %r' % calls)
+        check(rollout_witness(sandbox), 'rollback deleted files before the direct switch')
+
+
+def rollout_mutation_killed():
+    text = (SBIN / 'mosdns-rollout-rollback').read_text(encoding='utf-8')
+    marker = 'if ! /usr/local/sbin/mihomo-dns-mode direct; then'
+    check(marker in text, 'rollout direct guard not found')
+    mutated = text.replace(marker, 'if /usr/local/sbin/mihomo-dns-mode direct; then')
+    with Sandbox('rollout-mutation') as sandbox:
+        script = rollout_copy(sandbox, mutated)
+        rollout_fixture(sandbox, dns_rc=1, tar_rc=1)
+        result, calls = rollout_run(sandbox, script)
+        try:
+            check('systemctl disable' not in calls,
+                  'mutated rollback disabled mosdns after direct failed: %r' % calls)
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: the direct-failure guard is not exercised')
+
+
+def rollout_pending_refused():
+    with Sandbox('rollout-pending') as sandbox:
+        script = rollout_copy(sandbox)
+        rollout_fixture(sandbox, dns_rc=0, tar_rc=0)
+        pending = sandbox.root / 'var/lib/mihomo-automation/.install-pending'
+        write(pending, '{}')
+        result, calls = rollout_run(sandbox, script)
+        check(result.returncode != 0, 'rollback did not refuse a pending install transaction')
+        check('systemctl' not in calls, 'rollback touched systemd despite the pending transaction: %r' % calls)
+        check(rollout_witness(sandbox), 'rollback deleted files despite the pending transaction')
+
+
+def rollout_pending_mutation_killed():
+    text = (SBIN / 'mosdns-rollout-rollback').read_text(encoding='utf-8')
+    marker = 'if [ -e "$pending" ]; then'
+    check(marker in text, 'rollout pending guard not found')
+    mutated = text.replace(marker, 'if false; then', 1)
+    with Sandbox('rollout-pending-mutation') as sandbox:
+        script = rollout_copy(sandbox, mutated)
+        rollout_fixture(sandbox, dns_rc=0, tar_rc=0)
+        write(sandbox.root / 'var/lib/mihomo-automation/.install-pending', '{}')
+        result, calls = rollout_run(sandbox, script)
+        try:
+            check(rollout_witness(sandbox),
+                  'mutated rollback deleted the pending-install file')
+            check('systemctl disable' not in calls,
+                  'mutated rollback stopped mosdns despite the pending transaction')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: the pending-record guard is not exercised')
+
+
+def rollout_lock_held():
+    with Sandbox('rollout-lock') as sandbox:
+        script = rollout_copy(sandbox)
+        rollout_fixture(sandbox, dns_rc=0, tar_rc=0)
+        lock = sandbox.root / 'run/lock/mihomo-maintenance.lock'
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result, calls = rollout_run(sandbox, script)
+        finally:
+            os.close(descriptor)
+        check(result.returncode != 0, 'rollback did not refuse a held maintenance lock')
+        check('systemctl' not in calls, 'rollback touched systemd while the lock was held: %r' % calls)
+
+
+def emergency_copy(sandbox):
+    text = (SBIN / 'mosdns-emergency-direct').read_text(encoding='utf-8')
+    text = text.replace('/run/lock', str(sandbox.root / 'run/lock'))
+    text = text.replace('/usr/local/sbin/mihomo-dns-mode', str(sandbox.bin / 'dns-mode'))
+    path = sandbox.work / 'emergency-direct'
+    write(path, text, 0o755)
+    return path
+
+
+def emergency_direct_fail_safe():
+    with Sandbox('emergency-direct') as sandbox:
+        script = emergency_copy(sandbox)
+        rollout_fixture(sandbox, dns_rc=1, tar_rc=0)
+        env = sandbox.env(GATEWAY_ROOT=sandbox.root)
+        result = subprocess.run([SH, str(script)], env=env,
+                                capture_output=True, text=True, timeout=60)
+        log = sandbox.work / ROLLOUT_LOG
+        calls = log.read_text(encoding='utf-8') if log.exists() else ''
+        check(result.returncode != 0, 'emergency-direct reported success although direct failed')
+        check('dns-mode direct' in calls, 'emergency-direct never switched to direct')
+        check('systemctl disable' not in calls,
+              'emergency-direct stopped mosdns before direct was active: %r' % calls)
+
+
+def emergency_mutation_killed():
+    text = (SBIN / 'mosdns-emergency-direct').read_text(encoding='utf-8')
+    marker = '/usr/local/sbin/mihomo-dns-mode direct\n'
+    check(marker in text, 'emergency-direct switch line not found')
+    mutated = text.replace(marker, ':\n', 1)
+    with Sandbox('emergency-mutation') as sandbox:
+        script = sandbox.work / 'emergency-direct'
+        rendered = mutated.replace('/run/lock', str(sandbox.root / 'run/lock'))
+        write(script, rendered, 0o755)
+        rollout_fixture(sandbox, dns_rc=1, tar_rc=0)
+        env = sandbox.env(GATEWAY_ROOT=sandbox.root)
+        subprocess.run([SH, str(script)], env=env, capture_output=True, text=True, timeout=60)
+        log = sandbox.work / ROLLOUT_LOG
+        calls = log.read_text(encoding='utf-8') if log.exists() else ''
+        try:
+            check('systemctl disable' not in calls,
+                  'mutated emergency-direct stopped mosdns without switching DNS')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: the switch-before-stop order is not exercised')
+
+
+def resume_auto_lock():
+    with Sandbox('resume-auto') as sandbox:
+        text = (SBIN / 'mosdns-resume-auto').read_text(encoding='utf-8')
+        text = text.replace('/run/lock', str(sandbox.root / 'run/lock'))
+        text = text.replace('/usr/local/sbin/mihomo-dns-mode', str(sandbox.bin / 'dns-mode'))
+        script = sandbox.work / 'resume-auto'
+        write(script, text, 0o755)
+        rollout_fixture(sandbox, dns_rc=0, tar_rc=0)
+        lock = sandbox.root / 'run/lock/mihomo-maintenance.lock'
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = subprocess.run([SH, str(script)], env=sandbox.env(GATEWAY_ROOT=sandbox.root),
+                                    capture_output=True, text=True, timeout=60)
+        finally:
+            os.close(descriptor)
+        log = sandbox.work / ROLLOUT_LOG
+        calls = log.read_text(encoding='utf-8') if log.exists() else ''
+        check(result.returncode != 0, 'resume-auto did not refuse a held maintenance lock')
+        check('systemctl' not in calls, 'resume-auto touched systemd while the lock was held: %r' % calls)
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -869,6 +1067,14 @@ def main():
     case('F-06 binary mutation killed', binary_mutation_killed)
     case('F-06 rules pending recovery', rules_scenario)
     case('F-06 rules mutation killed', rules_mutation_killed)
+    case('F-04 direct failure aborts', rollout_direct_abort)
+    case('F-04 direct failure mutation killed', rollout_mutation_killed)
+    case('F-10 rollback refuses pending', rollout_pending_refused)
+    case('F-10 pending guard mutation killed', rollout_pending_mutation_killed)
+    case('F-10 rollback refuses held lock', rollout_lock_held)
+    case('F-04 emergency direct fails safe', emergency_direct_fail_safe)
+    case('F-04 emergency mutation killed', emergency_mutation_killed)
+    case('F-10 resume-auto refuses held lock', resume_auto_lock)
     if FAILURES:
         print('change-chain: %d scenario(s) failed: %s' % (len(FAILURES), ', '.join(FAILURES)))
         return 1
