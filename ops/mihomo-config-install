@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # Install a candidate mihomo config on a Raspberry Pi gateway, but only after
-# the machine has checked it. Nothing is written unless every gate passes.
+# the machine has checked it. The live file is replaced atomically: a power cut
+# leaves either the old complete file or the new complete file, never a partial
+# one, and every post-install gate has a real rollback behind it.
 #
 #   mihomo-config-install /path/to/candidate.yaml [--dry-run]
 #
 # Gates:
 #   1. candidate parses and passes `mihomo -t`
-#   2. the running config is backed up and the diff is printed (blast radius)
+#   2. the running config is backed up (mode 0600, fsynced) and the diff is
+#      printed so the blast radius is visible before anything changes
 #   3. every process that rewrites /etc/mihomo/config.yaml is listed, so a
 #      generator that will silently undo this change cannot stay invisible
-#   4. after reload the service is active and the API answers
+#   4. the live file is replaced with same-directory temp + fsync + rename +
+#      directory fsync; on failure the old file is untouched
+#   5. after reload/restart the real controller API answers GET /version with
+#      HTTP 200 and a version field; the bearer secret is read from the live
+#      config or MIHOMO_API_SECRET and is never printed or placed in argv
+#   6. any failed gate restores the backup atomically and re-verifies the API;
+#      a failed rollback exits non-zero and prints ROLLBACK FAILED + reason
 set -uo pipefail
 
 CONF_DIR=${MIHOMO_DIR:-/etc/mihomo}
@@ -17,24 +26,153 @@ LIVE="$CONF_DIR/config.yaml"
 BIN=${MIHOMO_BIN:-/usr/local/bin/mihomo}
 CAND=${1:-}
 DRY=${2:-}
+API_URL=${MIHOMO_API:-http://127.0.0.1:9090}
+API_RETRIES=${MIHOMO_API_RETRIES:-10}
+API_SLEEP=${MIHOMO_API_SLEEP:-1}
+FAULT=${MIHOMO_INSTALL_FAULT:-}
+API_SECRET=${MIHOMO_API_SECRET:-}
 
 [ -n "$CAND" ] || { echo "usage: $0 <candidate.yaml> [--dry-run]" >&2; exit 2; }
 [ -f "$CAND" ] || { echo "no such file: $CAND" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "must run as root" >&2; exit 2; }
 
-block() { echo "" >&2; echo "[mihomo-install] REFUSED: $*" >&2; exit 1; }
 note() { echo "[mihomo-install] $*"; }
+refuse() { echo "" >&2; echo "[mihomo-install] REFUSED: $*" >&2; exit 1; }
+rollback_failed() { echo "[mihomo-install] ROLLBACK FAILED: $*" >&2; exit 3; }
 
-# --- gate 0: never ship a config that carries live credentials in-place check
-# (config legitimately contains proxy credentials; keep the file mode tight
-#  and never leave copies behind in /tmp)
+api_secret_value() {
+  [ -n "$API_SECRET" ] && { printf '%s' "$API_SECRET"; return 0; }
+  [ -r "$LIVE" ] || return 0
+  sed -n 's/^secret:[[:space:]]*//p' "$LIVE" | head -n 1 | tr -d "\"'"
+}
+
+# Same-directory temporary file, fsync the data, rename over the target, then
+# fsync the directory.  The rename is the only visible step, so a crash before
+# it leaves the old file; a crash after it leaves the new file.
+atomic_write() {
+  atomic_source=$1
+  atomic_target=$2
+  atomic_allow_fault=${3:-1}
+  python3 - "$atomic_source" "$atomic_target" "$FAULT" "$atomic_allow_fault" <<'PY'
+import os
+import sys
+import tempfile
+
+source, target, fault, allow_fault = sys.argv[1:5]
+directory = os.path.dirname(target) or '.'
+fd, staging = tempfile.mkstemp(prefix='.' + os.path.basename(target) + '.tmp.', dir=directory)
+try:
+    with os.fdopen(fd, 'wb') as out, open(source, 'rb') as incoming:
+        while True:
+            chunk = incoming.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+        out.flush()
+        os.fsync(out.fileno())
+    if allow_fault == '1' and fault == 'kill-before-rename' and os.path.basename(target) == 'config.yaml':
+        # Test hook: simulate power loss after the data is durable and before
+        # the rename.  The staging file deliberately survives, as it would
+        # after a real power cut.
+        os._exit(137)
+    if fault == 'fail-rename':
+        raise OSError('injected rename failure')
+    os.replace(staging, target)
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    try:
+        os.unlink(staging)
+    except OSError:
+        pass
+    raise
+PY
+}
+
+durable_copy() {
+  durable_source=$1
+  durable_target=$2
+  cp -p "$durable_source" "$durable_target" || return 1
+  chmod 600 "$durable_target" || return 1
+  python3 - "$durable_target" <<'PY' || return 1
+import os
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDONLY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+directory = os.path.dirname(path) or '.'
+directory_fd = os.open(directory, os.O_RDONLY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+}
+
+verify_api() {
+  body=$(mktemp "$LIVE.api.XXXXXX") || return 1
+  attempt=1
+  while [ "$attempt" -le "$API_RETRIES" ]; do
+    code=000
+    if [ -n "$secret" ]; then
+      # The header is fed through stdin: the secret never appears in argv.
+      code=$(printf 'Authorization: Bearer %s\n' "$secret" |
+        curl --silent --show-error --fail --max-time 5 -H @- -o "$body" \
+          --write-out '%{http_code}' "$API_URL/version" 2>/dev/null) || code=000
+    else
+      code=$(curl --silent --show-error --fail --max-time 5 -o "$body" \
+        --write-out '%{http_code}' "$API_URL/version" 2>/dev/null) || code=000
+    fi
+    if [ "$code" = 200 ] && grep -q '"version"' "$body" 2>/dev/null; then
+      rm -f "$body"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -gt "$API_RETRIES" ] || sleep "$API_SLEEP"
+  done
+  rm -f "$body"
+  return 1
+}
+
+reload_core() {
+  systemctl reload mihomo 2>/dev/null || systemctl restart mihomo 2>/dev/null
+}
+
+# Restore the complete previous file and prove the service and its API came back.
+# Every failure names the reason; none of them may claim a successful rollback.
+rollback() {
+  rollback_reason=$1
+  note "rolling back: $rollback_reason"
+  [ -n "$backup" ] && [ -f "$backup" ] || \
+    rollback_failed "no durable backup to restore ($rollback_reason)"
+  atomic_write "$backup" "$LIVE" 0 || \
+    rollback_failed "atomic restore of $LIVE failed ($rollback_reason)"
+  reload_core || rollback_failed "reload after restore failed ($rollback_reason)"
+  sleep 1
+  systemctl is-active --quiet mihomo || \
+    rollback_failed "mihomo is not active after restore ($rollback_reason)"
+  verify_api || rollback_failed "API /version still failing after restore ($rollback_reason)"
+  note "rolled back: previous configuration restored and API verified ($rollback_reason)"
+  exit 1
+}
+
+[ -z "$DRY" ] || [ "$DRY" = --dry-run ] || { echo "unknown option: $DRY" >&2; exit 2; }
+
+# --- gate 0: credentials in the candidate
 case "$CAND" in
-  /tmp/*) note "candidate lives in /tmp; it will hold credentials; remove it after install" ;;
+  "$CONF_DIR"/*|/tmp/*) note "candidate may hold credentials; it is replaced by a 0600 live file" ;;
 esac
 
 # --- gate 1: syntax + semantic validation
 note "validating candidate"
-"$BIN" -t -d "$CONF_DIR" -f "$CAND" || block "mihomo -t rejected the candidate"
+"$BIN" -t -d "$CONF_DIR" -f "$CAND" || refuse "mihomo -t rejected the candidate"
 
 # --- gate 2: blast radius
 CHANGED=0
@@ -59,16 +197,20 @@ if [ "$DRY" = "--dry-run" ]; then
   exit 0
 fi
 
-# --- install with backup, then verify the live service
-STAMP=$(date +%Y%m%d-%H%M%S)
-[ -f "$LIVE" ] && { cp -a "$LIVE" "$LIVE.bak-$STAMP" && note "backed up live to $LIVE.bak-$STAMP"; }
-install -m 0600 -o root -g root "$CAND" "$LIVE" || block "install failed"
-note "installed; reloading service"
-systemctl reload mihomo || systemctl restart mihomo || block "reload and restart both failed"
-sleep 2
-systemctl is-active --quiet mihomo || {
-  note "service is not active; rolling back"
-  [ -f "$LIVE.bak-$STAMP" ] && install -m 0600 -o root -g root "$LIVE.bak-$STAMP" "$LIVE" && systemctl restart mihomo
-  block "mihomo failed to stay up on the new config (rolled back)"
-}
-note "mihomo active; done"
+# --- gate 4: durable backup then atomic replacement
+backup=
+if [ -f "$LIVE" ]; then
+  backup="$LIVE.bak-$(date +%Y%m%d-%H%M%S)-$$"
+  durable_copy "$LIVE" "$backup" || refuse "could not create a durable backup of $LIVE"
+  note "backed up live to $backup (mode 0600, fsynced)"
+fi
+note "installed atomically; reloading service"
+atomic_write "$CAND" "$LIVE" || refuse "atomic install failed; live configuration was not replaced"
+
+# --- gate 5: reload, active service, real API
+reload_core || rollback "reload and restart both failed"
+sleep 1
+systemctl is-active --quiet mihomo || rollback "mihomo is not active on the new config"
+secret=$(api_secret_value)
+verify_api || rollback "API /version did not answer 200 with a version field"
+note "mihomo active; API /version verified; done"

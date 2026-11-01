@@ -169,7 +169,7 @@ python3 tools/check_publication_privacy.py
 既有失败登记在 `scripts/preflight-baseline.txt`，负载敏感项登记在 `scripts/preflight-advisory.txt`。
 
 生产配置改动只走设备上的 `/usr/local/sbin/mihomo-config-install`（源：`ops/mihomo-config-install`）：
-先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer，备份后才写入并 reload，失败自动回滚。
+先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer；备份以 0600 fsync 后，用「同目录临时文件 → fsync → rename → fsync 目录」原子替换 live；reload/restart 后要求 `GET /version` 返回 200 且带 `version`（Bearer secret 从 live config 或环境读取，不进日志与 argv）；任一步失败用同一原子写还原备份并再验 API，还原也失败时以非 0 退出并打印 `ROLLBACK FAILED: 原因`。
 
 ## 主仓库与 CI
 
