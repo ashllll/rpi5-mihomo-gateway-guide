@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 
 LIVE = "/usr/local/bin/mihomo"
@@ -83,6 +84,25 @@ def emit(payload, code=0):
     return code
 
 
+def rollback_point(reason):
+    """Create the whole-machine point before the swap intent becomes durable.
+
+    A missing or failing producer is fatal: the operator must not lose the
+    previous core without a point that can put the rest of the machine back.
+    """
+    binary = os.environ.get("GATEWAY_BACKUP_BIN", "/usr/local/sbin/gateway-backup")
+    try:
+        result = subprocess.run([binary, "--reason", reason],
+                                capture_output=True, text=True)
+    except OSError as error:
+        return {"error": "whole-machine rollback point failed: %s" % error}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-400:]
+        return {"error": "whole-machine rollback point failed",
+                "detail": detail}
+    return None
+
+
 def main(argv):
     # The slot directory is created here, not at import: install is the only
     # entry point that writes, and `status` must stay read-only on a clean box.
@@ -120,6 +140,9 @@ def main(argv):
         if not os.path.exists(SLOTS[slot]) or sha256(SLOTS[slot]) != new_sha:
             return emit({"error": "staged slot does not match the recorded sha256"}, 2)
         old_sha = sha256(LIVE) if os.path.exists(LIVE) else None
+        failure = rollback_point("core-swap")
+        if failure:
+            return emit(failure, 1)
         # Write-ahead intent: fsynced before the exchange, so a crash between
         # the swap and the post-swap state write has one recoverable direction.
         intent = dict(state)

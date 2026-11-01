@@ -97,6 +97,8 @@ DORMANT_TIMERS = (
 )
 SBIN_SCRIPTS = (
     "dnsmasq-safe-start",
+    "gateway-backup",
+    "gateway-restore",
     "homeassistant-access-guard",
     "mihomo-alert",
     "mihomo-core-swap",
@@ -120,6 +122,7 @@ SBIN_SCRIPTS = (
     "rp5-agent.py",
     "mosdns-healthcheck",
     "mosdns-resume-auto",
+    "mosdns-rollout-backup",
     "mosdns-rollout-rollback",
     "mosdns-update-binary",
     "mosdns-update-rules",
@@ -243,6 +246,10 @@ NOT_DEPLOYMENT_PARAMETERS = {
     "MIHOMO_UPDATE_OWNER_START",
     # Set only by the installer lock supervisor across its exec into install.sh.
     "MIHOMO_INSTALL_LOCK_HELD",
+    # Per-run seams used by the verification harnesses to point a destructive
+    # script at a stub producer.  The shipped default stays absolute.
+    "GATEWAY_BACKUP_BIN",
+    "MOSDNS_ROLLOUT_BACKUP_BIN",
 }
 
 SHELL_VAR = re.compile(r'\$\{([A-Z_][A-Z0-9_]*):[-=]')

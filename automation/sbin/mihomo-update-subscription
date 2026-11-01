@@ -19,6 +19,8 @@ if ! flock -n 9; then
   exit 0
 fi
 
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
+
 config=/etc/mihomo/config.yaml
 url_file=/etc/mihomo/secrets/subscription.url
 extra_urls_dir=/etc/mihomo/secrets/subscriptions.d
@@ -870,6 +872,13 @@ if ! run_bounded "$remaining" /usr/local/sbin/mihomo-media-guard \
     --config "$candidate" --check-ready --valid-for "$remaining" >/dev/null; then
   logger -t mihomo-update-subscription "Media admission is not ready; retained the running configuration"
   record_failure media-admission 1 "media admission is not ready"
+  exit 1
+fi
+
+if ! "$backup_bin" --reason subscription-apply; then
+  logger -t mihomo-update-subscription \
+    "Could not create the whole-machine rollback point; retained the running configuration"
+  record_failure rollback-point 1 "whole-machine rollback point failed"
   exit 1
 fi
 

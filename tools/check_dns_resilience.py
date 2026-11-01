@@ -50,7 +50,7 @@ class DNSResilienceCLI(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.commands = self.directory / 'bin'
         self.commands.mkdir()
-        for name in ('systemctl', 'dig', 'curl', 'date', 'flock', 'logger',
+        for name in ('systemctl', 'dig', 'curl', 'date', 'flock', 'logger', 'gateway-backup',
                      'alert', 'dns-mode', 'sleep', 'install', 'chown', 'dnsmasq'):
             path = self.commands / name
             path.write_text('#!' + sys.executable + '\n' + BOUNDARY)
@@ -78,6 +78,7 @@ class DNSResilienceCLI(unittest.TestCase):
     def run_cli(self, script=None, args=(), timeout=10, **settings):
         self.actions.write_text('')
         env = dict(PATH=str(self.commands) + ':/usr/bin:/bin:/usr/sbin:/sbin',
+                   GATEWAY_BACKUP_BIN=str(self.commands / 'gateway-backup'),
                    TEST_ACTIONS=str(self.actions), **settings)
         result = subprocess.run(['sh', str(script or self.script), *args], env=env,
                                 capture_output=True, text=True, timeout=timeout)

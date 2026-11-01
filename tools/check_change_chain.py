@@ -82,6 +82,8 @@ class Sandbox:
                           'var/tmp', 'run/lock', 'var/backups', 'log', 'state'):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         make_stub(self.bin, 'flock', FLOCK_STUB.replace('PYTHON_PLACEHOLDER', PYTHON))
+        make_stub(self.bin, 'gateway-backup', '#!/bin/sh\nexit 0\n')
+        make_stub(self.bin, 'mosdns-rollout-backup', '#!/bin/sh\nexit 0\n')
         make_stub(self.bin, 'logger', '''#!PYTHON_PLACEHOLDER
 import os, sys
 with open(os.environ['CASE_LOG'], 'a') as stream:
@@ -119,7 +121,9 @@ os.execv('/usr/bin/install', ['/usr/bin/install'] + (['-d'] if directory else []
     def env(self, **extra):
         values = dict(os.environ)
         values.update(CASE_LOG=str(self.work / 'case.log'),
-                      PATH=str(self.bin) + ':/usr/bin:/bin:/usr/sbin:/sbin')
+                      PATH=str(self.bin) + ':/usr/bin:/bin:/usr/sbin:/sbin',
+                      GATEWAY_BACKUP_BIN=str(self.bin / 'gateway-backup'),
+                      MOSDNS_ROLLOUT_BACKUP_BIN=str(self.bin / 'mosdns-rollout-backup'))
         values.update({key: str(value) for key, value in extra.items()})
         return values
 
@@ -262,9 +266,13 @@ def core_swap_setup(sandbox):
     write(sandbox.work / 'new-core', CORE_NEW.decode())
 
 
-def core_swap_run(script, *arguments, env=None):
+def core_swap_run(sandbox, script, *arguments, env=None):
+    # activate takes the whole-machine rollback point first, exactly as on the
+    # gateway; the sandbox supplies the producer stub through the same
+    # environment the shell cases already use.
     return subprocess.run([PYTHON, str(script), *arguments], capture_output=True,
-                          text=True, timeout=60, env=env)
+                          text=True, timeout=60,
+                          env=sandbox.env() if env is None else env)
 
 
 def core_swap_crash_recovery():
@@ -272,15 +280,15 @@ def core_swap_crash_recovery():
         script = core_swap_copy(sandbox)
         core_swap_setup(sandbox)
         state = sandbox.work / 'lib/mihomo-swap/state.json'
-        result = core_swap_run(script, 'install', str(sandbox.work / 'new-core'))
+        result = core_swap_run(sandbox, script, 'install', str(sandbox.work / 'new-core'))
         check(result.returncode == 0, 'install failed: ' + result.stdout + result.stderr)
         before = state.read_text(encoding='utf-8')
-        result = core_swap_run(script, 'activate')
+        result = core_swap_run(sandbox, script, 'activate')
         check(result.returncode == 0, 'activate failed: ' + result.stdout + result.stderr)
         check((sandbox.work / 'bin/mihomo').read_bytes() == CORE_NEW, 'activate did not swap in the new core')
         # Crash image: the old state file survived while the exchange did.
         state.write_text(before, encoding='utf-8')
-        result = core_swap_run(script, 'rollback')
+        result = core_swap_run(sandbox, script, 'rollback')
         check(result.returncode == 0, 'rollback failed: ' + result.stdout + result.stderr)
         check((sandbox.work / 'bin/mihomo').read_bytes() == CORE_OLD,
               'rollback did not restore the old core')
@@ -303,7 +311,7 @@ def core_swap_inconsistent_refused():
         write(sandbox.work / 'bin/mihomo', CORE_OLD.decode())
         write(slot_path, CORE_NEW.decode())
         state.write_text(json.dumps(core_swap_snapshot(CORE_NEW, 'a')), encoding='utf-8')
-        result = core_swap_run(script, 'rollback')
+        result = core_swap_run(sandbox, script, 'rollback')
         check(result.returncode != 0, 'rollback accepted an inconsistent live core')
         check((sandbox.work / 'bin/mihomo').read_bytes() == CORE_OLD,
               'inconsistent rollback moved the live core')
@@ -365,7 +373,7 @@ if log:
               'state directory was not fsynced before the exchange: %s' % before_exchange)
         # A durable intent with the old core still live must resolve as a no-op.
         normal = core_swap_copy(sandbox)
-        result = core_swap_run(normal, 'rollback')
+        result = core_swap_run(sandbox, normal, 'rollback')
         check(result.returncode == 0, 'rollback of an unexchanged intent failed: ' + result.stdout + result.stderr)
         check((sandbox.work / 'bin/mihomo').read_bytes() == CORE_OLD,
               'unexchanged intent rollback moved the live core')
@@ -390,7 +398,7 @@ def core_swap_mutation_killed():
         write(sandbox.work / 'bin/mihomo', CORE_OLD.decode())
         write(sandbox.work / 'lib/mihomo-swap/a', CORE_NEW.decode())
         state.write_text(json.dumps(core_swap_snapshot(CORE_NEW, 'a')), encoding='utf-8')
-        result = core_swap_run(script, 'rollback')
+        result = core_swap_run(sandbox, script, 'rollback')
         try:
             check(result.returncode != 0, 'mutated rollback accepted an inconsistent live core')
             check((sandbox.work / 'bin/mihomo').read_bytes() == CORE_OLD,
@@ -859,8 +867,12 @@ os.execvp(sys.argv[1], sys.argv[1:])
 
 ROLLOUT_LOG = 'case.log'
 
+# A minimal, valid rollback point: enough for the validation to pass so the
+# mutation cases reach the destructive phase they are supposed to guard.
+ROLLOUT_LISTING = ['etc/mosdns/config.yaml']
 
-def rollout_fixture(sandbox, dns_rc, tar_rc):
+
+def rollout_fixture(sandbox, dns_rc, tar_rc, listing=None):
     import gzip
     root = sandbox.root
     backups = root / 'var/backups'
@@ -876,10 +888,22 @@ exit %s
 echo "systemctl $*" >> "$CASE_LOG"
 exit 0
 ''')
-    make_stub(sandbox.bin, 'tar', '''#!/bin/sh
+    if listing is None:
+        make_stub(sandbox.bin, 'tar', '''#!/bin/sh
 echo "tar $*" >> "$CASE_LOG"
 exit %s
 ''' % tar_rc)
+    else:
+        # A point that lists cleanly, so the case exercises the guard it mutates
+        # instead of stopping earlier on the archive validation added for F-08.
+        make_stub(sandbox.bin, 'tar', '''#!/bin/sh
+echo "tar $*" >> "$CASE_LOG"
+case "$1" in
+  -tzf) printf '%%s\\n' '%s'; exit 0 ;;
+  -xOf) exit 0 ;;
+  *) exit %s ;;
+esac
+''' % ('\n'.join(listing), tar_rc))
 
 
 def rollout_copy(sandbox, text=None):
@@ -926,7 +950,7 @@ def rollout_mutation_killed():
     mutated = text.replace(marker, 'if /usr/local/sbin/mihomo-dns-mode direct; then')
     with Sandbox('rollout-mutation') as sandbox:
         script = rollout_copy(sandbox, mutated)
-        rollout_fixture(sandbox, dns_rc=1, tar_rc=1)
+        rollout_fixture(sandbox, dns_rc=1, tar_rc=0, listing=ROLLOUT_LISTING)
         result, calls = rollout_run(sandbox, script)
         try:
             check('systemctl disable' not in calls,
@@ -955,7 +979,7 @@ def rollout_pending_mutation_killed():
     mutated = text.replace(marker, 'if false; then', 1)
     with Sandbox('rollout-pending-mutation') as sandbox:
         script = rollout_copy(sandbox, mutated)
-        rollout_fixture(sandbox, dns_rc=0, tar_rc=0)
+        rollout_fixture(sandbox, dns_rc=0, tar_rc=0, listing=ROLLOUT_LISTING)
         write(sandbox.root / 'var/lib/mihomo-automation/.install-pending', '{}')
         result, calls = rollout_run(sandbox, script)
         try:

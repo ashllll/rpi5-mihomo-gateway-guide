@@ -33,6 +33,14 @@ NEW_CONFIG = f'secret: {SECRET}\nmode: rule\nlog-level: warning\nproxies: []\n'
 
 STUBS = {
     'id': 'print(0)\n',
+    'flock': '''import fcntl,sys
+args = sys.argv[1:]
+fd = next((int(a) for a in reversed(args) if a.isdigit()), None)
+if fd is None:
+    sys.exit(2)
+fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB if '-n' in args else 0))
+''',
+    'gateway-backup': 'import sys\nsys.exit(0)\n',
     'mihomo': 'import os\nraise SystemExit(1 if os.environ.get("MIHOMO_TEST_REJECT") else 0)\n',
     'install': '''import shutil,sys
 args = sys.argv[1:]
@@ -113,7 +121,9 @@ def run(installer: Path, base: Path, api: Api, fault: str = '', extra_env: dict 
                MIHOMO_DIR=str(etc), MIHOMO_BIN=str(base / 'bin/mihomo'),
                MIHOMO_API=f'http://127.0.0.1:{api.port}', MIHOMO_API_RETRIES='2',
                MIHOMO_API_SLEEP='0', MIHOMO_INSTALL_FAULT=fault, TEST_CALLS=str(calls),
-               MIHOMO_API_SECRET='', PYTHONDONTWRITEBYTECODE='1')
+               MIHOMO_API_SECRET='', PYTHONDONTWRITEBYTECODE='1',
+               MIHOMO_MAINTENANCE_LOCK=str(base / 'run/lock/mihomo-maintenance.lock'),
+               GATEWAY_BACKUP_BIN=str(base / 'bin/gateway-backup'))
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(['bash', str(installer), str(candidate)], env=env,

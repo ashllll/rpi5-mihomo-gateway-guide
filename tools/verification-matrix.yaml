@@ -84,6 +84,8 @@ groups:
     - tools/check_media_core.py
   ops:
     - tools/check_config_install.py
+  rollout:
+    - tools/check_gateway_rollout.py
 
 changes:
   # Gate definitions and shared helpers: always run everything.
@@ -127,7 +129,7 @@ changes:
       - "automation/systemd/mihomo-subscription-*"
       - "automation/systemd/mihomo-subscription-update.service.d/**"
       - "automation/systemd/mosdns*"
-    run: [subscription, install]
+    run: [subscription, install, rollout]
 
   # Health, DNS, watch and alerting.
   - paths:
@@ -198,6 +200,12 @@ changes:
       - "assets/**"
       - "examples/**"
     run: [gate]
+
+  # Whole-machine rollback points: the producer and the consumer.
+  - paths:
+      - "automation/sbin/gateway-backup"
+      - "automation/sbin/gateway-restore"
+    run: [rollout, install]
 
   # Explicit catch-all: an unknown path runs the full gate.
   - paths: ["**"]

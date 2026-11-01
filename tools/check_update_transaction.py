@@ -190,7 +190,7 @@ else:
     print("Z" if status == 5 else "S")
 ''')
         ps_stub.chmod(0o755)
-        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs',
+        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs', 'gateway-backup',
                      'mihomo-reconcile-policy', 'mihomo-healthcheck', 'mihomo-subscription-normalize'):
             path = self.directory / 'bin' / name
             path.write_text('#!' + sys.executable + '\n' + boundary)

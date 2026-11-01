@@ -197,6 +197,22 @@ if [ "$DRY" = "--dry-run" ]; then
   exit 0
 fi
 
+# Serialize the state-changing part with the timer transactions.  The tool is
+# manual, so it takes the maintenance lock itself; a wrapper that already got
+# the lock exports MIHOMO_INSTALL_LOCK_HELD=true (the install.sh convention).
+if [ "${MIHOMO_INSTALL_LOCK_HELD:-false}" != true ]; then
+  lock_file=${MIHOMO_MAINTENANCE_LOCK:-/run/lock/mihomo-maintenance.lock}
+  mkdir -p -- "$(dirname "$lock_file")"
+  exec 8>"$lock_file"
+  flock -n 8 || refuse "maintenance is busy; refusing to install a config"
+fi
+
+# The rollback point is a precondition of the replacement, not a best effort:
+# a failed point must leave the live config untouched.
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
+"$backup_bin" --reason config-install || \
+  refuse "could not create the whole-machine rollback point"
+
 # --- gate 4: durable backup then atomic replacement
 backup=
 if [ -f "$LIVE" ]; then

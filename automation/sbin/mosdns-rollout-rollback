@@ -60,9 +60,14 @@ fi
 
 direct_active=true
 rollback_complete=false
+listing_dir=${root}/var/tmp
+mkdir -p -- "$listing_dir"
+listing=$listing_dir/mosdns-rollback.$$.list
+archived_config=$listing_dir/mosdns-rollback.$$.config
 restore_dns_on_exit() {
   status=$?
   trap - EXIT HUP INT TERM
+  rm -f -- "$listing" "$archived_config"
   if [ "$direct_active" = true ] && [ "$rollback_complete" != true ]; then
     /usr/local/sbin/mihomo-dns-mode auto ||
       echo "mosdns-rollout-rollback: DNS may stay in direct mode" >&2
@@ -70,6 +75,31 @@ restore_dns_on_exit() {
   exit "$status"
 }
 trap restore_dns_on_exit EXIT HUP INT TERM
+
+# Validate the point before any file is overwritten.  A truncated or empty
+# archive must fail here, not half-way through the unit removals below.
+if ! tar -tzf "$backup" >"$listing"; then
+  echo "mosdns-rollout-rollback: cannot list the rollback point; nothing changed" >&2
+  exit 1
+fi
+if ! grep -qx 'etc/mosdns/config.yaml' "$listing"; then
+  echo "mosdns-rollout-rollback: rollback point has no MosDNS config; nothing changed" >&2
+  exit 1
+fi
+if grep -Eq '(^/|(^|/)\.\.(/|$))' "$listing"; then
+  echo "mosdns-rollout-rollback: rollback point contains unsafe paths; nothing changed" >&2
+  exit 1
+fi
+# The restored config decides whether the rules tree may be removed.  Read it
+# from the archive now: a config that references rules with no rules in the
+# point is refused before the destructive phase.
+if tar -xOf "$backup" etc/mosdns/config.yaml >"$archived_config" 2>/dev/null; then
+  if grep -q 'etc/mosdns/rules' "$archived_config" &&
+     ! grep -q '^etc/mosdns/rules/' "$listing"; then
+    echo "mosdns-rollout-rollback: restored config references rules but the point has none; refusing" >&2
+    exit 1
+  fi
+fi
 
 systemctl disable --now \
   mosdns-healthcheck.timer \
@@ -79,7 +109,10 @@ systemctl disable --now \
 
 tar -xzf "$backup" -C .
 
-rm -f \
+# Retire only what the point does not carry.  The extraction above already
+# restored every member it holds, so an unconditional removal here would delete
+# the very files the rollback just brought back.
+for artifact in \
   "etc/systemd/system/mosdns-healthcheck.service" \
   "etc/systemd/system/mosdns-healthcheck.timer" \
   "etc/systemd/system/mosdns-rules-update.service" \
@@ -94,8 +127,15 @@ rm -f \
   "usr/local/sbin/dnsmasq-safe-start" \
   "usr/local/sbin/mosdns-emergency-direct" \
   "usr/local/sbin/mosdns-resume-auto"
+do
+  grep -Fqx -- "$artifact" "$listing" || rm -f -- "$artifact"
+done
 
-rm -rf -- etc/mosdns/rules
+# The rules tree belongs to the point.  When the point carries rules, keep the
+# ones it just extracted; only remove a tree the restored config cannot use.
+if ! grep -q '^etc/mosdns/rules/' "$listing"; then
+  rm -rf -- etc/mosdns/rules
+fi
 
 systemctl daemon-reload
 systemctl enable --now mosdns.service

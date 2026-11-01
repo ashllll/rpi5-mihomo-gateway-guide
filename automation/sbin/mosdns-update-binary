@@ -9,6 +9,8 @@ flock -n 9 || exit 0
 backup_root=/etc/mosdns/backups
 pending_file=$backup_root/transaction.pending
 maintenance_lock=/run/lock/mihomo-maintenance.lock
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
+rollout_backup_bin=${MOSDNS_ROLLOUT_BACKUP_BIN:-/usr/local/sbin/mosdns-rollout-backup}
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
@@ -347,6 +349,17 @@ if [ -s "$pending_file" ]; then
     exit 1
   fi
   exit 0
+fi
+
+if ! "$rollout_backup_bin" --reason mosdns-binary; then
+  logger -t mosdns-update-binary \
+    "Could not create the MosDNS rollout point; live binary unchanged"
+  exit 1
+fi
+if ! "$backup_bin" --reason mosdns-binary; then
+  logger -t mosdns-update-binary \
+    "Could not create the whole-machine rollback point; live binary unchanged"
+  exit 1
 fi
 
 timestamp=$(date +%Y%m%d-%H%M%S)

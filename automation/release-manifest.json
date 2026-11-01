@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "572e7fa0091d1d7fe83845aa7731fc8df79ad539f6e39ea575f1060e7a2a4631",
+  "release_id": "d89f1e531664ce1a9d76fc6567e4642cfe38703631a704df806e0c132f2eb5bb",
   "files": [
     {
       "source": "check-release.py",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "09ced0336f81bcff1e4af40a25ad2e4b1f0753dfbf5d2613a232cd4420c9e35a"
+      "sha256": "419e0cdb9b8e8348782b4aa0c9f9f7128da94c1ed1e798bcbaa1b3645d8bab4d"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -137,6 +137,18 @@
       "mode": 493
     },
     {
+      "source": "sbin/gateway-backup",
+      "target": "/usr/local/sbin/gateway-backup",
+      "sha256": "692a69b6994f689c2c5fabd5579df6e9897436414618d694eaee30147cf5b033",
+      "mode": 493
+    },
+    {
+      "source": "sbin/gateway-restore",
+      "target": "/usr/local/sbin/gateway-restore",
+      "sha256": "bf66ed29cbccced5efe074ab3a03534dbae03b2c19ddbdbf4b87bd69af7e9ed9",
+      "mode": 493
+    },
+    {
       "source": "sbin/homeassistant-access-guard",
       "target": "/usr/local/sbin/homeassistant-access-guard",
       "sha256": "e92ee0328d3395c3bd8903bf7f7ad2a90ea62d709d3b720a524e880d46684051",
@@ -151,13 +163,13 @@
     {
       "source": "sbin/mihomo-core-swap",
       "target": "/usr/local/sbin/mihomo-core-swap",
-      "sha256": "c36944044a68bc8cff48a2026ecf1ded8ced71bf2fbd8d29a4aa8e4465b4c69e",
+      "sha256": "9aa9931ad166b08c5abfa277b07272fb903bbd6c3ea0f3856adc40d087615749",
       "mode": 493
     },
     {
       "source": "sbin/mihomo-dns-mode",
       "target": "/usr/local/sbin/mihomo-dns-mode",
-      "sha256": "8c7bd2675ad97de8635b6ff4dda44d694d2aee8ea9cbf12d34b95f314fff3990",
+      "sha256": "e4b82bc90b9465bcb47d8308bda96284934edd3d3ac7abd931066002d7b307af",
       "mode": 493
     },
     {
@@ -241,7 +253,7 @@
     {
       "source": "sbin/mihomo-update-subscription",
       "target": "/usr/local/sbin/mihomo-update-subscription",
-      "sha256": "6dcc565d1b94656cc6dfca6d7a38e73b7e9063dc9f06499d5f35a04f95b6e218",
+      "sha256": "128c94c9ff9a95314732c313fe95fb8b1c8f93cbdfcb6470746dfc083ee82e2b",
       "mode": 493
     },
     {
@@ -269,21 +281,27 @@
       "mode": 493
     },
     {
+      "source": "sbin/mosdns-rollout-backup",
+      "target": "/usr/local/sbin/mosdns-rollout-backup",
+      "sha256": "24da8ed000a3282c1aa3d4ff8a8a502ec4186e892208e1333ee561b6d16b1c83",
+      "mode": 493
+    },
+    {
       "source": "sbin/mosdns-rollout-rollback",
       "target": "/usr/local/sbin/mosdns-rollout-rollback",
-      "sha256": "d77a08ed593f6089df34feddea164227ca09305c1c595c9143a66a3298f010c0",
+      "sha256": "3e0c39cfeb2157125f5822eed0fe12849360969d4a2fba022465c8c0fc07d504",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-update-binary",
       "target": "/usr/local/sbin/mosdns-update-binary",
-      "sha256": "0307598cab1d91c53681b7512b5ef84d9af12e787813b03967b97fc89062c13f",
+      "sha256": "ee7ccbf47b667bf0f3c28d36df9cfc0a905886bd60e0efb852857cb18dcc4693",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-update-rules",
       "target": "/usr/local/sbin/mosdns-update-rules",
-      "sha256": "4ae72456b731cffb25d65cf13fc99632411b5cd462d5db004883c432c5991c35",
+      "sha256": "c86e02dc46d304700dafe4e96611d332961b8e2f3d465738cecc43c7b86a7aea",
       "mode": 493
     },
     {

@@ -11,6 +11,7 @@ current_link=$rules_root/current
 releases_dir=$rules_root/releases
 pending_file=$rules_root/pending
 maintenance_lock=/run/lock/mihomo-maintenance.lock
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
@@ -379,6 +380,12 @@ if [ -s "$pending_file" ]; then
     exit 1
   fi
   exit 0
+fi
+
+if ! "$backup_bin" --reason mosdns-rules; then
+  logger -t mosdns-update-rules \
+    "Could not create the whole-machine rollback point; current rules unchanged"
+  exit 1
 fi
 
 rules_tag=$(jq -er '.tag_name' "$work_dir/rules-release.json")

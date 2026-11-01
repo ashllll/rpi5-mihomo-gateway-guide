@@ -146,7 +146,7 @@ def check_case(mode):
                     proxy['server'] = 'old.example.invalid'
                 (root / 'cache' / download.name).write_text(yaml.safe_dump(old))
             entries.append(f'{source_id}|{download}|1\n')
-        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy', 'mihomo-healthcheck'):
+        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy', 'mihomo-healthcheck', 'gateway-backup'):
             command = root / 'bin' / name
             command.write_text(f'#!{sys.executable}\n' + STUB)
             command.chmod(0o755)

@@ -61,7 +61,7 @@ class Rollback(unittest.TestCase):
                 (root/'etc/secrets/subscription.url').write_text('http://fixture.invalid/config\n')
                 for name in ['curl','dig','mihomo','systemctl','install','logger','sleep','flock','find','xargs',
                              'mihomo-subscription-normalize','mihomo-subscription-candidate','mihomo-policy-overlay',
-                             'mihomo-reconcile-policy','mihomo-healthcheck','mihomo-media-guard']:
+                             'mihomo-reconcile-policy','mihomo-healthcheck','mihomo-media-guard','gateway-backup']:
                     p=root/'bin'/name
                     p.write_text('#!'+sys.executable+'\n'+STUB)
                     p.chmod(0o755)

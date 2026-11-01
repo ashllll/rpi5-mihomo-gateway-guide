@@ -12,6 +12,8 @@ if [ -r /etc/mihomo-automation.env ]; then
   . /etc/mihomo-automation.env
 fi
 
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
+
 # dnsmasq answers on loopback for these host-side checks.
 dns_query() {
   server=$1
@@ -149,6 +151,13 @@ source_file="/etc/mihomo/dnsmasq-upstreams.${mode}"
 
 if [ -f "$active" ] && cmp -s "$source_file" "$active" && verify_mode "$mode"; then
   exit 0
+fi
+
+# A real upstream change needs a rollback point first.  The switch itself is
+# atomic, but the previous mode is what an operator needs after a bad change.
+if ! "$backup_bin" --reason dns-mode; then
+  echo "DNS mode $mode: could not create the whole-machine rollback point" >&2
+  exit 1
 fi
 
 candidate=$(mktemp /run/dnsmasq-upstreams.XXXXXX)

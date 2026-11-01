@@ -562,15 +562,12 @@ class ReleaseCLI(unittest.TestCase):
                 '#!/usr/bin/env python3\n'
                 'import os, pathlib, signal, subprocess, sys\n'
                 'args = sys.argv[1:]\n'
-                'if "-d" not in args:\n'
-                '    counter = pathlib.Path(os.environ["R4_INSTALL_COUNT"])\n'
-                '    count = int(counter.read_text()) + 1 if counter.exists() else 1\n'
-                '    counter.write_text(str(count))\n'
-                '    if count == 2:\n'
-                '        result = subprocess.run([os.environ["R4_REAL_INSTALL"], *args])\n'
-                '        os.kill(int(pathlib.Path(os.environ["R4_OWNER_PID"]).read_text()), signal.SIGKILL)\n'
-                '        os.kill(os.getppid(), signal.SIGKILL)\n'
-                '        raise SystemExit(result.returncode)\n'
+                'kill_after = "homeassistant-access-guard"\n'
+                'if "-d" not in args and any(kill_after in str(item) for item in args):\n'
+                '    result = subprocess.run([os.environ["R4_REAL_INSTALL"], *args])\n'
+                '    os.kill(int(pathlib.Path(os.environ["R4_OWNER_PID"]).read_text()), signal.SIGKILL)\n'
+                '    os.kill(os.getppid(), signal.SIGKILL)\n'
+                '    raise SystemExit(result.returncode)\n'
                 'os.execv(os.environ["R4_REAL_INSTALL"], [os.environ["R4_REAL_INSTALL"], *args])\n',
                 encoding='utf-8',
             )

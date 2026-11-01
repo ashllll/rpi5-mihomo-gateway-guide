@@ -62,6 +62,33 @@ else
   python3 "$here/check-release.py" --root "$GATEWAY_ROOT" --prepare
 fi
 
+# The whole-machine rollback point must exist before the first installed file
+# is replaced.  A staged install (GATEWAY_ROOT) leaves systemd alone and is
+# exercised by the offline checks; on the gateway the point is mandatory.
+# It is named with the release that is installed *now*, so a later deliberate
+# install undo has to say --allow-cross-release on gateway-restore.
+if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ]; then
+  rollback_release=$(python3 -c 'import json,os,sys
+package, installed = sys.argv[1], sys.argv[2]
+release = None
+if os.path.isfile(installed):
+    try:
+        release = json.load(open(installed)).get("release_id")
+    except (OSError, ValueError):
+        release = None
+if not release:
+    release = json.load(open(package))["release_id"]
+print(release)' "$here/release-manifest.json" \
+    "/var/lib/mihomo-automation/installed-manifest.json") || {
+    echo 'error: cannot determine the release_id for the rollback point' >&2
+    exit 1
+  }
+  if ! "$here/sbin/gateway-backup" --reason install --release-id "$rollback_release"; then
+    echo 'error: could not create the pre-install rollback point; nothing was installed' >&2
+    exit 1
+  fi
+fi
+
 say() {
   if [ "$dry_run" = true ]; then
     echo "[dry-run] $*"
