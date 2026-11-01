@@ -145,7 +145,52 @@ class UpdateTransactionCLI(unittest.TestCase):
                 proxy['server'] = 'old.example.invalid'
             (self.directory / 'cache' / (source_id + '.yaml')).write_text(yaml.safe_dump(data))
         boundary = UPDATE_BOUNDARY.replace('def fault():', LOCK_BOUNDARY + '\ndef fault():')
-        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs',
+        # The sandbox blocks the real ps.  This stub reports a stable start
+        # string per live PID and disappears when the PID is gone, so the
+        # orphan-runner test proves the updater's owner check on every host
+        # instead of depending on the host's ps/僵尸 semantics.
+        ps_stub = self.directory / 'bin/ps'
+        ps_stub.write_text('#!' + sys.executable + '\n' + '''import ctypes, os, pathlib, sys
+args = sys.argv[1:]
+state = pathlib.Path(os.environ["PS_STUB_STATE"])
+state.mkdir(parents=True, exist_ok=True)
+try:
+    pid = int(args[args.index("-p") + 1])
+except (ValueError, IndexError):
+    sys.exit(1)
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    sys.exit(1)
+except PermissionError:
+    pass
+
+def darwin_state():
+    libc = ctypes.CDLL("/usr/lib/libc.dylib", use_errno=True)
+    libc.sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                            ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                            ctypes.c_void_p, ctypes.c_size_t]
+    mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+    size = ctypes.c_size_t(0)
+    libc.sysctl(mib, 4, None, ctypes.byref(size), None, 0)
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 4, buf, ctypes.byref(size), None, 0) != 0 or size.value == 0:
+        return None
+    # extern_proc.p_stat is at offset 36 on 64-bit Darwin.
+    return buf.raw[36]
+
+wanted = args[args.index("-o") + 1] if "-o" in args else ""
+if wanted.startswith("lstart"):
+    record = state / str(pid)
+    if not record.exists():
+        record.write_text("Mon Nov  1 00:00:00 2026 %d" % pid)
+    print(record.read_text())
+else:
+    status = darwin_state() if sys.platform == "darwin" else 2
+    print("Z" if status == 5 else "S")
+''')
+        ps_stub.chmod(0o755)
+        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'mv', 'rm', 'logger', 'sleep', 'find', 'xargs', 'gateway-backup',
                      'mihomo-reconcile-policy', 'mihomo-healthcheck', 'mihomo-subscription-normalize'):
             path = self.directory / 'bin' / name
             path.write_text('#!' + sys.executable + '\n' + boundary)
@@ -184,6 +229,7 @@ class UpdateTransactionCLI(unittest.TestCase):
                    MIHOMO_RECONCILE_TARGETS=str(self.targets),
                    SUB_TEST_ROOT=str(self.directory), SUB_TEST_MODE=mode,
                    SUB_TEST_INSTALL=shutil.which('install'), SUB_TEST_MV=shutil.which('mv'), SUB_TEST_RM=shutil.which('rm'),
+                   PS_STUB_STATE=str(self.directory / 'ps-state'),
                    PYTHONDONTWRITEBYTECODE='1', **settings)
         return subprocess.run(['sh', str(self.script), *args], env=env,
                               capture_output=True, text=True, timeout=30)
@@ -471,10 +517,13 @@ os.fsync=traced_fsync
         before = yaml.safe_load(self.config.read_text())
         cache = {p.name: p.read_bytes() for p in (self.directory / 'cache').iterdir()}
         started = time.monotonic()
-        result = self.run_cli(MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS='6', TX_SLOW_PROBE='10')
+        # The deadline must fire while the slow probe is in flight, not before
+        # the probe starts: a 6s total budget was shorter than setup on a slow
+        # disk.  Keep the probe much longer than the budget.
+        result = self.run_cli(MIHOMO_SUBSCRIPTION_TIMEOUT_SECONDS='20', TX_SLOW_PROBE='45')
         self.assertTrue((self.directory / 'slow-probe').exists(), result.stderr)
         self.assertNotEqual(result.returncode, 0)
-        self.assertLess(time.monotonic() - started, 15)
+        self.assertLess(time.monotonic() - started, 45)
         self.assertEqual(yaml.safe_load(self.config.read_text())['proxies'], before['proxies'])
         self.assertEqual({p.name: p.read_bytes() for p in (self.directory / 'cache').iterdir()}, cache)
 

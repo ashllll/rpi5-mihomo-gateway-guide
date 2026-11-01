@@ -28,7 +28,7 @@ VLAN20 作用域不参与这套模式切换：`vlan-pilot.conf` 固定 `server=1
 | `198.51.100.1`（`vlan-pilot.conf` 的 `listen-address`、`dhcp-option`） | VLAN20 试点段的网关地址（也是 DHCP 下发的 router / DNS） | RFC 5737 TEST-NET-2 |
 | `198.51.100.100-198.51.100.199` | VLAN 试点 DHCP 池，保留 /24 掩码与 12h 租期 | 同上 |
 | `198.51.100.10` | 试点终端固定租约 | 同上 |
-| `<MAC-2>` | 试点终端的 MAC 固定租约（dash 记法，dnsmasq 两种记法都收） | RFC 7042 文档 MAC |
+| `00-00-5e-00-53-01` | 试点终端的 MAC 固定租约（dash 记法，dnsmasq 两种记法都收） | RFC 7042 文档 MAC |
 | `198.51.100.117`（`resolver.conf` 的 `host-record`）、`192.0.2.117`（`vlan-pilot.conf` 的 `host-record`） | 网关自身管理名地址，供 `gateway` / `gateway.lan` 解析 | RFC 5737 |
 | `gateway` / `gateway.lan` / `gateway.localdomain` | 网关主机名三连（`host-record` 优先于 `/etc/hosts` 127.0.1.1） | 通用占位 |
 

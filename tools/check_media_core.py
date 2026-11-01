@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import quote
@@ -76,8 +77,13 @@ def check_transition(address, provider, expected):
 def main():
     binary = os.environ.get('MIHOMO_TEST_BINARY')
     if not binary:
-        print('SKIP: set MIHOMO_TEST_BINARY to run the real-core hot-refresh check')
-        return 0
+        print(
+            'MISSING DEPENDENCY: MIHOMO_TEST_BINARY is required for the real-core '
+            'hot-refresh check; run scripts/preflight.sh --profile core in the CI '
+            'core-build job (or set it to a built mihomo binary)',
+            file=sys.stderr,
+        )
+        return 2
     binary_path = Path(binary).resolve()
     if not binary_path.is_file() or not os.access(binary_path, os.X_OK):
         raise ValueError('MIHOMO_TEST_BINARY must name an executable file')

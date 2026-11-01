@@ -16,12 +16,14 @@ import time
 
 import yaml
 
+from _tempdirs import temp_root
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--broker', type=Path, default=Path(__file__).resolve().parents[1]
                         / 'automation/sbin/mihomo-measurement-budget')
-    parser.add_argument('--directory', type=Path, default=Path('/var/tmp'))
+    parser.add_argument('--directory', type=Path, default=Path(temp_root()))
     parser.add_argument('--concurrency', type=int, default=70)
     parser.add_argument('--entries', type=int, default=2400)
     parser.add_argument('--rpc-timeout', type=float, default=1)

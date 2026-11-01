@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run the subscription updater with real candidate generation and offline I/O."""
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import yaml
 from check_overlay import ALL_NODES, MANIFEST_OVERLAY, build_fixture, native_group_nodes
@@ -45,6 +47,16 @@ if name == 'curl':
             if os.environ.get('SUB_TEST_BREAK_POLICY'):
                 Path(os.environ['MIHOMO_CAPABILITIES']).write_text('{broken')
         print('500' if mode == 'health' and 'docker.io' in url else code, end='')
+elif name == 'dig':
+    domain = next((arg for arg in args if not arg.startswith(('+', '-', '@')) and arg not in ('A', 'IN')), 'probe.invalid')
+    if mode in {'dns-1053', 'dns-1053-wrong-fake'}:
+        fault()
+        if mode == 'dns-1053':
+            sys.exit(9)
+    fake = 'baidu' not in domain
+    address = '203.0.113.99' if fake and mode == 'dns-1053-wrong-fake' else ('198.18.0.1' if fake else '203.0.113.10')
+    print(';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1')
+    print('%s. 60 IN A %s' % (domain, address))
 elif name == 'systemctl':
     with (root / 'calls').open('a') as stream:
         stream.write(' '.join(args) + '\n')
@@ -77,7 +89,7 @@ elif name == 'install':
         else:
             cleaned.append(item)
     if '-d' in cleaned:
-        if mode == 'backup' and 'backups' in Path(cleaned[-1]).parts:
+        if mode == 'backup' and 'backups' in Path(cleaned[-1]).parts and Path(cleaned[-1]).name != 'backups':
             fault()
             sys.exit(1)
     else:
@@ -134,7 +146,7 @@ def check_case(mode):
                     proxy['server'] = 'old.example.invalid'
                 (root / 'cache' / download.name).write_text(yaml.safe_dump(old))
             entries.append(f'{source_id}|{download}|1\n')
-        for name in ('flock', 'curl', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy', 'mihomo-healthcheck'):
+        for name in ('flock', 'curl', 'dig', 'mihomo', 'systemctl', 'install', 'logger', 'sleep', 'find', 'xargs', 'mihomo-reconcile-policy', 'mihomo-healthcheck', 'gateway-backup'):
             command = root / 'bin' / name
             command.write_text(f'#!{sys.executable}\n' + STUB)
             command.chmod(0o755)
@@ -143,12 +155,21 @@ def check_case(mode):
                      'mihomo-download-quality'):
             command = root / 'bin' / name
             code = (REPO / 'automation/sbin' / name).read_text().split('\n', 1)[1]
+            prefix = ''
+            if name == 'mihomo-subscription-candidate':
+                prefix = ("import os,sys\n"
+                          "if os.environ.get('SUB_TEST_PREPARE_FAIL') and sys.argv[1:2] == ['prepare']:\n"
+                          "    Path(os.environ['SUB_TEST_ROOT']).joinpath('fault').touch()\n"
+                          "    print('prepare failed by test', file=sys.stderr); sys.exit(1)\n")
+            if prefix:
+                code = code.replace('import yaml\n', 'import yaml\n' + prefix, 1)
             command.write_text(f'#!{sys.executable}\n' + code)
             command.chmod(0o755)
         environment = dict(os.environ, PATH=f"{root / 'bin'}{os.pathsep}{os.environ['PATH']}",
                            MIHOMO_CAPABILITIES=str(capabilities), MIHOMO_ROUTE_DEFAULTS=str(route_defaults),
                            SUB_TEST_ROOT=str(root),
                            SUB_TEST_MODE=('health' if mode == 'revoke-invalid-policy' else mode.removeprefix('revoke-')),
+                           SUB_TEST_PREPARE_FAIL=('1' if mode == 'prepare-fail' else ''),
                            SUB_TEST_INSTALL=shutil.which('install'), PYTHONDONTWRITEBYTECODE='1')
         if mode.startswith('revoke-'):
             # Policy rollback must be exercised after atomic apply. Plain
@@ -186,6 +207,23 @@ def check_case(mode):
         subprocess.run([str(root / 'bin/mihomo-policy-overlay'), str(current), str(expected_rollback)],
                        env=environment, check=True, capture_output=True)
         cache_before = {p.name: p.read_bytes() for p in (root / 'cache').iterdir()}
+        if mode == 'recover-only':
+            # Simulate a crash after the config was replaced but before acceptance:
+            # a pending transaction must be consumed without fetching anything.
+            backup = root / 'backups/crash-1'
+            backup.mkdir(parents=True)
+            shutil.copyfile(current, backup / 'config.yaml')
+            for name in ('cache-before', 'cache-after'):
+                shutil.copytree(root / 'cache', backup / name)
+            baseline = current.read_bytes()
+            candidate = yaml.safe_load(baseline)
+            candidate['log-level'] = 'warning'
+            candidate_bytes = yaml.safe_dump(candidate).encode()
+            current.write_bytes(candidate_bytes)
+            digest = lambda data: hashlib.sha256(data).hexdigest()
+            (root / 'backups/transaction.pending').write_text(
+                f"prepared|{backup}|{digest(baseline)}|{digest(candidate_bytes)}|"
+                f"{backup / 'cache-before'}|{backup / 'cache-after'}|\n")
         script = SOURCE
         for old, new in (('/etc/mihomo-automation.env', str(root / 'absent.env')), ('/etc/mihomo', str(root / 'etc')),
                          ('/var/lib/mihomo-extra-subscriptions', str(root / 'cache')),
@@ -194,11 +232,15 @@ def check_case(mode):
             script = script.replace(old, new)
         updater = root / 'update.sh'
         updater.write_text(script.replace('\n', '\nexport SUB_TEST_UPDATER_PID=$$\n', 1))
-        result = subprocess.run(['sh', str(updater), *(['--force'] if mode in {'force', 'manual-force'} else [])],
+        arguments = {'force': ['--force'], 'manual-force': ['--force'],
+                     'recover-only': ['--recover-only'], 'due-only': ['--due-only']}.get(mode, [])
+        result = subprocess.run(['sh', str(updater), *arguments],
                                 env=environment, capture_output=True, text=True, timeout=45)
-        success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked', 'manual', 'manual-force'}
+        success = mode in {'success', 'cached', 'retained', 'unchanged', 'force', 'locked',
+                           'manual', 'manual-force', 'recover-only', 'due-only'}
         assert (result.returncode == 0) == success, (mode, result.stderr)
-        rolled_back = mode in {'installed-validation', 'reload', 'inactive', 'health'} or mode.startswith('revoke-')
+        rolled_back = mode in {'installed-validation', 'reload', 'inactive', 'health',
+                               'dns-1053', 'dns-1053-wrong-fake', 'recover-only'} or mode.startswith('revoke-')
         if rolled_back and mode != 'revoke-invalid-policy':
             assert yaml.safe_load(current.read_text()) == yaml.safe_load(expected_rollback.read_text()), (mode, 'rollback ignored current policy')
         elif (not success and mode != 'rollback' and mode != 'revoke-invalid-policy') or mode in {'unchanged', 'locked'}:
@@ -237,12 +279,54 @@ def check_case(mode):
             if mode == 'revoke-invalid-policy':
                 assert calls.count('restart mihomo') == 1, calls
 
+        # F-05: success schedules the full interval, a hard failure schedules a
+        # minute-level retry and leaves a structured reason naming the step.
+        next_update = root / 'backups/next-update'
+        failure_state = root / 'backups/last-failure'
+        now = int(time.time())
+        if success and mode not in {'locked', 'recover-only'}:
+            assert next_update.exists(), (mode, 'success left no next attempt')
+            delay = int(next_update.read_text().strip()) - now
+            expected = 21600 if mode == 'retained' else 172800
+            assert expected - 180 <= delay <= expected + 180, (mode, delay)
+            assert not failure_state.exists(), (mode, 'success left a failure record')
+        if not success:
+            assert failure_state.exists(), (mode, 'hard failure left no structured reason')
+            fields = dict(token.split('=', 1) for token in failure_state.read_text().split() if '=' in token)
+            assert fields.get('step') and fields.get('rc'), (mode, fields)
+            delay = int(next_update.read_text().strip()) - now
+            assert 540 <= delay <= 780, (mode, delay)
+        if mode == 'prepare-fail':
+            fields = dict(token.split('=', 1) for token in failure_state.read_text().split() if '=' in token)
+            assert fields.get('step') == 'prepare' and fields.get('rc') == '1', fields
+        if mode == 'recover-only':
+            assert not (root / 'backups/transaction.pending').exists(), 'recovery did not clear the pending record'
+            assert not (root / 'downloads-requested').exists(), 'recovery fetched a new subscription'
+            assert 'restart mihomo' in calls, calls
+            assert not failure_state.exists(), 'recovery recorded a failure'
+        if mode == 'due-only':
+            # The timer tick honours the schedule; a manual invocation does not.
+            scheduled = next_update.read_text()
+            requested_before = (root / 'downloads-requested').read_text().splitlines()
+            tick = subprocess.run(['sh', str(updater), '--due-only'], env=environment,
+                                  capture_output=True, text=True, timeout=45)
+            assert tick.returncode == 0, (mode, tick.stderr)
+            assert next_update.read_text() == scheduled, 'a not-due tick moved the schedule'
+            assert (root / 'downloads-requested').read_text().splitlines() == requested_before, \
+                'a not-due tick fetched the subscription'
+            manual = subprocess.run(['sh', str(updater)], env=environment,
+                                    capture_output=True, text=True, timeout=45)
+            assert manual.returncode == 0, (mode, manual.stderr)
+            assert (root / 'downloads-requested').read_text().splitlines() != requested_before, \
+                'a manual run did not override the schedule'
+
 
 if __name__ == '__main__':
     cases = ('success', 'cached', 'retained', 'no-cache', 'validation', 'backup', 'write', 'signal',
              'installed-validation', 'reload', 'inactive', 'health', 'rollback', 'unchanged', 'force', 'locked',
              'revoke-health', 'revoke-reload', 'revoke-write', 'revoke-signal', 'revoke-invalid-policy',
-             'manual', 'manual-force', 'manual-no-cache')
+             'manual', 'manual-force', 'manual-no-cache', 'dns-1053', 'dns-1053-wrong-fake',
+             'prepare-fail', 'recover-only', 'due-only')
     failures = []
     for case in cases:
         try:

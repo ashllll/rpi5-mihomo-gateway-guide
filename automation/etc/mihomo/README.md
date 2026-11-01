@@ -53,7 +53,7 @@
   全部走环回，核心按 `bind-address: "*"` 监听。上游 VLAN1 与 VLAN20 客户端各用
   `198.51.100.0/24`、`203.0.113.0/24` 占位；真机值属于部署数据，不发布。复用时替换
   这三个键：`bind-address`、`lan-allowed-ips`、`external-controller`。
-- `tun.route-exclude-address` 的 `192.0.2.4/16` 是占位超网，真机排除的是它自己的上游 LAN /16。
+- `tun.route-exclude-address` 的 `10.77.0.0/16` 是占位超网，真机排除的是它自己的上游 LAN /16。
 - `sniffer.skip-src-address` 由部署端 WireGuard 对端地址计算，骨架不发布该列表，真机配置里存在。
 - `dns.nameserver` 里的 `#Default Proxy` 指向生成器创建的策略组，所以本地段只能在组已存在的配置上叠加。
 
@@ -77,7 +77,7 @@
 
 `measurement-<16hex>` 内联 provider 由 `configure_measurement` 生成，不是本地段的一部分；它们与
 `/var/lib/mihomo-measurements/quality-budget.json` 的账户额度配套，准入逻辑和 systemd 接线见
-[`core/README.md`](../../core/README.md#预算外壳接线)。`unified-delay: false` 必须保留：
+[`core/README.md`](../../../core/README.md#预算外壳接线)。`unified-delay: false` 必须保留：
 开启后一次检测会打两次 HEAD，预算按两次预扣，且真机策略依赖单次语义。
 
 ## 安装

@@ -2,11 +2,19 @@
 
 set -eu
 
+# Stopping mosdns while dnsmasq still points at it takes the whole LAN down.
+# Serialize with every other mosdns change and switch DNS to direct first.
+exec 8>/run/lock/mihomo-maintenance.lock
+if ! flock -n 8; then
+  echo "mosdns-emergency-direct: maintenance is busy; retry after the current change" >&2
+  exit 1
+fi
+
+/usr/local/sbin/mihomo-dns-mode direct
 systemctl disable --now \
   mosdns-healthcheck.timer \
   mosdns-rules-update.timer \
   mosdns-binary-update.timer \
   mosdns.service || true
-/usr/local/sbin/mihomo-dns-mode direct
 
 echo "Emergency direct DNS mode is active."

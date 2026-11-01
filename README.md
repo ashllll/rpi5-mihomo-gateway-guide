@@ -10,7 +10,7 @@
 <a href="#30-秒看懂">30 秒看懂</a> ·
 <a href="#安全网失败时谁兜底">安全网</a> ·
 <a href="#一次连接怎么走">数据面</a> ·
-<a href="#单元14-个-enabled3-个休眠">单元表</a> ·
+<a href="#单元15-个-enabled3-个休眠">单元表</a> ·
 <a href="#装成这台机器">安装</a> ·
 <a href="#边界">边界</a> ·
 <a href="docs/README.md">文档索引</a>
@@ -51,7 +51,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 `ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
 [`assets/network-topology.svg`](assets/network-topology.svg)，结构说明见[架构文档](docs/architecture.zh-CN.md)。
 
-## 单元：14 个 enabled、3 个休眠
+## 单元：15 个 enabled、3 个休眠
 
 | 单元 | 作用 | 周期 |
 |---|---|---|
@@ -59,7 +59,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo-measurement-budget.service` | 预算准入 broker：建 socket；账本在首次预扣时创建 | 常驻 |
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
 | `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
-| `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 10 分钟，任务结束后每 48 小时 |
+| `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 |
 | `mihomo-media-guard.timer` | 对 Social / Streaming 做有界媒体采样；仅合格节点进入原生 fallback，默认策略关闭 | 每分钟唤醒，采样间隔由策略控制 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
@@ -69,10 +69,10 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `dnsmasq.service` | 环回 resolver（`/etc/dnsmasq.d/resolver.conf`，`127.0.0.1:53`）；启动前写入直连上游基线；崩溃自动重启 | 常驻 |
 | `dnsmasq-vlan-pilot.service` | `proxy20` 试点 DHCP + DNS（租约 12 小时） | 常驻 |
 | `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 Home Assistant UI | 开机一次 |
+| `rp5-agent.service` | `0.0.0.0:8799` 只读状态（`/health` 公开；状态端点要求 Bearer token），供 T-Display-S3 监视器 | 常驻 |
 
-本机另有 1 个非发布层单元处于 enabled：`rp5-agent.service`（`0.0.0.0:8799` 只读状态，供
-T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 已移除对已退休 iKuai 的
-`ikuai-wan-watch.service`）。
+15 个 enabled 单元是 7 个 service + 8 个 timer；`nftables.service` 来自发行版，仓库只提供它的
+`ExecStop` drop-in。2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`。
 
 其余 worker（`mihomo-healthcheck.service`、`mihomo-watch.service`、`mihomo-alert@.service`、
 `mihomo-download-quality.service` 等）是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起。
@@ -102,11 +102,11 @@ T-Display-S3 监视器），属于这台机器的本地附加物（2026-10-26 �
 # 1. 网络身份（手工一次性）：wan0 DHCP（VLAN1）、proxy20 = 同一根线上的 802.1Q VLAN 20、
 #    wg-quick@wg-ucg-pilot，及 /etc/sysctl.d/99-router.conf
 sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有地址（TUN 由核心创建）
-# 2. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
-sudo nft -c -f /etc/nftables.conf
-# 3. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架
+# 2. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架（同时播种 /etc/nftables.conf）
 sudo automation/install.sh --dry-run
-sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 14 个单元
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 15 个单元
+# 3. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
+sudo nft -c -f /etc/nftables.conf
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30
 sudo cat /run/mihomo-healthcheck/status
@@ -120,8 +120,8 @@ sudo cat /run/mihomo-healthcheck/status
 
 | 范围 | 文件 | 状态 |
 | --- | --- | --- |
-| 机制实现 | `automation/sbin/*`（22 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
-| 单元与 drop-in | `automation/systemd/**`（32 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
+| 机制实现 | `automation/sbin/*`（30 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
+| 单元与 drop-in | `automation/systemd/**`（41 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
 | 数据与解析 | `automation/etc/mosdns/**`、`automation/etc/dnsmasq-upstreams.*`、`automation/policy/route-defaults.yaml`、NetworkManager dispatcher | **逐字节一致** |
 | 脱敏模板 | `automation/etc/dnsmasq/{resolver.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实地址，**按设计不同** |
 | 站点态 | `automation/policy/capabilities.yaml`、`automation/etc/mihomo/config.local.yaml` | 账号、开关与私有覆写只在真机 `/etc/mihomo/adaptive/` 与合并后的 `config.yaml` 里 |
@@ -150,7 +150,7 @@ sudo cat /run/mihomo-healthcheck/status
 
 入站模型：`lo` 与 established 之外，`wan0`/`wlan0` 只收上游 LAN 的 SSH 与 `8799`，
 VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理靠 `ip rule 9000` 与
-`redirect` 工作，不再依赖整口信任。公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`，
+`redirect` 工作，不再依赖整口信任。公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`（`/health` 之外的状态端点要求 Bearer token），
 详见 [SECURITY.md](SECURITY.md)。
 本仓库不发布订阅地址、节点标签、controller secret、WireGuard 私钥与真实 MAC。
 
@@ -158,25 +158,32 @@ VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理�
 
 
 ```sh
-python3 tools/validate_public.py
-python3 tools/check_automation.py        # 脚本/单元/env 示例与安装器的一致性
-python3 tools/check_dnsmasq_guard.py     # 解析自愈的分层判定、预算与告警去重
-python3 tools/check_mihomo_policy.py     # 生成的每个组都带健康探测，间隔不超上限
-python3 tools/check_publication_privacy.py
+scripts/preflight.sh          # 唯一入口：全量门（含发布包与公开树扫描）
+scripts/preflight.sh --list   # 只看本轮会跑哪些检查
 ```
 
-一次跑完全部检查用 `scripts/preflight.sh`（`--staged` 为 2 秒快档，全量实测约 35 分钟）；
-既有失败登记在 `scripts/preflight-baseline.txt`，负载敏感项登记在 `scripts/preflight-advisory.txt`。
+一次跑完全部检查用 `scripts/preflight.sh`。这是本地唯一入口，CI 也调用同一个脚本：
+
+- 默认 = 全量：自动发现全部 `tools/check_*.py`，加上 `automation/check-release.py` 与
+  `tools/validate_public.py`；含订阅更新，通常 20–40 分钟。
+- `--staged` = 按暂存改动映射必跑检查（pre-commit）；没有暂存内容时回落到全量（pre-push）。
+- `--profile core` = 真核二进制专属检查，在 CI 的 `core-build` 作业里跑。
+- `--list` 打印本轮计划；`--no-cache` 忽略全量通过缓存。
+
+检查清单与「改动→必跑检查」映射只有一个来源：`tools/verification-matrix.yaml`。新增
+`tools/check_*.py` 会自动进入本地全量与 CI；没有映射的路径回落全量。`scripts/preflight-baseline.txt`
+与 `scripts/preflight-advisory.txt` 默认必须为空；非空条目必须写成 `名字 YYYY-MM-DD 原因`，过期即红。
+检查以 `exit 77` 声明 SKIP：SKIP 会在汇总里显式打印并使门变红，不算通过。
 
 生产配置改动只走设备上的 `/usr/local/sbin/mihomo-config-install`（源：`ops/mihomo-config-install`）：
-先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer，备份后才写入并 reload，失败自动回滚。
+先 `mihomo -t` 校验候选，打印 diff 与可改写该文件的进程和 timer；备份以 0600 fsync 后，用「同目录临时文件 → fsync → rename → fsync 目录」原子替换 live；reload/restart 后要求 `GET /version` 返回 200 且带 `version`（Bearer secret 从 live config 或环境读取，不进日志与 argv）；任一步失败用同一原子写还原备份并再验 API，还原也失败时以非 0 退出并打印 `ROLLBACK FAILED: 原因`。
 
 ## 主仓库与 CI
 
-主仓库是飞牛 NAS 上的 Gitea（`http://192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide`），GitHub 仓库由 Gitea 的推送镜像同步。
+主仓库是内网 Gitea；它的地址与账号只存在于部署环境，不写入公开树。GitHub 仓库由 Gitea 的推送镜像同步。
 
-- 推送进 Gitea 后，`.gitea/workflows/gates.yml` 在 NAS 的 act_runner 上跑全量 `scripts/preflight.sh`；CI 绿了才算这次提交通过。
-- 本机 `pre-push` 只跑 `scripts/preflight.sh --staged`（秒级）与影响面确认，不再跑 35 分钟全量；需要本机全量时用 `PUSH_FULL_GATE=1 git push`。
-- 作业镜像 `gitea-gate:bookworm` 需要 `git/python3/PyYAML/jq/util-linux`（检查脚本依赖 jq 与 flock），定义在 NAS 的 `/vol3/gitea/gate.Dockerfile`。
+- 推送进 Gitea 的受信分支后，`.gitea/workflows/gates.yml` 在 act_runner 上跑全量 `scripts/preflight.sh`；CI 绿了才算这次提交通过。token 通过 `http.extraheader` 传递，不进入 URL 或 `.git/config`；PR 事件不在自托管 runner 上执行 PR 代码。
+- 本机 `pre-push` 通过 `scripts/preflight.sh --staged` 执行同一映射；没有暂存内容时回落到全量。需要显式全量时用 `PUSH_FULL_GATE=1 git push`。
+- 作业镜像 `gitea-gate:bookworm` 需要 `git/python3/PyYAML/jq/util-linux/dnsutils`（检查脚本依赖 jq、flock 与 dig），定义在 NAS 的部署目录，不进公开树。
 
 [CC0 1.0 Universal](LICENSE) · 第三方产品名与商标归各自权利人所有。

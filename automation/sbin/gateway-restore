@@ -1,0 +1,709 @@
+#!/usr/bin/env python3
+"""Restore a whole-machine rollback point produced by gateway-backup.
+
+The consumer is deliberately conservative:
+
+* it takes the gateway maintenance lock and refuses while any install,
+  subscription, MosDNS binary/rules or core-swap transaction is pending - a
+  half-applied state must be recovered by its owner first;
+* it accepts only ``/var/backups/gateway-rollout-*.tar.gz`` and validates the
+  embedded manifest before touching a file: format, release_id, member list,
+  mode, size and sha256 of every entry, path safety, and the six categories;
+* it refuses a point whose manifest says it was taken while a transaction was
+  pending, unless the operator explicitly asks for a cross-release restore;
+* a point whose release_id differs from the installed release is refused by
+  default (exit 3): a rollback point may not silently overwrite a newer
+  release.  ``--allow-cross-release`` is the explicit operator override for
+  undoing an install;
+* ``--dry-run`` lists every file, mode, symlink, pruned file and unit state
+  that would change and touches nothing;
+* a restore with no differences prints the Chinese no-op notice and exits 0;
+* applying is atomic per file (same-directory temp + fsync + rename + fsync of
+  the directory); secrets are never stored in the archive, so the status-agent
+  token is regenerated (mode 0600, umask 077) and rp5-agent.service restarted;
+* after applying, the six categories are verified with the same tools the
+  gateway uses: ``mihomo -t``, a throwaway MosDNS instance on rewritten ports
+  (mosdns v5 has no config-only ``-test`` switch), ``dnsmasq --test``,
+  ``nft -c`` and an exact comparison of the enabled/disabled unit set.
+
+Usage:
+    gateway-restore <archive> [--dry-run] [--allow-cross-release]
+
+Exit codes: 0 restored or nothing to do, 1 refused/failed, 2 usage,
+3 cross-release refused.
+"""
+import argparse
+import fcntl
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import secrets as tokenlib
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+FORMAT = 1
+KIND = "gateway-rollout"
+MANIFEST_NAME = "gateway-rollout.json"
+BACKUP_DIR = "var/backups"
+INSTALLED_MANIFEST = "var/lib/mihomo-automation/installed-manifest.json"
+MAINTENANCE_LOCK = "run/lock/mihomo-maintenance.lock"
+CORE_SWAP_STATE = "var/lib/mihomo-swap/state.json"
+MIHOMO = "/usr/local/bin/mihomo"
+MOSDNS = "/usr/local/bin/mosdns"
+DNSMASQ = "/usr/sbin/dnsmasq"
+NFT = "/usr/sbin/nft"
+SYSTEMCTL = "/usr/bin/systemctl"
+TOKEN_PATH = "etc/mihomo/secrets/rp5-agent.token"
+SECRETS_DIR = "etc/mihomo/secrets"
+SECRET_MODE = 0o600
+NO_OP = "\u65e0\u9700\u6062\u590d"
+CROSS_RELEASE = "\u62d2\u7edd\u8de8\u7248\u672c\u6062\u590d"
+
+PENDING_PATHS = (
+    "var/lib/mihomo-automation/.install-pending",
+    "var/lib/mihomo-subscription-backups/transaction.pending",
+    "etc/mosdns/backups/transaction.pending",
+    "etc/mosdns/rules/pending",
+)
+
+ALLOWED_PREFIXES = (
+    "etc/mihomo/",
+    "etc/mosdns/",
+    "etc/dnsmasq-upstreams.conf",
+    "etc/dnsmasq.d/",
+    "etc/dnsmasq-vlan-pilot.conf",
+    "etc/nftables.conf",
+    "etc/nftables.d/",
+    "etc/systemd/system/",
+    "usr/local/sbin/rp5-agent.py",
+)
+UNIT_PREFIXES = ("mihomo", "mosdns", "dnsmasq", "rp5-agent", "homeassistant", "nftables")
+UNIT_STATES = {"enabled", "enabled-runtime", "disabled", "static", "masked",
+               "generated", "indirect", "transient", "not-found", "unknown"}
+
+
+class Refused(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+def gateway_root():
+    value = os.environ.get("GATEWAY_ROOT", "/")
+    if value in ("", "/"):
+        return ""
+    if not value.startswith("/"):
+        raise Refused("invalid GATEWAY_ROOT: %s" % value)
+    return value.rstrip("/")
+
+
+def rooted(root, relative):
+    return os.path.join(root, relative) if root else "/" + relative
+
+
+def safe_relative(name):
+    if not name or name.startswith("/") or "\\" in name:
+        return False
+    parts = name.split("/")
+    return all(part not in ("", ".", "..") for part in parts)
+
+
+def allowed_path(path):
+    if path.startswith(SECRETS_DIR + "/"):
+        return False
+    return any(path == prefix or path.startswith(prefix) for prefix in ALLOWED_PREFIXES)
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def acquire_lock(root):
+    path = rooted(root, MAINTENANCE_LOCK)
+    os.makedirs(os.path.dirname(path) or ".", mode=0o755, exist_ok=True)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        raise Refused("maintenance is busy; refusing to restore")
+    return descriptor
+
+
+def pending_markers(root):
+    found = []
+    for relative in PENDING_PATHS:
+        if os.path.lexists(rooted(root, relative)):
+            found.append(relative)
+    state_path = rooted(root, CORE_SWAP_STATE)
+    try:
+        with open(state_path, "r", encoding="utf-8") as handle:
+            state = json.load(handle)
+        if isinstance(state, dict) and state.get("phase") == "swapping":
+            found.append(CORE_SWAP_STATE + " (phase=swapping)")
+    except (OSError, ValueError):
+        pass
+    return found
+
+
+def current_release(root):
+    path = rooted(root, INSTALLED_MANIFEST)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise Refused("cannot determine the installed release from %s: %s" % (path, error))
+    release = payload.get("release_id") if isinstance(payload, dict) else None
+    if not isinstance(release, str) or not re.fullmatch(r"[0-9a-f]{64}", release):
+        raise Refused("installed manifest has no valid release_id")
+    return release
+
+
+def archive_path(root, argument):
+    if not os.path.isabs(argument):
+        raise Refused("archive must be an absolute path")
+    expected = rooted(root, BACKUP_DIR) + "/"
+    if not argument.startswith(expected):
+        raise Refused("archive must live under %s" % expected)
+    name = os.path.basename(argument)
+    if not re.fullmatch(r"gateway-rollout-\d{8}T\d{6}Z-[0-9a-f]{12}\.tar\.gz", name):
+        raise Refused("archive name does not match gateway-rollout-<time>-<release>.tar.gz")
+    if os.path.islink(argument) or not os.path.isfile(argument):
+        raise Refused("archive is not a regular file: %s" % argument)
+    return argument
+
+
+def normalize_path(name):
+    if name == MANIFEST_NAME:
+        return name
+    if not safe_relative(name):
+        raise Refused("unsafe archive member: %r" % name)
+    if not allowed_path(name):
+        raise Refused("archive member outside the managed surface: %s" % name)
+    return name
+
+
+def read_archive(path):
+    try:
+        archive = tarfile.open(path, "r:gz")
+    except (OSError, tarfile.TarError) as error:
+        raise Refused("cannot read archive: %s" % error)
+    members = {}
+    contents = {}
+    links = {}
+    manifest_bytes = None
+    try:
+        for member in archive.getmembers():
+            name = member.name
+            if name == MANIFEST_NAME:
+                if not member.isfile():
+                    raise Refused("the manifest is not a regular file")
+                handle = archive.extractfile(member)
+                manifest_bytes = handle.read() if handle else b""
+                continue
+            normalize_path(name)
+            if name in members:
+                raise Refused("duplicate archive member: %s" % name)
+            if member.issym():
+                links[name] = member.linkname
+            elif member.isfile():
+                handle = archive.extractfile(member)
+                if handle is None:
+                    raise Refused("cannot read archive member: %s" % name)
+                contents[name] = handle.read()
+            else:
+                raise Refused("unsupported archive member type: %s" % name)
+            members[name] = member
+        if manifest_bytes is None:
+            raise Refused("archive has no %s" % MANIFEST_NAME)
+        try:
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise Refused("manifest is not valid JSON: %s" % error)
+        return archive, manifest, members, contents, links
+    except BaseException:
+        archive.close()
+        raise
+
+
+def validate_manifest(root, manifest, members, contents, links):
+    if manifest.get("format") != FORMAT or manifest.get("kind") != KIND:
+        raise Refused("not a gateway-rollout manifest")
+    release = manifest.get("release_id")
+    if not isinstance(release, str) or not re.fullmatch(r"[0-9a-f]{64}", release):
+        raise Refused("manifest has no valid release_id")
+    pending = manifest.get("pending_at_generation") or []
+    if pending:
+        raise Refused("the point was taken while a transaction was pending (%s); "
+                      "recover that transaction first" % ", ".join(map(str, pending)))
+    categories = manifest.get("categories")
+    if not isinstance(categories, dict) or set(categories) != {
+            "mihomo-config", "mosdns-rules", "dnsmasq-upstreams",
+            "nftables", "secrets", "units"}:
+        raise Refused("manifest does not describe the six required categories")
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise Refused("manifest files must be a list")
+    listed = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            raise Refused("malformed file entry in manifest")
+        path = normalize_path(entry.get("path", ""))
+        if path in listed:
+            raise Refused("duplicate manifest entry: %s" % path)
+        listed.add(path)
+        if entry.get("type") == "symlink":
+            if path not in links:
+                raise Refused("manifest entry is not a symlink in the archive: %s" % path)
+            target = entry.get("target")
+            if not isinstance(target, str) or not re.fullmatch(r"releases/[A-Za-z0-9._-]+", target):
+                raise Refused("unsafe symlink target for %s" % path)
+            if target != links[path]:
+                raise Refused("symlink target mismatch for %s" % path)
+            prefix = "etc/mosdns/rules/" + target + "/"
+            if not any(item["path"].startswith(prefix) for item in files):
+                raise Refused("symlink %s points at a release the archive does not carry" % path)
+        elif entry.get("type") == "file":
+            if path not in contents:
+                raise Refused("manifest entry missing from archive: %s" % path)
+            data = contents[path]
+            if entry.get("size") != len(data):
+                raise Refused("size mismatch for %s" % path)
+            if entry.get("sha256") != sha256(data):
+                raise Refused("sha256 mismatch for %s" % path)
+            mode = entry.get("mode")
+            if not isinstance(mode, str) or not re.fullmatch(r"0[0-7]{3}", mode):
+                raise Refused("mode is not a four-digit octal string for %s" % path)
+        else:
+            raise Refused("unknown entry type for %s" % path)
+    extra = (set(contents) | set(links)) - listed
+    if extra:
+        raise Refused("archive carries files the manifest does not list: %s"
+                      % ", ".join(sorted(extra)))
+    secrets = manifest.get("secrets")
+    if not isinstance(secrets, list):
+        raise Refused("manifest secrets must be a list")
+    for entry in secrets:
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            raise Refused("malformed secret metadata")
+        secret_path = entry["path"]
+        if not (secret_path.startswith(SECRETS_DIR + "/")
+                or secret_path in ("etc/mihomo-automation.env", "etc/mihomo-alert.env")):
+            raise Refused("secret metadata outside the managed surface: %s" % secret_path)
+        if "sha256" in entry or "value" in entry or "content" in entry:
+            raise Refused("secret metadata must not contain content or hashes")
+    units = manifest.get("units")
+    if not isinstance(units, list):
+        raise Refused("manifest units must be a list")
+    for entry in units:
+        if not isinstance(entry, dict):
+            raise Refused("malformed unit entry")
+        unit = entry.get("unit")
+        if not isinstance(unit, str) or not re.fullmatch(r"[A-Za-z0-9@._-]+", unit):
+            raise Refused("invalid unit name in manifest")
+        if not unit.startswith(UNIT_PREFIXES):
+            raise Refused("unit outside the managed surface: %s" % unit)
+    return release
+
+
+def file_state(root, relative):
+    path = rooted(root, relative)
+    if os.path.islink(path):
+        return ("symlink", os.readlink(path), None)
+    if not os.path.isfile(path):
+        return ("missing", None, None)
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read()
+        mode = os.stat(path).st_mode & 0o777
+    except OSError:
+        return ("missing", None, None)
+    return ("file", sha256(data), mode)
+
+
+def unit_state(unit):
+    try:
+        result = subprocess.run([SYSTEMCTL, "is-enabled", unit],
+                                capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    text = (result.stdout or "").strip().splitlines()
+    value = text[0].strip() if text else ""
+    if value in UNIT_STATES:
+        return value
+    if "not-found" in (result.stderr or "").lower():
+        return "not-found"
+    if result.returncode == 0:
+        return "enabled"
+    return "unknown"
+
+
+def collect_diffs(root, manifest):
+    diffs = []
+    for entry in manifest["files"]:
+        path = entry["path"]
+        current = file_state(root, path)
+        if entry["type"] == "symlink":
+            if current[0] != "symlink":
+                diffs.append(("file", path, "symlink is missing or replaced"))
+            elif current[1] != entry["target"]:
+                diffs.append(("symlink", path, "%s -> %s" % (current[1], entry["target"])))
+            continue
+        if current[0] == "missing":
+            diffs.append(("file", path, "missing"))
+        elif current[0] != "file":
+            diffs.append(("file", path, "not a regular file"))
+        elif current[1] != entry["sha256"]:
+            diffs.append(("file", path, "content differs"))
+        elif current[2] != int(entry["mode"], 8):
+            diffs.append(("mode", path, "%04o -> %s" % (current[2], entry["mode"])))
+    listed = {entry["path"] for entry in manifest["files"]}
+    for rule in manifest.get("prune") or []:
+        directory = rule.get("dir")
+        patterns = rule.get("patterns") or []
+        if not isinstance(directory, str) or not safe_relative(directory):
+            continue
+        base = rooted(root, directory)
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            continue
+        for name in names:
+            path = directory + "/" + name
+            if path in listed:
+                continue
+            if not os.path.isfile(rooted(root, path)) or os.path.islink(rooted(root, path)):
+                continue
+            if any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+                diffs.append(("extra", path, "not part of the rollback point"))
+    for entry in manifest["units"]:
+        desired = entry.get("state")
+        if desired not in ("enabled", "disabled"):
+            continue
+        actual = unit_state(entry["unit"])
+        if actual != desired:
+            diffs.append(("unit", entry["unit"], "%s -> %s" % (actual, desired)))
+    for entry in manifest["secrets"]:
+        path = entry["path"]
+        if os.path.isfile(rooted(root, path)) and not os.path.islink(rooted(root, path)):
+            mode = os.stat(rooted(root, path)).st_mode & 0o777
+            if mode != SECRET_MODE:
+                diffs.append(("secret-mode", path, "%04o -> 0600" % mode))
+    if token_required(manifest):
+        path = rooted(root, TOKEN_PATH)
+        if not os.path.isfile(path) or mode_of(path) != SECRET_MODE or os.path.getsize(path) < 16:
+            diffs.append(("token", TOKEN_PATH, "will be regenerated and rp5-agent restarted"))
+    return diffs
+
+
+def mode_of(path):
+    try:
+        return os.stat(path).st_mode & 0o777
+    except OSError:
+        return None
+
+
+def token_required(manifest):
+    if any(entry["path"] == TOKEN_PATH for entry in manifest["secrets"]):
+        return True
+    return any(entry["path"] == "usr/local/sbin/rp5-agent.py" for entry in manifest["files"])
+
+
+def print_diff(diffs):
+    for kind, path, detail in diffs:
+        print("gateway-restore: would %-11s %s (%s)" % (kind, path, detail))
+
+
+def atomic_write(path, data, mode):
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, mode=0o755, exist_ok=True)
+    descriptor, staging = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".tmp.",
+                                           dir=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(staging, mode)
+        os.replace(staging, path)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+
+
+def apply_files(root, manifest, contents, links, diffs):
+    planned = {(kind, path) for kind, path, _detail in diffs}
+    changed = 0
+    for entry in manifest["files"]:
+        path = entry["path"]
+        kind = "symlink" if entry["type"] == "symlink" else "file"
+        if (kind, path) not in planned and (("mode", path) not in planned):
+            continue
+        target = rooted(root, path)
+        if entry["type"] == "symlink":
+            os.makedirs(os.path.dirname(target) or ".", mode=0o755, exist_ok=True)
+            if os.path.islink(target) or os.path.isfile(target):
+                os.unlink(target)
+            elif os.path.isdir(target):
+                os.rmdir(target)
+            os.symlink(entry["target"], target)
+            os.chmod(os.path.dirname(target) or ".", 0o755)
+            changed += 1
+        else:
+            atomic_write(target, contents[path], int(entry["mode"], 8))
+            changed += 1
+    for kind, path, _detail in diffs:
+        if kind == "extra":
+            try:
+                os.unlink(rooted(root, path))
+                changed += 1
+            except OSError as error:
+                raise Refused("cannot remove %s: %s" % (path, error))
+        elif kind == "secret-mode":
+            try:
+                os.chmod(rooted(root, path), SECRET_MODE)
+                changed += 1
+            except OSError as error:
+                raise Refused("cannot set secret mode on %s: %s" % (path, error))
+    return changed
+
+
+def regenerate_token(root):
+    directory = rooted(root, SECRETS_DIR)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    token = tokenlib.token_urlsafe(32)
+    atomic_write(rooted(root, TOKEN_PATH), token.encode("ascii"), SECRET_MODE)
+    return len(token)
+
+
+def run_systemctl(*args, check=True):
+    try:
+        result = subprocess.run([SYSTEMCTL, *args], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as error:
+        if check:
+            raise Refused("systemctl %s failed: %s" % (" ".join(args), error))
+        return 127, "", str(error)
+    if check and result.returncode != 0:
+        raise Refused("systemctl %s failed: %s" % (
+            " ".join(args), (result.stderr or result.stdout or "").strip()[-400:]))
+    return result.returncode, result.stdout or "", result.stderr or ""
+
+
+def apply_units(root, manifest):
+    changed = any(kind in ("file", "symlink") and path.startswith("etc/systemd/system/")
+                  for kind, path, _detail in manifest["_diffs"])
+    state_changes = [item for item in manifest["_diffs"] if item[0] == "unit"]
+    if not changed and not state_changes:
+        return 0
+    run_systemctl("daemon-reload")
+    count = 0
+    for entry in manifest["units"]:
+        desired = entry.get("state")
+        if desired not in ("enabled", "disabled"):
+            continue
+        actual = unit_state(entry["unit"])
+        if actual == desired:
+            continue
+        run_systemctl("enable" if desired == "enabled" else "disable", entry["unit"])
+        count += 1
+    return count
+
+
+def verify_units(manifest):
+    """Read the enabled set back after the validators: the point is only honoured
+    when every unit landed in the state it was taken in."""
+    for entry in manifest["units"]:
+        desired = entry.get("state")
+        if desired not in ("enabled", "disabled"):
+            continue
+        actual = unit_state(entry["unit"])
+        if actual != desired:
+            raise Refused("unit state verification failed: %s is %s, expected %s"
+                          % (entry["unit"], actual, desired))
+
+
+def verify_command(label, argv):
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Refused("verification failed: %s (%s)" % (label, error))
+    if result.returncode != 0:
+        detail = ((result.stderr or "") + (result.stdout or "")).strip()[-600:]
+        raise Refused("verification failed: %s%s" % (label, (": " + detail) if detail else ""))
+
+
+def free_port():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def verify_mosdns(root, config_path):
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as error:
+        raise Refused("verification failed: cannot read mosdns config: %s" % error)
+    has_api = re.search(r"127\.0\.0\.1:9091\b", text) is not None
+    text = text.replace("127.0.0.1:5335", "127.0.0.1:%d" % free_port())
+    api_port = None
+    if has_api:
+        api_port = free_port()
+        text = text.replace("127.0.0.1:9091", "127.0.0.1:%d" % api_port)
+    work = rooted(root, "var/tmp")
+    os.makedirs(work, mode=0o755, exist_ok=True)
+    test_dir = tempfile.mkdtemp(prefix="mosdns-restore.", dir=work)
+    test_config = os.path.join(test_dir, "config.yaml")
+    process = None
+    try:
+        with open(test_config, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        process = subprocess.Popen([MOSDNS, "start", "-c", test_config,
+                                    "-d", os.path.dirname(config_path)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                   text=True)
+        if api_port is None:
+            time.sleep(2)
+            if process.poll() is not None:
+                detail = (process.stderr.read() if process.stderr else "")[-600:]
+                raise Refused("verification failed: mosdns rejected the restored config"
+                              + (": " + detail if detail else ""))
+            return
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if process.poll() is not None:
+                detail = (process.stderr.read() if process.stderr else "")[-600:]
+                raise Refused("verification failed: mosdns rejected the restored config"
+                              + (": " + detail if detail else ""))
+            try:
+                with socket.create_connection(("127.0.0.1", api_port), 0.2):
+                    return
+            except OSError:
+                time.sleep(0.1)
+        raise Refused("verification failed: mosdns did not start listening in 20s")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        for name in os.listdir(test_dir):
+            try:
+                os.unlink(os.path.join(test_dir, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(test_dir)
+        except OSError:
+            pass
+
+
+def verify(root, manifest):
+    paths = {entry["path"] for entry in manifest["files"]}
+    if "etc/mihomo/config.yaml" in paths:
+        verify_command("mihomo -t", [MIHOMO, "-t", "-d", rooted(root, "etc/mihomo"),
+                                     "-f", rooted(root, "etc/mihomo/config.yaml")])
+    if "etc/mosdns/config.yaml" in paths:
+        verify_mosdns(root, rooted(root, "etc/mosdns/config.yaml"))
+    if "etc/dnsmasq-upstreams.conf" in paths:
+        verify_command("dnsmasq --test", [DNSMASQ, "--test"])
+    if "etc/nftables.conf" in paths:
+        verify_command("nft -c", [NFT, "-c", "-f", rooted(root, "etc/nftables.conf")])
+    verify_units(manifest)
+
+
+def restore(root, archive_argument, dry_run, allow_cross_release):
+    path = archive_path(root, archive_argument)
+    lock = acquire_lock(root)
+    try:
+        pending = pending_markers(root)
+        if pending:
+            raise Refused("pending transaction (%s); refusing to restore" % ", ".join(pending))
+        installed = current_release(root)
+        archive, manifest, members, contents, links = read_archive(path)
+        try:
+            release = validate_manifest(root, manifest, members, contents, links)
+            if release != installed:
+                if not allow_cross_release:
+                    raise Refused("%s: point is %s, installed release is %s; "
+                                  "pass --allow-cross-release only for a deliberate "
+                                  "install undo" % (CROSS_RELEASE, release[:12], installed[:12]), 3)
+                print("gateway-restore: warning: cross-release restore %s -> %s"
+                      % (installed[:12], release[:12]))
+            diffs = collect_diffs(root, manifest)
+            if not diffs:
+                print("gateway-restore: %s (release %s)" % (NO_OP, release[:12]))
+                return 0
+            if dry_run:
+                print_diff(diffs)
+                print("gateway-restore: dry-run: %d difference(s); nothing changed" % len(diffs))
+                return 0
+            print_diff(diffs)
+            manifest["_diffs"] = diffs
+            paths = {entry["path"] for entry in manifest["files"]}
+            changed = apply_files(root, manifest, contents, links, diffs)
+            units = apply_units(root, manifest)
+            token = regenerate_token(root) if token_required(manifest) else 0
+            if token and ("etc/systemd/system/rp5-agent.service" in paths
+                          or unit_state("rp5-agent.service") != "not-found"):
+                run_systemctl("restart", "rp5-agent.service")
+            verify(root, manifest)
+            if token:
+                print("gateway-restore: restored %d file(s), %d unit(s); "
+                      "rp5-agent token regenerated (%d chars) and service restarted"
+                      % (changed, units, token))
+            else:
+                print("gateway-restore: restored %d file(s), %d unit(s)" % (changed, units))
+            missing = [entry["path"] for entry in manifest["secrets"]
+                       if entry["path"] != TOKEN_PATH
+                       and not os.path.isfile(rooted(root, entry["path"]))]
+            for item in missing:
+                print("gateway-restore: warning: secret is not stored in the point and is "
+                      "missing now; restore it from the operator escrow: %s" % item)
+            return 0
+        finally:
+            archive.close()
+    finally:
+        os.close(lock)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("archive")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--allow-cross-release", action="store_true")
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    try:
+        root = gateway_root()
+        return restore(root, args.archive, args.dry_run, args.allow_cross_release)
+    except Refused as error:
+        print("gateway-restore: %s" % error, file=sys.stderr)
+        return error.code
+    except (OSError, ValueError, tarfile.TarError) as error:
+        print("gateway-restore: failed: %s" % error, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -12,13 +12,13 @@
 | 附加接口 | `wan0` 上的 802.1Q VLAN 20（`proxy20`）、WireGuard `wg-ucg-pilot` |
 | 网关地址 | `proxy20 192.168.20.1/24`、`wg-ucg-pilot 10.253.254.1/30`、Mihomo TUN `198.18.0.1/30` |
 | 上游 | `wan0` 由上游 DHCP 分配（本机 `.117`），SSH 与 8799 只对上联私网开放 |
-| 运行层 | 12 个 enabled 单元、4 个 disabled timer、6 个 `mihomo.service.d` drop-in |
+| 运行层 | 15 个 enabled 单元（7 个 service + 8 个 timer）、3 个 disabled timer、7 个 `mihomo.service.d` drop-in |
 
 ## 1. 基础包与 sysctl
 
 ```sh
 sudo apt update
-sudo apt install -y nftables dnsmasq wireguard-tools python3 curl ca-certificates
+sudo apt install -y nftables dnsmasq wireguard-tools python3 python3-yaml jq dnsutils util-linux coreutils curl ca-certificates
 sudo systemctl enable --now nftables
 ```
 
@@ -58,28 +58,10 @@ WireGuard 只做点对点：UDP 51891 在 `wan0` 放行，对端 `10.253.254.2`�
 
 验收：`nmcli device` 中 `wan0`、`proxy20` 都是 connected，`wg show` 有握手。
 
-## 3. 数据面 nftables
-
-`/etc/nftables.conf` 定义两个自有表并 `include /etc/nftables.d/*.nft`：
-
-```sh
-sudo nft -c -f /etc/nftables.conf    # 语法检查，不改运行状态
-sudo systemctl reload nftables       # 幂等 destroy/重建自有表
-sudo nft list tables                 # 应看到 inet rp_filter 与 ip rp_nat
-```
-
-- `inet rp_filter`：input/forward 默认 drop，白名单见[架构文档](architecture.zh-CN.md)。
-- `ip rp_nat`：自身不放 masquerade，VLAN20 与 WireGuard 的 NAT 在各自 include 文件里。
-- `include` 的两个文件分别是 WireGuard 试点与 VLAN 试点规则；仓库只发布占位骨架
-  （`automation/etc/nftables.d/`），换机器时必须按新接口重写，不能照抄地址。
-
-验收：`nft list chain inet rp_filter input` 有 `policy drop`、`lo` 与上游白名单；
-`nft list chain ip rp_nat postrouting` 基础表为空；VLAN20 与 WireGuard 的 masquerade 只在各自 include。
-
-## 4. 运行层安装
+## 3. 运行层安装
 
 `automation/install.sh` 按固定顺序做幂等安装：机制文件（`sbin`、`systemd`）覆盖写入；
-配置骨架与示例只在目标不存在时写入，保留部署端已改内容。脚本只 enable 本机在用的 11 个单元，
+配置骨架与示例只在目标不存在时写入，保留部署端已改内容。脚本只 enable 发布层的 15 个单元，
 其余装上但保持 disabled；`enable` timer 不会立刻启动它。
 
 ```sh
@@ -110,8 +92,29 @@ sudo automation/install.sh               # 真机安装
 仓库里只有示例，安装器不会把示例改名为正式文件。
 没有 `--enable-timers` 这一步：安装脚本按真机状态直接处理 enable/disable。
 
-验收：`systemctl list-unit-files --state=enabled | grep -E 'mihomo|mosdns|dnsmasq'`
-正好是 11 行（6 个 service + 5 个 timer）；`ls /etc/systemd/system/mihomo.service.d/` 有 6 个 `.conf`。
+验收：`systemctl list-unit-files --state=enabled | grep -E 'mihomo|mosdns|dnsmasq|homeassistant|rp5-agent'`
+正好是 15 行（7 个 service + 8 个 timer）；`ls /etc/systemd/system/mihomo.service.d/` 有 7 个 `.conf`。
+前缀少写 `homeassistant` 或 `rp5-agent` 会各少一行；口径以 `automation/install.sh` 的 enable 清单为准。
+
+## 4. 数据面 nftables
+
+`/etc/nftables.conf` 与 `/etc/nftables.d/*` 由第 3 节的安装器播种（仅当目标不存在），本节再校验并加载：
+
+两个自有表定义在那里，并 `include /etc/nftables.d/*.nft`：
+
+```sh
+sudo nft -c -f /etc/nftables.conf    # 语法检查，不改运行状态
+sudo systemctl reload nftables       # 幂等 destroy/重建自有表
+sudo nft list tables                 # 应看到 inet rp_filter 与 ip rp_nat
+```
+
+- `inet rp_filter`：input/forward 默认 drop，白名单见[架构文档](architecture.zh-CN.md)。
+- `ip rp_nat`：自身不放 masquerade，VLAN20 与 WireGuard 的 NAT 在各自 include 文件里。
+- `include` 的两个文件分别是 WireGuard 试点与 VLAN 试点规则；仓库只发布占位骨架
+  （`automation/etc/nftables.d/`），换机器时必须按新接口重写，不能照抄地址。
+
+验收：`nft list chain inet rp_filter input` 有 `policy drop`、`lo` 与上游白名单；
+`nft list chain ip rp_nat postrouting` 基础表为空；VLAN20 与 WireGuard 的 masquerade 只在各自 include。
 
 ## 5. 核心、DNS 与配置生成
 
@@ -133,8 +136,8 @@ sudo install -m0755 ../mihomo /usr/local/bin/mihomo
 #     本地覆盖段（tun / dns / sniffer / rule-providers / 端口）来自 automation/etc/mihomo/
 sudo /usr/local/bin/mihomo -t -d /etc/mihomo
 
-# 5.3 启动顺序由单元保证：nftables → dnsmasq（写 direct 基线）→ mihomo（写 auto）
-#     → mosdns（写 mosdns 上游）；停止时反向回退
+# 5.3 DNS 收敛不靠单元顺序：`dnsmasq-safe-start` 先写 direct 基线，`mihomo-dns-mode auto`
+#     之后每分钟按 mosdns/mihomo 健康度在 direct 与 mosdns 上游之间收敛；`mosdns.service` 不声明 `After=mihomo`
 sudo systemctl start dnsmasq mihomo mosdns
 ```
 

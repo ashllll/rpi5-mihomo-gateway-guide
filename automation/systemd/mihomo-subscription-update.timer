@@ -1,9 +1,13 @@
 [Unit]
-Description=Refresh Mihomo subscriptions every 48 hours
+Description=Recover pending subscription transactions and run the due refresh
 
 [Timer]
-OnBootSec=10min
-OnUnitInactiveSec=2d
+# The updater owns the schedule: success waits 48 hours, failure retries in
+# minutes, and a pending transaction is recovered on every tick, including the
+# first one after boot. A fixed 48-hour timer cannot express both clocks.
+OnBootSec=1min
+OnCalendar=*-*-* *:0/10
+AccuracySec=1min
 RandomizedDelaySec=0
 Unit=mihomo-subscription-update.service
 

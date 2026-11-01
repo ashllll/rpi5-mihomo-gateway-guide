@@ -127,7 +127,7 @@ curl -sS -k -G "${HDR[@]}" "${BASE}/v1/sites/${SITE_ID}/devices" \
   | jq '{total:.totalCount, shown:.count, devices:[.data[]|{name,model,state,ipAddress,firmwareVersion}]}'
 ```
 
-响应外壳与字段含义：外层 `count`/`limit`/`offset`/`totalCount` 即上面说的分页统计；`data[]` 每一项是设备概览对象，包含 `id`（UUID）、`macAddress`（如 `<MAC-3>`）、`ipAddress`（如 `192.168.1.55`）、`name`（如 `IW HD`）、`model`（如 `UHDIW`）、`state`、`supported`（布尔）、`firmwareVersion`（如 `6.6.55`）、`firmwareUpdatable`（布尔）、`features`（枚举 `switching`/`accessPoint`/`gateway` 的数组）与 `interfaces`（枚举 `ports`/`radios` 的数组）。`state` 的取值是封闭枚举：`ONLINE`、`OFFLINE`、`PENDING_ADOPTION`、`UPDATING`、`GETTING_READY`、`ADOPTING`、`DELETING`、`CONNECTION_INTERRUPTED`、`ISOLATED`、`U5G_INCORRECT_TOPOLOGY`。若 UCG-Max 自身的设备对象出现在列表里，`features` 会含 `gateway`，这是判断「网关是否被该站点纳管」的直接依据。
+响应外壳与字段含义：外层 `count`/`limit`/`offset`/`totalCount` 即上面说的分页统计；`data[]` 每一项是设备概览对象，包含 `id`（UUID）、`macAddress`（如 `<MAC-EXAMPLE>`）、`ipAddress`（如 `192.168.1.55`）、`name`（如 `IW HD`）、`model`（如 `UHDIW`）、`state`、`supported`（布尔）、`firmwareVersion`（如 `6.6.55`）、`firmwareUpdatable`（布尔）、`features`（枚举 `switching`/`accessPoint`/`gateway` 的数组）与 `interfaces`（枚举 `ports`/`radios` 的数组）。`state` 的取值是封闭枚举：`ONLINE`、`OFFLINE`、`PENDING_ADOPTION`、`UPDATING`、`GETTING_READY`、`ADOPTING`、`DELETING`、`CONNECTION_INTERRUPTED`、`ISOLATED`、`U5G_INCORRECT_TOPOLOGY`。若 UCG-Max 自身的设备对象出现在列表里，`features` 会含 `gateway`，这是判断「网关是否被该站点纳管」的直接依据。
 
 示例里对本地直连加了 `-k`：UCG-Max 默认使用自签证书，curl 会因证书链不受信而失败。这是部署经验而非官方文档条文；若已导入受信证书，应去掉 `-k`。云端方式不需要 `-k`。
 

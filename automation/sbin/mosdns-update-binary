@@ -3,10 +3,14 @@
 set -eu
 umask 027
 
-exec 8>/run/lock/mosdns-binary-update.lock
-flock -n 8 || exit 0
+exec 9>/run/lock/mosdns-binary-update.lock
+flock -n 9 || exit 0
 
 backup_root=/etc/mosdns/backups
+pending_file=$backup_root/transaction.pending
+maintenance_lock=/run/lock/mihomo-maintenance.lock
+backup_bin=${GATEWAY_BACKUP_BIN:-/usr/local/sbin/gateway-backup}
+rollout_backup_bin=${MOSDNS_ROLLOUT_BACKUP_BIN:-/usr/local/sbin/mosdns-rollout-backup}
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
@@ -16,15 +20,44 @@ fi
 proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mosdns-binary.XXXXXX)
 test_pid=
+update_started=false
+rolling_back=false
+pending_phase=
+pending_old_sha=
+pending_new_sha=
+pending_backup=
+old_sha=
+new_sha=
+backup_path=
+
+sync_path() {
+  python3 -c 'import os, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)' "$1"
+}
 
 cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
   if [ -n "$test_pid" ] && kill -0 "$test_pid" 2>/dev/null; then
     kill -TERM "$test_pid" 2>/dev/null || true
     wait "$test_pid" 2>/dev/null || true
   fi
+  if [ "$update_started" = true ] && [ -s "$pending_file" ] && [ "$rolling_back" != true ]; then
+    rolling_back=true
+    if rollback_transaction; then
+      logger -t mosdns-update-binary "Interrupted update rolled back to the previous mosdns"
+    else
+      logger -t mosdns-update-binary "Interrupted update rollback failed; pending record retained"
+    fi
+  fi
   case "$work_dir" in
     /var/tmp/mosdns-binary.*) rm -rf -- "$work_dir" ;;
   esac
+  exit "$result"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -44,6 +77,157 @@ fetch() {
     --proto '=https' --tlsv1.2 \
     --output "$output" "$url"
 }
+
+write_pending() {
+  pending_phase=$1
+  pending_old_sha=$2
+  pending_new_sha=$3
+  pending_backup=$4
+  temporary=$pending_file.tmp.$$
+  {
+    printf 'format=1\n'
+    printf 'kind=binary\n'
+    printf 'phase=%s\n' "$pending_phase"
+    printf 'old_sha256=%s\n' "$pending_old_sha"
+    printf 'new_sha256=%s\n' "$pending_new_sha"
+    printf 'backup=%s\n' "$pending_backup"
+  } >"$temporary" || { rm -f -- "$temporary"; return 1; }
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  sync_path "$temporary" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$pending_file" || { rm -f -- "$temporary"; return 1; }
+  sync_path "$pending_file"
+}
+
+read_pending() {
+  pending_phase=
+  pending_old_sha=
+  pending_new_sha=
+  pending_backup=
+  kind=
+  while IFS='=' read -r key value; do
+    case "$key" in
+      format) [ "$value" = 1 ] || return 1 ;;
+      kind) kind=$value ;;
+      phase) pending_phase=$value ;;
+      old_sha256) pending_old_sha=$value ;;
+      new_sha256) pending_new_sha=$value ;;
+      backup) pending_backup=$value ;;
+    esac
+  done <"$pending_file"
+  [ "$kind" = binary ] || return 1
+  case "$pending_phase" in
+    prepared|applied|committed|restoring) ;;
+    *) return 1 ;;
+  esac
+  case "$pending_old_sha" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  case "$pending_new_sha" in
+    *[!0-9a-f]*|'') return 1 ;;
+  esac
+  [ "${#pending_old_sha}" -eq 64 ] || return 1
+  [ "${#pending_new_sha}" -eq 64 ] || return 1
+  case "$pending_backup" in
+    "$backup_root"/binary-*/mosdns) ;;
+    *) return 1 ;;
+  esac
+}
+
+clear_pending() {
+  rm -f -- "$pending_file"
+  sync_path "$backup_root"
+}
+
+restore_binary() {
+  backup=$1
+  install -o root -g root -m 755 "$backup" /usr/local/bin/mosdns.new || return 1
+  sync_path /usr/local/bin/mosdns.new || return 1
+  mv -f -- /usr/local/bin/mosdns.new /usr/local/bin/mosdns || return 1
+  sync_path /usr/local/bin
+}
+
+file_sha256() {
+  sha256sum "$1" | cut -d' ' -f1
+}
+
+# A pending record is the only durable description of an update in flight.  A
+# record that is not committed means the new binary never completed its health
+# gate, so the only verifiable core is the recorded old one.
+recover_pending() {
+  [ -s "$pending_file" ] || return 0
+  if ! read_pending; then
+    logger -t mosdns-update-binary "Pending update record is invalid; refusing to guess"
+    return 1
+  fi
+  current_sha=$(file_sha256 /usr/local/bin/mosdns) || return 1
+  case "$pending_phase" in
+    committed)
+      if [ "$current_sha" = "$pending_new_sha" ]; then
+        clear_pending
+        logger -t mosdns-update-binary "Committed update already passed its health gate"
+        return 0
+      fi
+      logger -t mosdns-update-binary "Committed update no longer matches the live binary"
+      return 1
+      ;;
+  esac
+  if [ "$current_sha" = "$pending_old_sha" ]; then
+    clear_pending
+    logger -t mosdns-update-binary "Pending update had not replaced the live binary; record cleared"
+    return 0
+  fi
+  if [ "$(file_sha256 "$pending_backup")" != "$pending_old_sha" ]; then
+    logger -t mosdns-update-binary "Pending backup does not match the recorded old sha256"
+    return 1
+  fi
+  write_pending restoring "$pending_old_sha" "$pending_new_sha" "$pending_backup" || return 1
+  if ! restore_binary "$pending_backup"; then
+    logger -t mosdns-update-binary "Could not restore the recorded old binary"
+    return 1
+  fi
+  if ! systemctl restart mosdns.service; then
+    logger -t mosdns-update-binary "Could not restart mosdns after restoring the old binary"
+    return 1
+  fi
+  if /usr/local/sbin/mosdns-healthcheck; then
+    logger -t mosdns-update-binary "Interrupted update rolled back; the old binary is healthy"
+  else
+    logger -t mosdns-update-binary "Interrupted update rolled back; the old binary failed its health check"
+  fi
+  clear_pending
+}
+
+rollback_transaction() {
+  [ -n "$backup_path" ] || return 1
+  write_pending restoring "$old_sha" "$new_sha" "$backup_path" || return 1
+  if ! restore_binary "$backup_path"; then
+    logger -t mosdns-update-binary "Restoring the previous binary failed"
+    return 1
+  fi
+  systemctl restart mosdns.service || true
+  if ! /usr/local/sbin/mosdns-healthcheck; then
+    logger -t mosdns-update-binary "Previous binary failed its post-rollback health check"
+  fi
+  clear_pending
+}
+
+# Recovery is the first thing a new run does, before any network access and
+# before the version string is trusted: a pending record decides the state.
+if [ -s "$pending_file" ]; then
+  if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
+    logger -t mosdns-update-binary "A pending update recovery is required before a dry run"
+    exit 1
+  fi
+  exec 8>"$maintenance_lock"
+  if ! flock -n 8; then
+    logger -t mosdns-update-binary "Pending update recovery is waiting for maintenance"
+    exit 1
+  fi
+  if ! recover_pending; then
+    exit 1
+  fi
+  exit 0
+fi
 
 fetch "$work_dir/release.json" \
   https://api.github.com/repos/IrineSistiana/mosdns/releases/latest
@@ -139,16 +323,68 @@ if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
   exit 0
 fi
 
+# Recovery happens before the version check: a pending record, not the version
+# string, decides whether the live binary may be trusted.
+if [ -s "$pending_file" ]; then
+  exec 8>"$maintenance_lock"
+  if ! flock -n 8; then
+    logger -t mosdns-update-binary "Pending update recovery is waiting for maintenance"
+    exit 1
+  fi
+  if ! recover_pending; then
+    exit 1
+  fi
+  exit 0
+fi
+
+# Only download and candidate validation happen outside the maintenance lock;
+# every step that replaces the live binary or restarts mosdns holds it.
+exec 8>"$maintenance_lock"
+if ! flock -n 8; then
+  logger -t mosdns-update-binary "Maintenance is active; candidate discarded"
+  exit 0
+fi
+if [ -s "$pending_file" ]; then
+  if ! recover_pending; then
+    exit 1
+  fi
+  exit 0
+fi
+
+if ! "$rollout_backup_bin" --reason mosdns-binary; then
+  logger -t mosdns-update-binary \
+    "Could not create the MosDNS rollout point; live binary unchanged"
+  exit 1
+fi
+if ! "$backup_bin" --reason mosdns-binary; then
+  logger -t mosdns-update-binary \
+    "Could not create the whole-machine rollback point; live binary unchanged"
+  exit 1
+fi
+
 timestamp=$(date +%Y%m%d-%H%M%S)
 backup_dir=$backup_root/binary-$timestamp
 install -d -o root -g root -m 755 "$backup_dir"
 cp -p /usr/local/bin/mosdns "$backup_dir/mosdns"
+sync_path "$backup_dir/mosdns"
+sync_path "$backup_dir"
+old_sha=$(file_sha256 /usr/local/bin/mosdns)
+new_sha=$(file_sha256 "$work_dir/mosdns")
+backup_path=$backup_dir/mosdns
+write_pending prepared "$old_sha" "$new_sha" "$backup_path"
 
+update_started=true
 install -o root -g root -m 755 "$work_dir/mosdns" /usr/local/bin/mosdns.new
-mv -f /usr/local/bin/mosdns.new /usr/local/bin/mosdns
+sync_path /usr/local/bin/mosdns.new
+mv -f -- /usr/local/bin/mosdns.new /usr/local/bin/mosdns
+sync_path /usr/local/bin
+write_pending applied "$old_sha" "$new_sha" "$backup_path"
 
 if systemctl restart mosdns.service &&
    /usr/local/sbin/mosdns-healthcheck; then
+  write_pending committed "$old_sha" "$new_sha" "$backup_path"
+  clear_pending
+  update_started=false
   logger -t mosdns-update-binary "mosdns updated from $current to $candidate_version"
   find "$backup_root" -mindepth 1 -maxdepth 1 -type d -name 'binary-*' \
     -printf '%T@ %p\n' | sort -nr | awk 'NR > 3 { print $2 }' |
@@ -161,7 +397,10 @@ if systemctl restart mosdns.service &&
 fi
 
 logger -t mosdns-update-binary "mosdns $tag failed after install; rolling back"
-install -o root -g root -m 755 "$backup_dir/mosdns" /usr/local/bin/mosdns
-systemctl restart mosdns.service || true
-/usr/local/sbin/mihomo-dns-mode auto || true
+if rollback_transaction; then
+  logger -t mosdns-update-binary "mosdns $tag rolled back to $current"
+else
+  logger -t mosdns-update-binary "mosdns $tag rollback failed; pending record retained"
+fi
+update_started=false
 exit 1

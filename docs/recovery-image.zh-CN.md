@@ -16,7 +16,7 @@
 | 账号与凭据 | 不分发可登录个人账号、密码哈希、SSH 主机密钥、授权公钥或 controller secret |
 | 网络身份 | 不带真实 MAC 绑定、SSID、Wi-Fi 密码、连接文件、原网段或静态 IP |
 | 初次联网 | 上游有线 DHCP；站点配置前不提供下游 DHCP、NAT 或透明代理 |
-| 自动化 | Mihomo / MosDNS / dnsmasq / nftables 与八个自动化 timer 默认禁用 |
+| 自动化 | 镜像内只落位文件：安装器在 `GATEWAY_ROOT`≠`/` 时不 enable 任何单元，11 个 timer 全部 `disable`；开机后由部署者按发布层 15 个单元 enable |
 | 原部署私有数据 | 不包含容器、家目录、业务数据、节点评分、缓存、历史配置和原备份 |
 
 默认镜像约 4 GiB，实际压缩大小与完整校验值以 Release 和 `image-manifest.json` 为准。使用容量至少 8 GB 的备用介质。

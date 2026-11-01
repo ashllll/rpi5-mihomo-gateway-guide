@@ -4,12 +4,26 @@
 The repository mirrors one running gateway: the automation layer, the pinned
 core patch, the documents and the diagrams the machine actually uses.  This
 checker fails when a required piece is missing, when the publication contains a
-symlink or an unapproved binary, or when a tracked text file matches one of the
-privacy patterns in publication_privacy.py.
+symlink or an unapproved binary, when a tracked text file matches a publication
+pattern, or when a commit after the remediation baseline carries one.
+
+Privacy is checked in four layers:
+
+* structure -- required files, parseable SVGs, the one approved binary;
+* content   -- every tracked text file (and the PNG payload) against
+               ``PUBLIC_PATTERNS``, plus base64 payloads;
+* docs      -- the public documentation surface against ``DOC_PATTERNS`` and a
+               documented-network check for private IPv4 addresses;
+* history   -- commit trees and messages after the audit baseline.  Older
+               commits predate the remediation and still contain real
+               identifiers; they are rewritten in phase 3.  When the baseline
+               commit is not reachable (fresh lab, shallow checkout) the gate
+               fails closed and scans every commit reachable from HEAD.
 
 Run from the repository root:  python3 tools/validate_public.py
 """
 
+import argparse
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -18,11 +32,18 @@ from pathlib import Path
 from publication_privacy import (
     ARCHIVE_PATHS,
     ARCHIVE_PATTERNS,
+    DOC_PATTERNS,
     PUBLIC_PATTERNS,
+    base64_labels,
+    documented_networks,
     matching_labels,
+    undocumented_private_addresses,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+HISTORY_BASELINE = ROOT / "scripts/privacy-history-baseline.txt"
+DOC_ROOT_FILES = ("README.md", "SECURITY.md", "GLOSSARY.md")
+DOC_PREFIX = "docs/"
 
 REQUIRED = (
     "README.md",
@@ -109,7 +130,130 @@ def tracked_files():
     return [name for name in completed.stdout.decode().split("\0") if name]
 
 
-def main() -> int:
+def is_public_doc(name):
+    return name in DOC_ROOT_FILES or name.startswith(DOC_PREFIX)
+
+
+def git(*args):
+    return subprocess.run(
+        ["git", *args], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+
+
+def git_text(*args):
+    completed = git(*args)
+    return completed.returncode, completed.stdout.decode("utf-8", "ignore")
+
+
+def history_baseline():
+    if not HISTORY_BASELINE.is_file():
+        return None
+    for line in HISTORY_BASELINE.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    return None
+
+
+def history_scope(scan_all):
+    base = None if scan_all else history_baseline()
+    if not base:
+        return None
+    code, _ = git_text("cat-file", "-e", base + "^{commit}")
+    return base if code == 0 else None
+
+
+def batch_objects(items):
+    """Yield (sha, path, bytes-or-None) for blob objects, one git process."""
+    if not items:
+        return
+    request = "".join(sha + "\n" for sha, _ in items).encode()
+    completed = subprocess.run(
+        ["git", "cat-file", "--batch"], cwd=ROOT, input=request, stdout=subprocess.PIPE
+    )
+    data = completed.stdout
+    position = 0
+    for sha, path in items:
+        end = data.find(b"\n", position)
+        if end < 0:
+            return
+        header = data[position:end].decode("utf-8", "replace").split()
+        position = end + 1
+        if len(header) < 3:
+            yield sha, path, None
+            continue
+        size = int(header[2])
+        content = data[position:position + size]
+        position += size + 1
+        yield (sha, path, content if header[1] == "blob" else None)
+
+
+def history_findings(scan_all):
+    findings = []
+    base = history_scope(scan_all)
+    revision_range = "{}..HEAD".format(base) if base else "HEAD"
+    code, count_text = git_text("rev-list", "--count", revision_range)
+    if code != 0:
+        return ["history unavailable: git rev-list failed"], (base, 0, 0)
+    scanned = int(count_text.strip() or 0)
+    exempt = 0
+    if base:
+        code, exempt_text = git_text("rev-list", "--count", base)
+        exempt = int(exempt_text.strip() or 0) if code == 0 else 0
+    if scanned == 0:
+        return findings, (base, scanned, exempt)
+
+    code, log = git_text("log", "--format=%H%x1f%B%x1e", revision_range)
+    if code == 0:
+        for record in log.split("\x1e"):
+            record = record.strip("\n")
+            if "\x1f" not in record:
+                continue
+            sha, message = record.split("\x1f", 1)
+            for label in matching_labels(message, PUBLIC_PATTERNS):
+                findings.append("commit {} message: {}".format(sha[:12], label))
+
+    code, listing = git_text("rev-list", "--objects", revision_range)
+    items = []
+    seen = set()
+    if code == 0:
+        for line in listing.splitlines():
+            sha, _, path = line.partition(" ")
+            if sha in seen:
+                continue
+            seen.add(sha)
+            items.append((sha, path))
+
+    doc_texts = []
+    for name in tracked_files():
+        if is_public_doc(name):
+            path = ROOT / name
+            if path.is_file():
+                doc_texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+    allowed = documented_networks(doc_texts)
+
+    for sha, path, content in batch_objects(items):
+        if not content or b"\0" in content:
+            continue
+        text = content.decode("utf-8", "ignore")
+        labels = matching_labels(text, PUBLIC_PATTERNS) + base64_labels(text)
+        if is_public_doc(path):
+            labels += matching_labels(text, DOC_PATTERNS)
+            if undocumented_private_addresses(text, allowed):
+                labels.append("undocumented private address")
+        for label in labels:
+            findings.append("commit tree {}:{}: {}".format(sha[:12], path or "(object)", label))
+    return findings, (base, scanned, exempt)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--history-all",
+        action="store_true",
+        help="scan all reachable history (phase-3 audit; default: since the audit baseline)",
+    )
+    args = parser.parse_args(argv)
     failures = []
 
     for name in REQUIRED:
@@ -141,6 +285,14 @@ def main() -> int:
         failures.append("documentation archive: {} (value redacted)".format(label))
 
     paths = tracked_files()
+    doc_texts = []
+    for name in paths:
+        if is_public_doc(name):
+            path = ROOT / name
+            if path.is_file():
+                doc_texts.append(path.read_text(encoding="utf-8", errors="ignore"))
+    allowed = documented_networks(doc_texts)
+
     for name in paths:
         path = ROOT / name
         if not path.is_file():
@@ -153,8 +305,29 @@ def main() -> int:
             failures.append("{}: unapproved binary".format(name))
             continue
         text = content.decode("utf-8", errors="ignore")
-        for label in matching_labels(text, PUBLIC_PATTERNS):
+        labels = matching_labels(text, PUBLIC_PATTERNS) + base64_labels(text)
+        if is_public_doc(name):
+            labels += matching_labels(text, DOC_PATTERNS)
+            if undocumented_private_addresses(text, allowed):
+                labels.append("undocumented private address")
+        labels += matching_labels(name, PUBLIC_PATTERNS)
+        for label in labels:
             failures.append("{}: {} (value redacted)".format(name, label))
+
+    history, (base, scanned, exempt) = history_findings(args.history_all)
+    for finding in history:
+        failures.append("history {} (value redacted)".format(finding))
+
+    if base:
+        print(
+            "history: {} commit(s) scanned since {}; {} earlier commit(s) stay "
+            "out of scope until the phase-3 rewrite".format(scanned, base[:12], exempt)
+        )
+    else:
+        print(
+            "history: {} commit(s) scanned; no reachable audit baseline, full "
+            "reachable history is in scope".format(scanned)
+        )
 
     if failures:
         for failure in failures:

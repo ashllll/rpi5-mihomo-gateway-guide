@@ -1,22 +1,29 @@
 name: gates
+
+# The gate runs for pushes to the trusted branch only.  Pull-request code is
+# never executed on this self-hosted runner: a PR could otherwise edit
+# scripts/preflight-baseline.txt or the gate itself and then run it with the
+# runner token in reach.  PRs are validated locally with the same command before
+# merge (see README "Local gate").
 on:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout (token auth, no JS action)
+      - name: Checkout (token in a header, never in the URL)
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
           git init -q .
-          git remote add origin "http://llll:${GITEA_TOKEN}@192.168.20.193:3000/llll/rpi5-mihomo-gateway-guide.git"
-          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          git remote add origin "${{ github.server_url }}/${{ github.repository }}.git"
+          auth=$(printf '%s:%s' "${{ github.repository_owner }}" "$GITEA_TOKEN" | base64 | tr -d '\n')
+          git -c http.extraheader="Authorization: Basic $auth" fetch -q origin "${{ github.sha }}"
           git checkout -q FETCH_HEAD
-      - name: Full preflight (scripts/preflight.sh)
+      - name: Full preflight (single entry)
         run: ./scripts/preflight.sh

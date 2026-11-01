@@ -497,9 +497,9 @@ tun:
 
 | 来源 | 有效节点数量 | 主要用途 |
 |---|---:|---|
-| <provider-label-2>| 默认、AI、流媒体、开发等 |
-| <provider-label-3>| 备份和下载 |
-| <provider-label-1>| 备份和下载 |
+| GLaDOS | <provider-label-1> | 默认、AI、流媒体、开发等 |
+| BWB | <provider-label-2> | 备份和下载 |
+| InfraAPI | <provider-label-3> | 备份和下载 |
 | 合计 | 104 | 合并后统一管理 |
 
 订阅 URL 不直接写入公开配置，而是保存在：

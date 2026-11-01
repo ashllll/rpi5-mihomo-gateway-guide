@@ -11,6 +11,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+
+from _tempdirs import temp_root
 import threading
 import time
 import unittest
@@ -70,7 +72,7 @@ class NativeBudgetTests(unittest.TestCase):
 
     def test_socket_observes_another_process_ledger_update_and_corruption(self):
         settings = policy(limit=6)
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
             cfg.write_text(yaml.safe_dump(config()))
@@ -101,7 +103,7 @@ class NativeBudgetTests(unittest.TestCase):
                     worker.join()
 
     def test_socket_retains_a_debit_when_directory_sync_fails_after_replace(self):
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
             cfg.write_text(yaml.safe_dump(config()))
@@ -132,7 +134,7 @@ class NativeBudgetTests(unittest.TestCase):
         for account in (12345, True, None, '', 1.5):
             settings = policy(accounts={account: {'names': ['A'], 'native_probes_per_hour': 8,
                                                  'quality_attempts_per_hour': 8}})
-            with self.subTest(account=account), tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+            with self.subTest(account=account), tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
                 directory = Path(raw)
                 with self.assertRaisesRegex(ValueError, 'account'):
                     POLICY['configure_measurement'](
@@ -148,7 +150,7 @@ class NativeBudgetTests(unittest.TestCase):
         settings = policy(accounts={'12345': {'names': ['A'], 'native_probes_per_hour': 12,
                                                'quality_attempts_per_hour': 6}})
         config_value = config()
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw, patch('time.time', return_value=10000):
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw, patch('time.time', return_value=10000):
             ledger = Path(raw)/'quality-budget.json'
             ledger.write_text(json.dumps({'accounts': {'12345': [[9999, 2]]}, 'last_reservation_at': 9999}))
             self.assertTrue(BROKER['authorize'](request(deadline=10002), config_value, settings, ledger))
@@ -161,7 +163,7 @@ class NativeBudgetTests(unittest.TestCase):
     def test_socket_rechecks_policy_after_lock_wait_before_predebit(self):
         settings = policy(limit=6)
         node_value = node()
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
             cfg.write_text(yaml.safe_dump(config([node_value])))
@@ -198,7 +200,7 @@ class NativeBudgetTests(unittest.TestCase):
 
     def test_managed_core_inherits_only_the_checked_socket(self):
         settings = policy()
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'budget.json'))
             cfg.write_text('{}')
@@ -252,7 +254,7 @@ class NativeBudgetTests(unittest.TestCase):
     def test_socket_concurrency_and_corrupt_ledger_fail_closed(self):
         settings = policy(limit=12)
         config_value = config()
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'quality-budget.json'))
             cfg.write_text(yaml.safe_dump(config_value))
@@ -297,7 +299,7 @@ class NativeBudgetTests(unittest.TestCase):
     def test_probe_wave_is_admitted_and_policy_refresh_is_picked_up(self):
         settings = policy(limit=100000)
         config_value = config()
-        with tempfile.TemporaryDirectory(prefix='mb-', dir='/tmp') as raw:
+        with tempfile.TemporaryDirectory(prefix='mb-', dir=temp_root()) as raw:
             directory = Path(raw)
             cfg, manifest, ledger = (directory/name for name in ('config.yaml', 'policy.yaml', 'quality-budget.json'))
             cfg.write_text(yaml.safe_dump(config_value))

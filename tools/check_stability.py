@@ -36,7 +36,14 @@ HEADER = '#!' + sys.executable + '\n'
 SYSTEMCTL = '''import os,sys
 from pathlib import Path
 with open(os.environ['TEST_ACTIONS'],'a') as f: f.write(' '.join(sys.argv[1:])+'\\n')
-if sys.argv[1] == 'restart': Path(os.environ['TEST_RESTARTED']).touch()
+limited = os.environ.get('TEST_START_LIMIT') == '1' and not Path(os.environ['TEST_RESET']).exists()
+if sys.argv[1] == 'restart':
+    if limited:
+        sys.stderr.write('Failed to restart mihomo.service: Start request repeated too quickly.\\n')
+        sys.exit(1)
+    Path(os.environ['TEST_RESTARTED']).touch()
+if sys.argv[1] == 'reset-failed': Path(os.environ['TEST_RESET']).touch()
+if sys.argv[1] == 'is-failed': sys.exit(0 if limited else 1)
 if sys.argv[1] == 'is-active':
     mode, restarted = os.environ['TEST_MODE'], Path(os.environ['TEST_RESTARTED']).exists()
     quiet = '--quiet' in sys.argv
@@ -85,18 +92,30 @@ CURL = '''import os,sys
 with open(os.environ['TEST_ACTIONS'],'a') as f: f.write('CURL\\n')
 print('204', end='')
 '''
+DIG = '''import os,sys
+with open(os.environ['TEST_ACTIONS'],'a') as f: f.write('DIG\\n')
+if os.environ.get('TEST_DNS_1053', 'ok') != 'ok': sys.exit(9)
+name = next((a for a in sys.argv[1:] if not a.startswith(('+','-','@')) and a not in ('A','IN')), 'probe.invalid')
+print(';; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 1')
+print('%s. 60 IN A %s' % (name, '198.18.0.1' if 'baidu' not in name else '203.0.113.10'))
+'''
 
 
 def run_mode(script, root, commands, mode, packets='100', table_ok='1', nft='full',
-             fresh=True) -> tuple[int, list[str]]:
+             fresh=True, start_limit='0', dns_1053='ok') -> tuple[int, list[str]]:
     actions = root / 'actions'
     actions.write_text('')
     (root / 'restarted').unlink(missing_ok=True)
+    (root / 'resetter').unlink(missing_ok=True)
     if fresh:
-        for stale in ('packets', 'status', 'egress', 'egress_at', 'fail_streak', 'restarted_at'):
+        for stale in ('packets', 'status', 'egress', 'egress_at', 'fail_streak', 'restarted_at',
+                      'dns_fail_streak', 'last_restart_reason', 'restart_attempted_at',
+                      'restart_succeeded_at', 'verified_streak', 'boot_resets', 'boot_id'):
             (root / stale).unlink(missing_ok=True)
     env = dict(os.environ, PATH=str(commands) + ':' + os.environ['PATH'],
                TEST_ACTIONS=str(actions), TEST_RESTARTED=str(root / 'restarted'),
+               TEST_RESET=str(root / 'resetter'), TEST_START_LIMIT=start_limit,
+               TEST_DNS_1053=dns_1053,
                TEST_MODE=mode, TEST_TABLE_OK=table_ok, TEST_PACKETS=packets, TEST_NFT=nft)
     result = subprocess.run(['sh', '-c', script], env=env, capture_output=True, text=True, timeout=20)
     return result.returncode, actions.read_text().splitlines()
@@ -121,7 +140,7 @@ def main():
         temp = Path(raw)
         commands = temp / 'bin'
         commands.mkdir()
-        for name, body in {'systemctl': SYSTEMCTL, 'ip': NET, 'nft': NET, 'curl': CURL,
+        for name, body in {'systemctl': SYSTEMCTL, 'ip': NET, 'nft': NET, 'curl': CURL, 'dig': DIG,
                            'flock': 'pass\n', 'logger': 'pass\n', 'journalctl': 'pass\n', 'alert': 'pass\n',
                            'date': "import sys,datetime;print(str(int(datetime.datetime.now().timestamp())) if '+%s' in sys.argv else datetime.datetime.now().astimezone().isoformat())\n"}.items():
             path = commands / name
@@ -190,6 +209,50 @@ def main():
         code, actions = run_mode(script, temp, commands, 'active', nft='empty', fresh=False)
         assert not [line for line in actions if line.startswith('restart')], 'hourly cap failed'
 
+        # F-22: a successful recovery clears the attempt stamp. A new, unrelated
+        # failure must be allowed to restart immediately instead of waiting out
+        # the previous attempt's hour (the old code wrote the stamp before the
+        # attempt and never cleared it).
+        code, actions = run_mode(script, temp, commands, 'recover', fresh=True)
+        assert code == 0, (code, actions)
+        assert len([line for line in actions if line.startswith('restart')]) == 1, actions
+        restarts = []
+        for step in range(3):
+            code, actions = run_mode(script, temp, commands, 'active', nft='empty', fresh=False)
+            restarts.extend(line for line in actions if line.startswith('restart'))
+        assert len(restarts) == 1, \
+            'a new failure after a successful recovery was still blocked by the old cooldown'
+        assert int((temp / 'restart_succeeded_at').read_text().strip()) > 0
+        assert int((temp / 'restart_attempted_at').read_text().strip()) > 0
+        assert 'action=restart' in (temp / 'status').read_text()
+        assert 'restart_path=direct' in (temp / 'status').read_text()
+        code, actions = run_mode(script, temp, commands, 'active', nft='empty', fresh=False)
+        assert not [line for line in actions if line.startswith('restart')], \
+            'an ineffective restart must keep the hourly cap'
+
+        # F-22: systemd refuses a restart after StartLimitBurst. The healthcheck
+        # must clear the failed state once and retry, not record a dead hour.
+        code, actions = run_mode(script, temp, commands, 'inactive', fresh=True, start_limit='1')
+        assert code == 1, (code, actions)
+        assert [line for line in actions if line.startswith(('restart', 'reset-failed'))] == [
+            'restart mihomo', 'reset-failed mihomo', 'restart mihomo'], actions
+        assert 'restart_path=reset-failed' in (temp / 'status').read_text()
+
+        # F-22: structured causes. The same decision path names why it acted.
+        code, actions = run_mode(script, temp, commands, 'inactive', fresh=True)
+        assert 'reason=process-inactive' in (temp / 'status').read_text()
+        code, actions = run_mode(script, temp, commands, 'active', nft='empty', fresh=True)
+        assert 'reason=structure' in (temp / 'status').read_text()
+
+        # F-21/F-22: a silent client DNS listener drives the same three-strike
+        # path, and the reason stays distinct from a kernel/structure failure.
+        for step in range(3):
+            code, actions = run_mode(script, temp, commands, 'active', dns_1053='fail',
+                                     fresh=(step == 0))
+        assert 'business=failed' in (temp / 'status').read_text()
+        assert 'reason=dns-1053' in (temp / 'status').read_text()
+        assert len([line for line in actions if line.startswith('restart')]) == 1, actions
+
         # One failed egress sample is cached for five minutes, so `degraded` can
         # describe a probe hiccup rather than a dead gateway. Restarting on it
         # would drop every live connection: it must only alert, never self-heal.
@@ -197,7 +260,7 @@ def main():
         (temp / 'egress').write_text('fail\n')
         (temp / 'egress_at').write_text(str(int(time.time())))
         (temp / 'fail_streak').write_text('0\n')
-        (temp / 'restarted_at').unlink(missing_ok=True)
+        (temp / 'restart_attempted_at').unlink(missing_ok=True)
         for step in range(3):
             code, actions = run_mode(script, temp, commands, 'active',
                                      packets=str(940 + 10 * step), fresh=False)

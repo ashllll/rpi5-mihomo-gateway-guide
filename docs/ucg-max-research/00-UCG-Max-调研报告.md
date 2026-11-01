@@ -15,7 +15,7 @@
 
 | 角色 | 承担工作 | 产出 |
 |---|---|---|
-| Lead（主代理） | 检索与抓取一手官方资料；建立 OpenAPI 副本与端点清单；逐条核验草稿数字与引用；合并成稿 | `techspecs-full.md`、`network-openapi-11.0.97.json`、`network-endpoints.md`、`sm-endpoints.md`、本报告 |
+| Lead（主代理） | 检索与抓取一手官方资料；建立 OpenAPI 副本与端点清单；逐条核验草稿数字与引用；合并成稿 | `network-endpoints.md`、本报告（原始抓取与 OpenAPI 副本不随仓库发布） |
 | locator（子代理） | 第 1 章：候选型号区分、SKU 与区域版本、官方命名 | `01-定位.md` |
 | mechanism（子代理） | 第 2 章：硬件角色、软件栈、数据流与控制流、存储分支、官方明确/归纳/未公开边界 | `02-原理.md` |
 | api-writer（子代理） | 第 3 章：认证、双入口、端点表、分页与 filter、错误体、可复制示例、限制 | `03-API.md` |
@@ -318,7 +318,7 @@ UCG-Max 按存储分为四个版本：No Storage、512 GB、1 TB、2 TB[2]。官
 3. ui.com — UniFi Cloud Gateways 产品族页（含 UniFi OS / 应用 FAQ）：https://ui.com/us/en/cloud-gateways
 4. Ubiquiti Developer Docs — 文档索引与 API 总览（Site Manager 基址、Cloud Connector 说明）：https://developer.ui.com/llms.txt
 5. Ubiquiti Developer Docs — Network API v11.0.97 Getting Started：https://developer.ui.com/network/v11.0.97/gettingstarted
-6. Ubiquiti Developer Docs — Network OpenAPI v11.0.97（servers：Local Console 与 Cloud Connector；本仓库副本 `docs/ucg-max-research/network-openapi-11.0.97.json`）：https://developer.ui.com/network/v11.0.97/openapi.json
+6. Ubiquiti Developer Docs — Network OpenAPI v11.0.97（servers：Local Console 与 Cloud Connector；上游 OpenAPI 文档（原始副本不随仓库发布））：https://developer.ui.com/network/v11.0.97/openapi.json
 7. Ubiquiti Developer Docs — Site Manager API v1.0.0 Getting Started（限流、分页、端点清单）：https://developer.ui.com/site-manager/v1.0.0/gettingstarted
 8. Ubiquiti Developer Docs — Site Manager API List Hosts（reportedState / 注册与备份字段）：https://developer.ui.com/site-manager/v1.0.0/listhosts
 9. Ubiquiti Developer Docs — Site Manager API List Devices：https://developer.ui.com/site-manager/v1.0.0/listdevices
@@ -472,7 +472,7 @@ curl -sS -k -G "${HDR[@]}" "${BASE}/v1/sites/${SITE_ID}/devices" \
   | jq '{total:.totalCount, shown:.count, devices:[.data[]|{name,model,state,ipAddress,firmwareVersion}]}'
 ```
 
-响应外壳与字段含义：外层 `count`/`limit`/`offset`/`totalCount` 即上面说的分页统计；`data[]` 每一项是设备概览对象，包含 `id`（UUID）、`macAddress`（如 `<MAC-3>`）、`ipAddress`（如 `192.168.1.55`）、`name`（如 `IW HD`）、`model`（如 `UHDIW`）、`state`、`supported`（布尔）、`firmwareVersion`（如 `6.6.55`）、`firmwareUpdatable`（布尔）、`features`（枚举 `switching`/`accessPoint`/`gateway` 的数组）与 `interfaces`（枚举 `ports`/`radios` 的数组）。`state` 的取值是封闭枚举：`ONLINE`、`OFFLINE`、`PENDING_ADOPTION`、`UPDATING`、`GETTING_READY`、`ADOPTING`、`DELETING`、`CONNECTION_INTERRUPTED`、`ISOLATED`、`U5G_INCORRECT_TOPOLOGY`。若 UCG-Max 自身的设备对象出现在列表里，`features` 会含 `gateway`，这是判断「网关是否被该站点纳管」的直接依据。
+响应外壳与字段含义：外层 `count`/`limit`/`offset`/`totalCount` 即上面说的分页统计；`data[]` 每一项是设备概览对象，包含 `id`（UUID）、`macAddress`（如 `<MAC-EXAMPLE>`）、`ipAddress`（如 `192.168.1.55`）、`name`（如 `IW HD`）、`model`（如 `UHDIW`）、`state`、`supported`（布尔）、`firmwareVersion`（如 `6.6.55`）、`firmwareUpdatable`（布尔）、`features`（枚举 `switching`/`accessPoint`/`gateway` 的数组）与 `interfaces`（枚举 `ports`/`radios` 的数组）。`state` 的取值是封闭枚举：`ONLINE`、`OFFLINE`、`PENDING_ADOPTION`、`UPDATING`、`GETTING_READY`、`ADOPTING`、`DELETING`、`CONNECTION_INTERRUPTED`、`ISOLATED`、`U5G_INCORRECT_TOPOLOGY`。若 UCG-Max 自身的设备对象出现在列表里，`features` 会含 `gateway`，这是判断「网关是否被该站点纳管」的直接依据。
 
 示例里对本地直连加了 `-k`：UCG-Max 默认使用自签证书，curl 会因证书链不受信而失败。这是部署经验而非官方文档条文；若已导入受信证书，应去掉 `-k`。云端方式不需要 `-k`。
 
