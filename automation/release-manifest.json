@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "5b29a89da8ec04b2aa7edef2a22665363faccfdd5f80f5e11e688a3b6af0bd19",
+  "release_id": "1e33604a85c9f4de24a66d536b744bb3250ac3ca10c1bb0de425da9898c195b1",
   "files": [
     {
       "source": "check-release.py",
@@ -277,13 +277,13 @@
     {
       "source": "sbin/mosdns-update-binary",
       "target": "/usr/local/sbin/mosdns-update-binary",
-      "sha256": "d51a768e4218c5bc2737e8f11733c06a25c07d6dffbf629e7f1f62aaad98ce7c",
+      "sha256": "0307598cab1d91c53681b7512b5ef84d9af12e787813b03967b97fc89062c13f",
       "mode": 493
     },
     {
       "source": "sbin/mosdns-update-rules",
       "target": "/usr/local/sbin/mosdns-update-rules",
-      "sha256": "8eab0ef7655d59a4730d3121e07d0221929d1c5a8b29bff7cf88f149c54a0600",
+      "sha256": "d8081c913a56b1388a47e74ff3bd4065fa1185052457713c05b8917614907434",
       "mode": 493
     },
     {

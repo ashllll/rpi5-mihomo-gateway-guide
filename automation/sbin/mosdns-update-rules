@@ -3,12 +3,14 @@
 set -eu
 umask 027
 
-exec 8>/run/lock/mosdns-rules-update.lock
-flock -n 8 || exit 0
+exec 9>/run/lock/mosdns-rules-update.lock
+flock -n 9 || exit 0
 
 rules_root=/etc/mosdns/rules
 current_link=$rules_root/current
 releases_dir=$rules_root/releases
+pending_file=$rules_root/pending
+maintenance_lock=/run/lock/mihomo-maintenance.lock
 # Deployment parameters.  See automation/env/automation.env.example; copy it to
 # /etc/mihomo-automation.env and adjust the values before the first run.
 if [ -r /etc/mihomo-automation.env ]; then
@@ -18,15 +20,42 @@ fi
 proxy=http://127.0.0.1:${MIHOMO_MIXED_PORT}
 work_dir=$(mktemp -d /var/tmp/mosdns-rules.XXXXXX)
 test_pid=
+update_started=false
+rolling_back=false
+pending_phase=
+pending_old_target=
+pending_new_target=
+old_target=
+new_target=
+
+sync_path() {
+  python3 -c 'import os, sys
+descriptor = os.open(sys.argv[1], os.O_RDONLY)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)' "$1"
+}
 
 cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
   if [ -n "$test_pid" ] && kill -0 "$test_pid" 2>/dev/null; then
     kill -TERM "$test_pid" 2>/dev/null || true
     wait "$test_pid" 2>/dev/null || true
   fi
+  if [ "$update_started" = true ] && [ -s "$pending_file" ] && [ "$rolling_back" != true ]; then
+    rolling_back=true
+    if rollback_transaction; then
+      logger -t mosdns-update-rules "Interrupted rules update rolled back to the previous release"
+    else
+      logger -t mosdns-update-rules "Interrupted rules update rollback failed; pending record retained"
+    fi
+  fi
   case "$work_dir" in
     /var/tmp/mosdns-rules.*) rm -rf -- "$work_dir" ;;
   esac
+  exit "$result"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -46,6 +75,162 @@ fetch() {
     --proto '=https' --tlsv1.2 \
     --output "$output" "$url"
 }
+
+write_pending() {
+  pending_phase=$1
+  pending_old_target=$2
+  pending_new_target=$3
+  temporary=$pending_file.tmp.$$
+  {
+    printf 'format=1\n'
+    printf 'kind=rules\n'
+    printf 'phase=%s\n' "$pending_phase"
+    printf 'old_target=%s\n' "$pending_old_target"
+    printf 'new_target=%s\n' "$pending_new_target"
+  } >"$temporary" || { rm -f -- "$temporary"; return 1; }
+  chmod 600 "$temporary" || { rm -f -- "$temporary"; return 1; }
+  sync_path "$temporary" || { rm -f -- "$temporary"; return 1; }
+  mv -f -- "$temporary" "$pending_file" || { rm -f -- "$temporary"; return 1; }
+  sync_path "$pending_file"
+}
+
+read_pending() {
+  pending_phase=
+  pending_old_target=
+  pending_new_target=
+  kind=
+  while IFS='=' read -r key value; do
+    case "$key" in
+      format) [ "$value" = 1 ] || return 1 ;;
+      kind) kind=$value ;;
+      phase) pending_phase=$value ;;
+      old_target) pending_old_target=$value ;;
+      new_target) pending_new_target=$value ;;
+    esac
+  done <"$pending_file"
+  [ "$kind" = rules ] || return 1
+  case "$pending_phase" in
+    prepared|applied|committed|restoring) ;;
+    *) return 1 ;;
+  esac
+  case "$pending_new_target" in
+    releases/*[!0-9A-Za-z._-]*|releases/|'') return 1 ;;
+  esac
+  case "$pending_old_target" in
+    '') ;;
+    releases/*[!0-9A-Za-z._-]*) return 1 ;;
+  esac
+}
+
+clear_pending() {
+  rm -f -- "$pending_file"
+  sync_path "$rules_root"
+}
+
+current_target() {
+  if [ -L "$current_link" ]; then
+    readlink "$current_link"
+  else
+    printf ''
+  fi
+}
+
+switch_current() {
+  target=$1
+  new_link=$rules_root/.current.new.$$
+  rm -f -- "$new_link"
+  ln -s "$target" "$new_link" || return 1
+  mv -Tf -- "$new_link" "$current_link" || { rm -f -- "$new_link"; return 1; }
+  sync_path "$rules_root"
+}
+
+restore_current() {
+  target=$1
+  if [ -n "$target" ]; then
+    [ -d "$rules_root/$target" ] || return 1
+    switch_current "$target"
+  else
+    rm -f -- "$current_link"
+    sync_path "$rules_root"
+  fi
+}
+
+# A rules record that is not committed means the new release never passed its
+# health gate.  Restore the recorded old target instead of trusting whatever
+# symlink the crash left behind.
+recover_pending() {
+  [ -s "$pending_file" ] || return 0
+  if ! read_pending; then
+    logger -t mosdns-update-rules "Pending rules record is invalid; refusing to guess"
+    return 1
+  fi
+  current=$(current_target)
+  if [ "$pending_phase" = committed ]; then
+    if [ "$current" = "$pending_new_target" ]; then
+      clear_pending
+      logger -t mosdns-update-rules "Committed rules release already passed its health gate"
+      return 0
+    fi
+    logger -t mosdns-update-rules "Committed rules release no longer matches the current link"
+    return 1
+  fi
+  if [ "$current" = "$pending_old_target" ]; then
+    clear_pending
+    logger -t mosdns-update-rules "Pending rules update had not switched the current link; record cleared"
+    return 0
+  fi
+  if [ -n "$pending_old_target" ] && [ ! -d "$rules_root/$pending_old_target" ]; then
+    logger -t mosdns-update-rules "Pending rules record names a missing old release"
+    return 1
+  fi
+  write_pending restoring "$pending_old_target" "$pending_new_target" || return 1
+  if ! restore_current "$pending_old_target"; then
+    logger -t mosdns-update-rules "Could not restore the recorded old rules release"
+    return 1
+  fi
+  if ! systemctl restart mosdns.service; then
+    logger -t mosdns-update-rules "Could not restart mosdns after restoring the old rules"
+    return 1
+  fi
+  if /usr/local/sbin/mosdns-healthcheck; then
+    logger -t mosdns-update-rules "Interrupted rules update rolled back; the old rules are healthy"
+  else
+    logger -t mosdns-update-rules "Interrupted rules update rolled back; the old rules failed their health check"
+  fi
+  clear_pending
+}
+
+rollback_transaction() {
+  [ -n "$new_target" ] || return 1
+  write_pending restoring "$old_target" "$new_target" || return 1
+  if ! restore_current "$old_target"; then
+    logger -t mosdns-update-rules "Restoring the previous rules release failed"
+    return 1
+  fi
+  systemctl restart mosdns.service || true
+  if ! /usr/local/sbin/mosdns-healthcheck; then
+    logger -t mosdns-update-rules "Previous rules release failed its post-rollback health check"
+  fi
+  clear_pending
+}
+
+# Recovery is the first thing a new run does, before any network access: the
+# pending record decides which rules release is current, not the download hash.
+if [ -s "$pending_file" ]; then
+  if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
+    logger -t mosdns-update-rules "A pending rules recovery is required before a dry run"
+    exit 1
+  fi
+  exec 8>"$maintenance_lock"
+  if ! flock -n 8; then
+    logger -t mosdns-update-rules "Pending rules recovery is waiting for maintenance"
+    exit 1
+  fi
+  if ! recover_pending; then
+    exit 1
+  fi
+  exit 0
+fi
 
 fetch "$work_dir/rules-release.json" \
   https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases/latest
@@ -182,6 +367,20 @@ if [ "${MOSDNS_UPDATE_DRY_RUN:-0}" = 1 ]; then
   exit 0
 fi
 
+# Only download and candidate validation happen outside the maintenance lock;
+# switching the current release and restarting mosdns hold it.
+exec 8>"$maintenance_lock"
+if ! flock -n 8; then
+  logger -t mosdns-update-rules "Maintenance is active; candidate discarded"
+  exit 0
+fi
+if [ -s "$pending_file" ]; then
+  if ! recover_pending; then
+    exit 1
+  fi
+  exit 0
+fi
+
 rules_tag=$(jq -er '.tag_name' "$work_dir/rules-release.json")
 case "$rules_tag" in
   *[!0-9A-Za-z._-]*|'') exit 1 ;;
@@ -193,34 +392,41 @@ install -d -o root -g root -m 755 "$releases_dir"
 install -d -o root -g root -m 755 "$release_dir"
 for file in direct-list.txt proxy-list.txt apple-cn.txt google-cn.txt geoip-cn.txt; do
   install -o root -g root -m 644 "$work_dir/$file" "$release_dir/$file"
+  sync_path "$release_dir/$file"
 done
 {
-  printf 'rules_release=%s\n' "$rules_tag"
-  printf 'geoip_commit=%s\n' "$geoip_commit"
-  sha256sum \
-    "$release_dir/direct-list.txt" \
-    "$release_dir/proxy-list.txt" \
-    "$release_dir/apple-cn.txt" \
-    "$release_dir/google-cn.txt" \
-    "$release_dir/geoip-cn.txt"
+  printf 'rules_release=%s
+' "$rules_tag"
+  printf 'geoip_commit=%s
+' "$geoip_commit"
+  sha256sum     "$release_dir/direct-list.txt"     "$release_dir/proxy-list.txt"     "$release_dir/apple-cn.txt"     "$release_dir/google-cn.txt"     "$release_dir/geoip-cn.txt"
 } >"$release_dir/source.txt"
 chmod 644 "$release_dir/source.txt"
+sync_path "$release_dir/source.txt"
+sync_path "$release_dir"
+sync_path "$releases_dir"
 
-old_target=$(readlink "$current_link" 2>/dev/null || true)
-new_link=$rules_root/.current.new.$$
-ln -s "releases/$version" "$new_link"
-mv -Tf "$new_link" "$current_link"
+old_target=$(current_target)
+new_target=releases/$version
+write_pending prepared "$old_target" "$new_target"
+
+update_started=true
+switch_current "$new_target"
+write_pending applied "$old_target" "$new_target"
 
 if systemctl restart mosdns.service &&
    /usr/local/sbin/mosdns-healthcheck; then
+  write_pending committed "$old_target" "$new_target"
+  clear_pending
+  update_started=false
   logger -t mosdns-update-rules "rules updated successfully"
-  current_target=$(readlink "$current_link")
-  find "$releases_dir" -mindepth 1 -maxdepth 1 -type d \
-    -printf '%T@ %p\n' | sort -nr | awk 'NR > 5 { print $2 }' |
+  current_target_link=$(current_target)
+  find "$releases_dir" -mindepth 1 -maxdepth 1 -type d     -printf '%T@ %p
+' | sort -nr | awk 'NR > 5 { print $2 }' |
     while IFS= read -r old_release; do
       case "$old_release" in
         "$releases_dir"/*)
-          [ "releases/${old_release##*/}" = "$current_target" ] ||
+          [ "releases/${old_release##*/}" = "$current_target_link" ] ||
             rm -rf -- "$old_release"
           ;;
       esac
@@ -229,13 +435,10 @@ if systemctl restart mosdns.service &&
 fi
 
 logger -t mosdns-update-rules "rules update failed health checks; rolling back"
-rollback_link=$rules_root/.current.rollback.$$
-if [ -n "$old_target" ]; then
-  ln -s "$old_target" "$rollback_link"
-  mv -Tf "$rollback_link" "$current_link"
+if rollback_transaction; then
+  logger -t mosdns-update-rules "rules update rolled back to $old_target"
 else
-  rm -f "$current_link"
+  logger -t mosdns-update-rules "rules update rollback failed; pending record retained"
 fi
-systemctl restart mosdns.service || true
-/usr/local/sbin/mihomo-dns-mode auto || true
+update_started=false
 exit 1

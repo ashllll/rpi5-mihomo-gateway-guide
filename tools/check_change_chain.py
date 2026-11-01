@@ -401,6 +401,448 @@ def core_swap_mutation_killed():
 
 
 # ---------------------------------------------------------------------------
+# F-06: mosdns-update-binary keeps a durable pending record around the swap.
+# ---------------------------------------------------------------------------
+
+BINARY_OLD = '''#!/bin/sh
+if [ "${1:-}" = version ]; then echo 'v1.0.0'; exit 0; fi
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+'''
+BINARY_NEW = '''#!/bin/sh
+if [ "${1:-}" = version ]; then echo 'v2.0.0'; exit 0; fi
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+'''
+BINARY_BROKEN = '''#!/bin/sh
+if [ "${1:-}" = version ]; then echo 'v2.0.0'; exit 0; fi
+exit 1
+'''
+
+BINARY_STUBS = {
+    'systemctl': '''#!/usr/bin/env python3
+import os, signal, sys, time
+root = os.environ['MOSDNS_ROOT']
+state = os.path.join(root, 'state')
+os.makedirs(state, exist_ok=True)
+def read(name, default='0'):
+    try:
+        return open(os.path.join(state, name)).read().strip()
+    except OSError:
+        return default
+def write(name, value):
+    open(os.path.join(state, name), 'w').write(str(value) + '\\n')
+args = sys.argv[1:]
+if args and args[0] == 'restart':
+    count = int(read('restart_count')) + 1
+    write('restart_count', count)
+    if os.environ.get('KILL_ON_RESTART') == '1' and count == 1:
+        os.kill(int(os.environ['TOP_PID']), signal.SIGKILL)
+        time.sleep(0.2)
+        sys.exit(137)
+    sys.exit(0)
+sys.exit(0)
+''',
+    'mosdns-healthcheck': '''#!/usr/bin/env python3
+import os, sys
+sys.exit(int(os.environ.get('HEALTH_RC', '0')))
+''',
+    'mihomo-dns-mode': '''#!/usr/bin/env python3
+import os, sys
+root = os.environ['MOSDNS_ROOT']
+os.makedirs(os.path.join(root, 'state'), exist_ok=True)
+open(os.path.join(root, 'state', 'dns-mode.log'), 'a').write(' '.join(sys.argv[1:]) + '\\n')
+sys.exit(0)
+''',
+    'dig': '''#!/usr/bin/env python3
+import sys
+args = sys.argv[1:]
+if 'baidu.com' in args:
+    print('203.0.113.10')
+elif 'openai.com' in args:
+    print('198.18.0.1')
+''',
+    'curl': '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+url = args[-1]
+out = args[args.index('--output') + 1] if '--output' in args else None
+fixtures = os.environ['MOSDNS_FIXTURES']
+if 'api.github.com' in url:
+    data = open(os.path.join(fixtures, 'release.json'), 'rb').read()
+elif 'mosdns-linux-arm64.zip' in url:
+    data = open(os.path.join(fixtures, 'mosdns.zip'), 'rb').read()
+else:
+    sys.exit(0)
+if out:
+    open(out, 'wb').write(data)
+sys.exit(0)
+''',
+    'find': '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if '-printf' in args and any('%T@' in item for item in args):
+    root = next((item for item in args if not item.startswith('-') and '%T@' not in item), None)
+    if root:
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                print('%.9f %s' % (os.stat(path).st_mtime, path))
+    sys.exit(0)
+os.execv('/usr/bin/find', ['/usr/bin/find'] + args)
+''',
+}
+
+
+def binary_rewrite(text, sandbox):
+    return replace_all(text, [
+        ('/etc/', str(sandbox.root) + '/etc/'),
+        ('/usr/local/bin', str(sandbox.root / 'usr/local/bin')),
+        ('/usr/local/sbin', str(sandbox.root / 'usr/local/sbin')),
+        ('/var/tmp', str(sandbox.root / 'var/tmp')),
+        ('/run/lock', str(sandbox.root / 'run/lock')),
+    ])
+
+
+def binary_fixture(sandbox):
+    import hashlib
+    import json
+    import zipfile
+    root = sandbox.root
+    write(root / 'etc/mosdns/config.yaml', '''log:
+  level: info
+plugins:
+  - tag: forward
+    type: forward
+    args:
+      upstreams:
+        - addr: 127.0.0.1:5335
+api:
+  http: 127.0.0.1:9091
+''')
+    write(root / 'etc/mihomo-automation.env', 'MIHOMO_MIXED_PORT=7890\n')
+    write(root / 'usr/local/bin/mosdns', BINARY_OLD, 0o755)
+    for name, body in BINARY_STUBS.items():
+        make_stub(sandbox.bin, name, body)
+        if name in ('mosdns-healthcheck', 'mihomo-dns-mode'):
+            shutil.copyfile(sandbox.bin / name, root / 'usr/local/sbin' / name)
+            (root / 'usr/local/sbin' / name).chmod(0o755)
+    fixtures = sandbox.work / 'fixtures'
+    fixtures.mkdir()
+    zip_path = fixtures / 'mosdns.zip'
+    with zipfile.ZipFile(zip_path, 'w') as archive:
+        archive.writestr('mosdns', BINARY_NEW)
+    digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+    release = {'tag_name': 'v2.0.0', 'draft': False, 'prerelease': False,
+               'assets': [{'name': 'mosdns-linux-arm64.zip',
+                           'browser_download_url':
+                               'https://github.com/IrineSistiana/mosdns/releases/download/v2.0.0/mosdns-linux-arm64.zip',
+                           'digest': 'sha256:' + digest}]}
+    write(fixtures / 'release.json', json.dumps(release), 0o644)
+
+
+def binary_copy(sandbox):
+    path = sandbox.work / 'update-binary'
+    write(path, binary_rewrite((SBIN / 'mosdns-update-binary').read_text(encoding='utf-8'), sandbox), 0o755)
+    launch = sandbox.work / 'launch.py'
+    write(launch, '''#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.environ['TOP_PID'] = str(os.getpid())
+os.execvp(sys.argv[1], sys.argv[1:])
+''', 0o755)
+    return path, launch
+
+
+def binary_run(sandbox, script, launch, **extra):
+    env = sandbox.env(MOSDNS_ROOT=sandbox.root,
+                      MOSDNS_FIXTURES=sandbox.work / 'fixtures', **extra)
+    return subprocess.run([PYTHON, str(launch), SH, str(script)], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+def binary_live_version(sandbox):
+    result = subprocess.run([str(sandbox.root / 'usr/local/bin/mosdns'), 'version'],
+                            capture_output=True, text=True, timeout=10)
+    return result.stdout.strip()
+
+
+def binary_scenario():
+    with Sandbox('mosdns-binary') as sandbox:
+        script, launch = binary_copy(sandbox)
+        binary_fixture(sandbox)
+        pending = sandbox.root / 'etc/mosdns/backups/transaction.pending'
+        result = binary_run(sandbox, script, launch, KILL_ON_RESTART='1')
+        check(result.returncode in (-9, 137), 'first run did not die at restart: rc=%s %s' %
+              (result.returncode, result.stdout + result.stderr))
+        check(pending.is_file(), 'no pending record survived the crash')
+        fields = dict(line.split('=', 1) for line in pending.read_text(encoding='utf-8').splitlines())
+        check(fields.get('kind') == 'binary', 'pending record is not a binary transaction: %r' % fields)
+        check(fields.get('phase') == 'applied', 'pending phase is not applied: %r' % fields)
+        check(fields.get('old_sha256') == digest(BINARY_OLD.encode()), 'pending lost the old sha256')
+        check(fields.get('new_sha256') == digest(BINARY_NEW.encode()), 'pending lost the new sha256')
+        check(binary_live_version(sandbox) == 'v2.0.0', 'the crash did not leave the new binary live')
+        # The version string still claims v2, but the binary no longer starts.
+        write(sandbox.root / 'usr/local/bin/mosdns', BINARY_BROKEN, 0o755)
+        result = binary_run(sandbox, script, launch, HEALTH_RC='1')
+        check(result.returncode == 0, 'recovery run failed: ' + result.stdout + result.stderr)
+        check(binary_live_version(sandbox) == 'v1.0.0',
+              'recovery did not restore the old binary while the new one was unverified')
+        check(not pending.exists(), 'recovery left the pending record behind')
+        # With a healthy candidate the same script must commit and clear.
+        result = binary_run(sandbox, script, launch)
+        check(result.returncode == 0, 'healthy update failed: ' + result.stdout + result.stderr)
+        check(binary_live_version(sandbox) == 'v2.0.0', 'healthy update did not install the new binary')
+        check(not pending.exists(), 'committed update left the pending record behind')
+
+
+def binary_mutation_killed():
+    text = (SBIN / 'mosdns-update-binary').read_text(encoding='utf-8')
+    marker = 'if [ -s "$pending_file" ]; then'
+    check(marker in text, 'binary recovery block not found')
+    mutated = text.replace(marker, 'if false; then', 1)
+    with Sandbox('mosdns-binary-mutation') as sandbox:
+        script = sandbox.work / 'update-binary'
+        write(script, binary_rewrite(mutated, sandbox), 0o755)
+        launch = sandbox.work / 'launch.py'
+        write(launch, '''#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.environ['TOP_PID'] = str(os.getpid())
+os.execvp(sys.argv[1], sys.argv[1:])
+''', 0o755)
+        binary_fixture(sandbox)
+        result = binary_run(sandbox, script, launch, KILL_ON_RESTART='1')
+        check(result.returncode in (-9, 137), 'mutated first run did not crash as expected')
+        write(sandbox.root / 'usr/local/bin/mosdns', BINARY_BROKEN, 0o755)
+        result = binary_run(sandbox, script, launch, HEALTH_RC='1')
+        try:
+            check(binary_live_version(sandbox) == 'v1.0.0',
+                  'mutated run skipped recovery and left the broken binary live')
+            check(result.returncode == 0, 'mutated recovery run failed unexpectedly')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: recovery-before-version is not exercised')
+
+
+# ---------------------------------------------------------------------------
+# F-06: mosdns-update-rules keeps a durable pending record around the switch.
+# ---------------------------------------------------------------------------
+
+RULES_TAG = '20261101'
+RULES_VERSION = RULES_TAG + '-01234567'
+RULES_FILES = ('direct-list.txt', 'proxy-list.txt', 'apple-cn.txt',
+               'google-cn.txt', 'geoip-cn.txt')
+RULES_LINES = {'direct-list.txt': 50000, 'proxy-list.txt': 10000,
+               'apple-cn.txt': 100, 'google-cn.txt': 50, 'geoip-cn.txt': 3000}
+
+RULES_CURL = '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+url = args[-1]
+out = args[args.index('--output') + 1] if '--output' in args else None
+fixtures = os.environ['MOSDNS_FIXTURES']
+if os.environ.get('FAIL_FETCH') == '1' and ('github.com' in url or 'githubusercontent.com' in url):
+    sys.exit(22)
+mapping = [
+    ('v2ray-rules-dat/releases/latest', 'rules-release.json'),
+    ('geoip/commits/release', 'geoip-commit.json'),
+    ('geoip/contents/text/cn.txt', 'geoip-content.json'),
+    ('/text/cn.txt', 'geoip-cn.txt'),
+]
+target = None
+for needle, name in mapping:
+    if needle in url:
+        target = os.path.join(fixtures, name)
+        break
+if target is None and '/releases/download/' in url:
+    target = os.path.join(fixtures, url.rsplit('/', 1)[-1])
+if target is None:
+    sys.exit(0)
+data = open(target, 'rb').read()
+if out:
+    open(out, 'wb').write(data)
+sys.exit(0)
+'''
+
+RULES_SED = '''#!/usr/bin/env python3
+import os, platform, sys
+args = sys.argv[1:]
+if platform.system() == 'Darwin' and '-i' in args:
+    index = args.index('-i')
+    args = args[:index] + ['-i', ''] + args[index + 1:]
+os.execv('/usr/bin/sed', ['/usr/bin/sed'] + args)
+'''
+
+RULES_WC = '''#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args == ['-c']:
+    print(len(sys.stdin.buffer.read()))
+    sys.exit(0)
+os.execv('/usr/bin/wc', ['/usr/bin/wc'] + args)
+'''
+
+RULES_MV = '''#!/usr/bin/env python3
+import os, sys
+args = []
+for item in sys.argv[1:]:
+    if item.startswith('-') and 'T' in item:
+        item = item.replace('T', '')
+        if not item:
+            continue
+    args.append(item)
+os.execv('/bin/mv', ['/bin/mv'] + args)
+'''
+
+
+def rules_rewrite(text, sandbox):
+    return replace_all(text, [
+        ('/etc/', str(sandbox.root) + '/etc/'),
+        ('/usr/local/bin', str(sandbox.root / 'usr/local/bin')),
+        ('/usr/local/sbin', str(sandbox.root / 'usr/local/sbin')),
+        ('/var/tmp', str(sandbox.root / 'var/tmp')),
+        ('/run/lock', str(sandbox.root / 'run/lock')),
+    ])
+
+
+def rules_fixture(sandbox):
+    import hashlib
+    import json
+    root = sandbox.root
+    write(root / 'etc/mosdns/config.yaml', '''log:
+  level: info
+plugins:
+  - tag: forward
+    type: forward
+    args:
+      upstreams:
+        - addr: 127.0.0.1:5335
+api:
+  http: 127.0.0.1:9091
+''')
+    write(root / 'etc/mihomo-automation.env', 'MIHOMO_MIXED_PORT=7890\n')
+    write(root / 'usr/local/bin/mosdns', BINARY_NEW, 0o755)
+    for name, body in {
+        'systemctl': BINARY_STUBS['systemctl'],
+        'mosdns-healthcheck': BINARY_STUBS['mosdns-healthcheck'],
+        'mihomo-dns-mode': BINARY_STUBS['mihomo-dns-mode'],
+        'dig': BINARY_STUBS['dig'],
+        'curl': RULES_CURL,
+        'find': BINARY_STUBS['find'],
+        'sed': RULES_SED,
+        'mv': RULES_MV,
+        'wc': RULES_WC,
+    }.items():
+        make_stub(sandbox.bin, name, body)
+        if name in ('mosdns-healthcheck', 'mihomo-dns-mode'):
+            shutil.copyfile(sandbox.bin / name, root / 'usr/local/sbin' / name)
+            (root / 'usr/local/sbin' / name).chmod(0o755)
+    fixtures = sandbox.work / 'fixtures'
+    fixtures.mkdir()
+    assets = []
+    for name, count in RULES_LINES.items():
+        content = ('example.invalid\n' * count).encode()
+        (fixtures / name).write_bytes(content)
+        if name != 'geoip-cn.txt':
+            assets.append({'name': name,
+                           'browser_download_url':
+                               'https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/%s/%s' % (RULES_TAG, name),
+                           'digest': 'sha256:' + hashlib.sha256(content).hexdigest()})
+    write(fixtures / 'rules-release.json',
+          json.dumps({'tag_name': RULES_TAG, 'assets': assets}), 0o644)
+    geoip = (fixtures / 'geoip-cn.txt').read_bytes()
+    blob = hashlib.sha1(b'blob %d\0' % len(geoip) + geoip).hexdigest()
+    write(fixtures / 'geoip-commit.json',
+          json.dumps({'sha': '0123456789abcdef0123456789abcdef01234567'}), 0o644)
+    write(fixtures / 'geoip-content.json', json.dumps({'sha': blob}), 0o644)
+
+
+def rules_copy(sandbox):
+    path = sandbox.work / 'update-rules'
+    write(path, rules_rewrite((SBIN / 'mosdns-update-rules').read_text(encoding='utf-8'), sandbox), 0o755)
+    launch = sandbox.work / 'launch.py'
+    write(launch, '''#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.environ['TOP_PID'] = str(os.getpid())
+os.execvp(sys.argv[1], sys.argv[1:])
+''', 0o755)
+    return path, launch
+
+
+def rules_run(sandbox, script, launch, **extra):
+    env = sandbox.env(MOSDNS_ROOT=sandbox.root,
+                      MOSDNS_FIXTURES=sandbox.work / 'fixtures', **extra)
+    return subprocess.run([PYTHON, str(launch), SH, str(script)], env=env,
+                          capture_output=True, text=True, timeout=90)
+
+
+def rules_current(sandbox):
+    link = sandbox.root / 'etc/mosdns/rules/current'
+    if not link.is_symlink():
+        return ''
+    return os.readlink(link)
+
+
+def rules_scenario():
+    with Sandbox('mosdns-rules') as sandbox:
+        script, launch = rules_copy(sandbox)
+        rules_fixture(sandbox)
+        pending = sandbox.root / 'etc/mosdns/rules/pending'
+        result = rules_run(sandbox, script, launch, KILL_ON_RESTART='1')
+        check(result.returncode in (-9, 137), 'first rules run did not die at restart: rc=%s %s' %
+              (result.returncode, result.stdout + result.stderr))
+        check(pending.is_file(), 'no pending rules record survived the crash')
+        fields = dict(line.split('=', 1) for line in pending.read_text(encoding='utf-8').splitlines())
+        check(fields.get('kind') == 'rules', 'pending record is not a rules transaction: %r' % fields)
+        check(fields.get('phase') == 'applied', 'pending rules phase is not applied: %r' % fields)
+        check(fields.get('new_target') == 'releases/' + RULES_VERSION,
+              'pending record lost the new release target: %r' % fields)
+        check(rules_current(sandbox) == 'releases/' + RULES_VERSION,
+              'the crash did not leave the new rules release current')
+        # Recovery must put the empty pre-update state back without health.
+        result = rules_run(sandbox, script, launch, HEALTH_RC='1', FAIL_FETCH='1')
+        check(result.returncode == 0, 'rules recovery run failed: ' + result.stdout + result.stderr)
+        check(rules_current(sandbox) == '',
+              'rules recovery did not restore the old (empty) current link')
+        check(not pending.exists(), 'rules recovery left the pending record behind')
+        # A healthy run must commit the release and clear the record.
+        result = rules_run(sandbox, script, launch)
+        check(result.returncode == 0, 'healthy rules update failed: ' + result.stdout + result.stderr)
+        check(rules_current(sandbox) == 'releases/' + RULES_VERSION,
+              'healthy rules update did not switch the current release')
+        check(not pending.exists(), 'committed rules update left the pending record behind')
+
+
+def rules_mutation_killed():
+    text = (SBIN / 'mosdns-update-rules').read_text(encoding='utf-8')
+    marker = 'if [ -s "$pending_file" ]; then'
+    check(marker in text, 'rules recovery block not found')
+    mutated = text.replace(marker, 'if false; then', 1)
+    with Sandbox('mosdns-rules-mutation') as sandbox:
+        script = sandbox.work / 'update-rules'
+        write(script, rules_rewrite(mutated, sandbox), 0o755)
+        launch = sandbox.work / 'launch.py'
+        write(launch, '''#!/usr/bin/env python3
+import os, sys
+os.setsid()
+os.environ['TOP_PID'] = str(os.getpid())
+os.execvp(sys.argv[1], sys.argv[1:])
+''', 0o755)
+        rules_fixture(sandbox)
+        result = rules_run(sandbox, script, launch, KILL_ON_RESTART='1')
+        check(result.returncode in (-9, 137), 'mutated first rules run did not crash as expected')
+        result = rules_run(sandbox, script, launch, HEALTH_RC='1', FAIL_FETCH='1')
+        try:
+            check(rules_current(sandbox) == '',
+                  'mutated run skipped recovery and kept the unverified release current')
+        except CaseFailure:
+            return
+        raise CaseFailure('mutation survived: recovery-before-download is not exercised')
+
+
+# ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
 
@@ -423,6 +865,10 @@ def main():
     case('F-07 core-swap inconsistent refused', core_swap_inconsistent_refused)
     case('F-07 core-swap intent fsynced', core_swap_intent_fsynced)
     case('F-07 core-swap mutation killed', core_swap_mutation_killed)
+    case('F-06 binary pending recovery', binary_scenario)
+    case('F-06 binary mutation killed', binary_mutation_killed)
+    case('F-06 rules pending recovery', rules_scenario)
+    case('F-06 rules mutation killed', rules_mutation_killed)
     if FAILURES:
         print('change-chain: %d scenario(s) failed: %s' % (len(FAILURES), ', '.join(FAILURES)))
         return 1
