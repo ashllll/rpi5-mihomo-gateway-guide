@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "504b7917aebf5102171ad8440bea7520e4d62774e82c2a89f4dfc1c32a8ade6d",
+  "release_id": "30c90a6beb61069d1b6933a1f47dca26b5bef8337555639957f38076b6068010",
   "files": [
     {
       "source": "check-release.py",
@@ -128,7 +128,7 @@
     {
       "source": "policy/route-defaults.yaml",
       "target": null,
-      "sha256": "0da181b64dac18113aef6e7853aecf1f3710b43d47dd9ef7f845262ed58df16f"
+      "sha256": "f96826d73f8710f1f236c5b71c415393f76172cbf73271075f0cc75359f2ec70"
     },
     {
       "source": "sbin/dnsmasq-safe-start",
