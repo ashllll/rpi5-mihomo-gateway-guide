@@ -1,10 +1,9 @@
 # 无代理节点的树莓派恢复镜像
 
 这是可写入 SD 卡或 USB NVMe 的 Raspberry Pi 5 ARM64 系统恢复底包：保留操作系统、网关程序和公开自动化源码，
-个人账号、网络、节点和订阅在恢复时重新配置。计划中的下载入口是
+个人账号、网络、节点和订阅在恢复时重新配置。下载入口是
 [recovery-2026.10.12](https://github.com/ashllll/rpi5-mihomo-gateway-guide/releases/tag/recovery-2026.10.12)，
-但该 Release 目前仍是**草稿**（GitHub 上 `draft=true`，未公开发布），公众还取不到；在它发布之前，
-请按 `image/` 的构建步骤自行生成镜像。
+已于 2026-11-02 公开发布并标为预发布（镜像未在真实介质上启动验证）；也可以按 `image/` 的构建步骤自行生成镜像。
 
 它采用与原部署同批次的官方 Raspberry Pi OS Lite / Debian 13 底包重新制作文件系统，不读取原系统的个人配置、
 日志、容器数据或磁盘空闲块。删除过的旧密钥和订阅不会因整盘克隆而进入公开镜像。
@@ -27,7 +26,7 @@
 
 ## 下载和核验
 
-Release 发布后，在电脑上从 Release 下载下面四个文件到同一目录，或使用 GitHub CLI（草稿状态下这些命令只有维护者可用）：
+在电脑上从 Release 下载下面四个文件到同一目录，或使用 GitHub CLI：
 
 ```sh
 gh release download recovery-2026.10.12 --repo ashllll/rpi5-mihomo-gateway-guide \
