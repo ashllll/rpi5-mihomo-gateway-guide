@@ -96,7 +96,7 @@ jobs:
           test "$(git -C src rev-parse HEAD)" = "$commit"
           git -C src apply "$GITHUB_WORKSPACE/core/mihomo-v1.19.28-budget.patch"
           cd src
-          go build -trimpath -tags "with_gvisor no_tailscale" \
+          CGO_ENABLED=0 go build -trimpath -tags "with_gvisor no_tailscale" \
             -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
             -o "$RUNNER_TEMP/core-arm64" .
           "$RUNNER_TEMP/core-arm64" -v | tee "$RUNNER_TEMP/version.txt"
@@ -104,4 +104,5 @@ jobs:
           grep -q with_gvisor "$RUNNER_TEMP/version.txt"
           test "$("$RUNNER_TEMP/core-arm64" -measurement-budget-protocol)" = mihomo-budget-v1
           sha256sum "$RUNNER_TEMP/core-arm64"
+          stat -c '%s bytes' "$RUNNER_TEMP/core-arm64"
           (cd "$GITHUB_WORKSPACE" && MIHOMO_TEST_BINARY="$RUNNER_TEMP/core-arm64" ./scripts/preflight.sh --profile core)
