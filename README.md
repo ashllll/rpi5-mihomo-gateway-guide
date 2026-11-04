@@ -13,9 +13,24 @@
 <a href="#架构总览">架构</a> ·
 <a href="#单元15-个-enabled3-个休眠">单元表</a> ·
 <a href="#装成这台机器">安装</a> ·
+<a href="#仓库与真机的一致范围">一致性</a> ·
 <a href="#边界">边界</a> ·
+<a href="#发布前自查">自查</a> ·
+<a href="#主仓库与-ci">CI</a> ·
 <a href="docs/README.md">文档索引</a>
 </p>
+
+## 读这篇
+
+| 你想… | 读这篇 |
+|---|---|
+| 装成这台机器 | [部署文档](docs/deployment.zh-CN.md) |
+| 日常运维、故障处理 | [运维文档](docs/operations.zh-CN.md) |
+| 看懂数据面、DNS 与门禁 | [架构文档](docs/architecture.zh-CN.md) |
+| 验证、验收与现场边界 | [验证矩阵](docs/wiki/validation.md) |
+| 安全边界与暴露面 | [SECURITY.md](SECURITY.md) |
+
+全部文档见[文档索引](docs/README.md)。
 
 ## 30 秒看懂
 
@@ -31,7 +46,7 @@
 
 <img src="assets/readme/gates.svg" width="100%" alt="上线依次判定：配置自检、启动门禁、常态观测、换核回滚，任一步失败都带证据退回">
 
-断言的对象是内核与链路，不是进程存活。四层时间尺度叠在一起，任何一种静默失败都会在可接受的时间内被抓住：
+断言的对象是内核与链路，不是进程存活。四层时间尺度，加上节点探测与告警，叠在一起：任何一种静默失败都会在可接受的时间内被抓住：
 
 | 层 | 判定对象 | 周期 | 失败动作 |
 |---|---|---|---|
@@ -42,11 +57,19 @@
 | 节点探测 | 组内每个节点穿节点取一次状态码（`204` / `200-499` / `401`），结果决定组内排序 | 每 250 秒 | `url-test` 自动换最快可用，`fallback` 顺序降级 |
 | 告警 | 单元失败、门禁迁移、解析重启、MosDNS 兜底、巡检五类 | 事件驱动 | `mihomo-alert` 推送（Server酱 / Bark），同 key 去重 |
 
+## 2026-10-25 事故：为什么门禁只认内核状态
+
+换核时漏编 `with_gvisor`，`mihomo -t` 通过、进程常驻，但 TUN 从未建立：国内直连照常，
+所有代理流量静默黑洞。当时的探针只看 nft 表是否存在，唯一的出口抽样走 mixed-port，
+绕开 TUN/redirect 链路，所以 TUN 没起来时照样返回 204、门禁照样绿。
+现在的启动门禁读表内真实规则、并要求一次走代理链路的出口验证。
+CI 的 `core-build` 与 `core-build-arm64` 因此从二进制本身断言 `with_gvisor`、版本串与预算协议。
+
 ## 一次连接怎么走
 
 <img src="assets/readme/path.svg" width="100%" alt="一次连接的路径：客户端、TUN 接管、nftables 白名单与 DNS 改写、规则与预算、最后出口">
 
-`ip rule 9000` 把 `proxy20`/`wg-ucg-pilot` 的流量送进表 `2022`，`inet mihomo` 在 prerouting
+`ip rule 9000–9010` 把 `proxy20`/`wg-ucg-pilot` 的流量送进表 `2022`，`inet mihomo` 在 prerouting
 先做白名单（核心自身、非内网、私网段直接 return），再把 DNS 查询 `dnat` 到 `198.18.0.2:53`、
 TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/forward 默认 drop）与
 `ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
@@ -94,13 +117,6 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 
 休眠不等于卸载：文件仍在 `/etc/systemd/system/`，`systemctl start` 可手动跑一次。
 
-## 2026-10-25 事故：为什么门禁只认内核状态
-
-换核时漏编 `with_gvisor`，`mihomo -t` 通过、进程常驻，但 TUN 从未建立：国内直连照常，
-所有代理流量静默黑洞。当时的探针只看 nft 表是否存在，唯一的出口抽样走 mixed-port，
-绕开 TUN/redirect 链路，所以 TUN 没起来时照样返回 204、门禁照样绿。
-现在的启动门禁读表内真实规则、并要求一次走代理链路的出口验证。
-
 ## 装成这台机器
 
 仓库只发布“装成这台机器”的运行层，不含网络事务、订阅内容与凭据。从裸 Debian 13 起：
@@ -134,17 +150,7 @@ sudo cat /run/mihomo-healthcheck/status
 | 站点态 | `automation/policy/capabilities.yaml`、`automation/etc/mihomo/config.local.yaml` | 账号、开关与私有覆写只在真机 `/etc/mihomo/adaptive/` 与合并后的 `config.yaml` 里 |
 | 凭据 | `secrets/*`、`/etc/mihomo-alert.env`、`/etc/mihomo/reconcile-targets.conf` | 不发布、不入库 |
 
-## 被删除的旧结构
-
-这个仓库曾同时维护“一键安装器 + 手动渲染器 + 运维层”三条产品线，与这台机器的现状不符，已删除：
-
-- `setup.sh`、`gateway/`：旧的一键安装器与默认值；网络事务由部署端手工完成。
-- `web/`、`design-demos/`、根目录 `dir-*-hero.svg`：旧发布页与设计演示。
-- 旧的影子评分与自动应用脚本，以及 4 个 unit：已被原生 URL 检测 + 预算准入取代。
-- `assets/current-*.{mmd,svg}`：旧网段与旧 DNS 流程的 8 个过期生成物。
-
-保留 `assets/historical-automation-2026-10-11.*` 作为历史快照；旧调试档案在
-[docs/deployment-debugging-summary.zh-CN.md](docs/deployment-debugging-summary.zh-CN.md)，外部项目研究在 [docs/research/](docs/research/)。
+> 2026-11-04 的 `automation/sbin/mihomo-policy-overlay` 规则修复尚未部署到真机；部署前该文件不在逐字节一致范围，其余 `automation/sbin/*` 不变。
 
 ## 边界
 
@@ -156,13 +162,12 @@ sudo cat /run/mihomo-healthcheck/status
 | `nft -c -f` 通过 | 目标机之外的环境可用；本机 nftables 表是部署端文件，不是通用模板 |
 
 入站模型：`lo` 与 established 之外，`wan0`/`wlan0` 只收上游 LAN 的 SSH 与 `8799`，
-VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理靠 `ip rule 9000` 与
+VLAN20 的管理口由 `nftables.d/vlan-pilot.nft` 单独放行；透明代理靠 `ip rule 9000–9010` 与
 `redirect` 工作，不再依赖整口信任。公开暴露面只有 `192.168.0.0/24` 可达的 SSH 与 `8799`（`/health` 之外的状态端点要求 Bearer token），
 详见 [SECURITY.md](SECURITY.md)。
 本仓库不发布订阅地址、节点标签、controller secret、WireGuard 私钥与真实 MAC。
 
 ## 发布前自查
-
 
 ```sh
 scripts/preflight.sh          # 唯一入口：全量门（含发布包与公开树扫描）
@@ -187,10 +192,28 @@ scripts/preflight.sh --list   # 只看本轮会跑哪些检查
 
 ## 主仓库与 CI
 
-主仓库是内网 Gitea；它的地址与账号只存在于部署环境，不写入公开树。GitHub 仓库由 Gitea 的推送镜像同步。
+发布闸门是 GitHub Actions；`.github/workflows/validate.yml` 的三个 job 都调用同一个 `scripts/preflight.sh`：
 
-- 推送进 Gitea 的受信分支后，`.gitea/workflows/gates.yml` 在 act_runner 上跑全量 `scripts/preflight.sh`；CI 绿了才算这次提交通过。token 通过 `http.extraheader` 传递，不进入 URL 或 `.git/config`；PR 事件不在自托管 runner 上执行 PR 代码。
-- 本机 `pre-push` 通过 `scripts/preflight.sh --staged` 执行同一映射；没有暂存内容时回落到全量。需要显式全量时用 `PUSH_FULL_GATE=1 git push`。
-- 作业镜像 `gitea-gate:bookworm` 需要 `git/python3/PyYAML/jq/util-linux/dnsutils`（检查脚本依赖 jq、flock 与 dig），定义在 NAS 的部署目录，不进公开树。
+| job | 跑什么 | runner |
+|---|---|---|
+| `preflight` | 全量门：所有 `tools/check_*.py`、`automation/check-release.py`、`tools/validate_public.py` | `ubuntu-latest` |
+| `core-build` | 构建 pinned 核心并跑 `--profile core`，再交叉编译 arm64 产物 | `ubuntu-latest` |
+| `core-build-arm64` | 在原生 arm64 上构建同一份核心，执行版本、tags 与预算协议断言 | `ubuntu-24.04-arm` |
+
+本机 `pre-push` 通过 `scripts/preflight.sh --staged` 执行同一映射；没有暂存内容时回落到全量。需要显式全量时用 `PUSH_FULL_GATE=1 git push`。
+
+2026-10-31 至 2026-11-02 曾用内网 Gitea + act_runner 作为主仓与闸门；该通道已停用，Gitea 与 NAS 工作副本不再参与提交、CI 或镜像同步。`.gitea/workflows/gates.yml` 仅作为历史文件保留，`tools/check_gate_integrity.py` 仍检查它不把 token 放进 URL。
+
+## 被删除的旧结构
+
+这个仓库曾同时维护“一键安装器 + 手动渲染器 + 运维层”三条产品线，与这台机器的现状不符，已删除：
+
+- `setup.sh`、`gateway/`：旧的一键安装器与默认值；网络事务由部署端手工完成。
+- `web/`、`design-demos/`、根目录 `dir-*-hero.svg`：旧发布页与设计演示。
+- 旧的影子评分与自动应用脚本，以及 4 个 unit：已被原生 URL 检测 + 预算准入取代。
+- `assets/current-*.{mmd,svg}`：旧网段与旧 DNS 流程的 8 个过期生成物。
+
+保留 `assets/historical-automation-2026-10-11.*` 作为历史快照；旧调试档案在
+[docs/deployment-debugging-summary.zh-CN.md](docs/deployment-debugging-summary.zh-CN.md)，外部项目研究在 [docs/research/](docs/research/)。
 
 [CC0 1.0 Universal](LICENSE) · 第三方产品名与商标归各自权利人所有。
