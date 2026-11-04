@@ -67,3 +67,42 @@ jobs:
             go build -trimpath -tags "with_gvisor no_tailscale" \
             -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
             -o "$RUNNER_TEMP/core-arm64" .
+
+  core-build-arm64:
+    # Arm64 acceptance: core-build above only cross-compiles the arm64 artifact
+    # and never runs it. This job builds it natively on an arm64 runner and
+    # proves the same version, gVisor tags and budget protocol from execution.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure PyYAML is available for the core profile
+        run: python3 -c "import yaml" || python3 -m pip install --quiet --break-system-packages pyyaml
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Build the pinned core natively and run the core profile
+        run: |
+          set -eu
+          commit=$(python3 -c "import json;print(json.load(open('core/upstream.json'))['commit'])")
+          git clone --filter=blob:none --no-checkout https://github.com/MetaCubeX/mihomo.git src
+          git -C src checkout --quiet "$commit"
+          test "$(git -C src rev-parse HEAD)" = "$commit"
+          git -C src apply "$GITHUB_WORKSPACE/core/mihomo-v1.19.28-budget.patch"
+          cd src
+          CGO_ENABLED=0 go build -trimpath -tags "with_gvisor no_tailscale" \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
+            -o "$RUNNER_TEMP/core-arm64" .
+          "$RUNNER_TEMP/core-arm64" -v | tee "$RUNNER_TEMP/version.txt"
+          grep -q 'linux arm64' "$RUNNER_TEMP/version.txt"
+          grep -q with_gvisor "$RUNNER_TEMP/version.txt"
+          test "$("$RUNNER_TEMP/core-arm64" -measurement-budget-protocol)" = mihomo-budget-v1
+          sha256sum "$RUNNER_TEMP/core-arm64"
+          stat -c '%s bytes' "$RUNNER_TEMP/core-arm64"
+          (cd "$GITHUB_WORKSPACE" && MIHOMO_TEST_BINARY="$RUNNER_TEMP/core-arm64" ./scripts/preflight.sh --profile core)
