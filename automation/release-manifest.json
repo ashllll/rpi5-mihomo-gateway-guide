@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "5ec7ce1bcfd20ee86069046f4377590f41c9b9c891dab31995255134ecaa3ba3",
+  "release_id": "446bdd039e8ceaf2be41d60d3b03aea61b899d3435e0e71239b923e956fc5c7b",
   "files": [
     {
       "source": "check-release.py",
@@ -72,7 +72,7 @@
     {
       "source": "etc/mihomo/README.md",
       "target": null,
-      "sha256": "bb1c60da314ef37842b033a4fb3926c8744c424129fac0a1d836585ec6540249"
+      "sha256": "7d4e0a8851e9fff21e4c5c8ae990490d14ee2fd584f84014c4e3ec8a44ae8137"
     },
     {
       "source": "etc/mihomo/config.local.yaml",
@@ -217,7 +217,7 @@
     {
       "source": "sbin/mihomo-policy-overlay",
       "target": "/usr/local/sbin/mihomo-policy-overlay",
-      "sha256": "b8330c518225b80b09f172aef76c1b9d0c763f784d788c70bcdd2ce84735b550",
+      "sha256": "a74dc9bb364c77c3d45780bc109bfbe18f126265bbece2866677a7f79541d6a7",
       "mode": 493
     },
     {
