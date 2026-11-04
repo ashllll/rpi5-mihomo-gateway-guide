@@ -847,8 +847,6 @@ def main() -> None:
         "DOMAIN-SUFFIX,ngc.nvidia.com,Model Download",
         "DOMAIN-SUFFIX,ollama.com,Model Download",
         "DOMAIN-SUFFIX,registry.ollama.ai,Model Download",
-        "DOMAIN-SUFFIX,storage.googleapis.com,Model Download",
-        "DOMAIN-SUFFIX,s3.amazonaws.com,Model Download",
         "DOMAIN,cdn.openai.com,Model Download",
         "DOMAIN,files.oaiusercontent.com,Model Download",
         # Operating-system and development-tool installers/updates.
@@ -888,18 +886,23 @@ def main() -> None:
         "DOMAIN-SUFFIX,telegram.me,Telegram",
         "DOMAIN-SUFFIX,telegra.ph,Telegram",
         "DOMAIN-SUFFIX,telesco.pe,Telegram",
-        "DOMAIN-KEYWORD,telegram,Telegram",
-        # Developer traffic is tested against GitHub itself.
-        "DOMAIN-SUFFIX,github.com,GitHub Download",
+        "DOMAIN-SUFFIX,telegram.dog,Telegram",
+        "DOMAIN-SUFFIX,tdesktop.com,Telegram",
+        "DOMAIN-SUFFIX,telegram-cdn.org,Telegram",
+        "DOMAIN-SUFFIX,cdn-telegram.org,Telegram",
+        # github.com itself is owned by route-defaults.yaml (git-transport);
+        # duplicating it here would shadow that default.
         "DOMAIN-SUFFIX,github.io,Developer",
         "DOMAIN-SUFFIX,githubusercontent.com,GitHub Download",
         "DOMAIN-SUFFIX,githubassets.com,GitHub Download",
-        "DOMAIN-SUFFIX,ghcr.io,Developer",
         "DOMAIN-SUFFIX,github.dev,Developer",
         # Generic Google assets should use the fast default path, not AI fixed IP.
         "DOMAIN-SUFFIX,gmail.com,Default Proxy",
         "DOMAIN-SUFFIX,googlemail.com,Default Proxy",
-        "DOMAIN-KEYWORD,google,Default Proxy",
+        "DOMAIN-SUFFIX,google.com,Default Proxy",
+        "DOMAIN-SUFFIX,googleapis.com,Default Proxy",
+        "DOMAIN-SUFFIX,gstatic.com,Default Proxy",
+        "DOMAIN-SUFFIX,googleusercontent.com,Default Proxy",
     ]
 
     prefix_set = set(direct_prefix)
@@ -918,6 +921,7 @@ def main() -> None:
 
     config["proxy-groups"] = groups
     config["rules"] = unique(normalized_rules)
+    prune_missing_dns_policies(config, groups)
     config["unified-delay"] = False
     # Rebuild the owned business groups and rules first. Only after their old
     # references are gone may exact legacy file-provider owners be retired.
@@ -935,6 +939,33 @@ def main() -> None:
             default_flow_style=False,
             width=4096,
         )
+
+
+def prune_missing_dns_policies(config, groups):
+    """Drop DNS servers that pin a policy group which no longer exists."""
+    dns = config.get("dns")
+    if not isinstance(dns, dict):
+        return
+    known = {group.get("name") for group in groups if isinstance(group, dict)}
+    for key in ("nameserver", "fallback"):
+        servers = dns.get(key)
+        if not isinstance(servers, list):
+            continue
+        kept = []
+        for server in servers:
+            if not isinstance(server, str):
+                kept.append(server)
+                continue
+            _, _, policy = server.partition("#")
+            if policy and policy not in known:
+                print(
+                    f"warning: dropping dns.{key} entry for missing policy "
+                    f"group {policy!r}: {server}",
+                    file=sys.stderr,
+                )
+                continue
+            kept.append(server)
+        dns[key] = kept
 
 
 if __name__ == "__main__":

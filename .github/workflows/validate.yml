@@ -100,8 +100,8 @@ jobs:
             -ldflags "-X github.com/metacubex/mihomo/constant.Version=v1.19.28-budget-status-contract-v3" \
             -o "$RUNNER_TEMP/core-arm64" .
           "$RUNNER_TEMP/core-arm64" -v | tee "$RUNNER_TEMP/version.txt"
-          grep -q 'linux arm64' "$RUNNER_TEMP/version.txt"
-          grep -q with_gvisor "$RUNNER_TEMP/version.txt"
+          grep -q 'Mihomo Meta v1.19.28-budget-status-contract-v3 linux arm64 with go' "$RUNNER_TEMP/version.txt"
+          grep -q 'Use tags: no_tailscale, with_gvisor' "$RUNNER_TEMP/version.txt"
           test "$("$RUNNER_TEMP/core-arm64" -measurement-budget-protocol)" = mihomo-budget-v1
           sha256sum "$RUNNER_TEMP/core-arm64"
           stat -c '%s bytes' "$RUNNER_TEMP/core-arm64"

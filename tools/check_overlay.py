@@ -241,6 +241,48 @@ def check_renamed_pattern_pools(directory: Path) -> None:
           'renamed generation left a dangling node/group reference')
 
 
+def check_dns_policy_prune(directory: Path) -> None:
+    directory.mkdir()
+    no_bwb = [name for name in ALL_NODES if not name.startswith("BWB | ")]
+    source, manifest = build_fixture(directory, MANIFEST_OVERLAY, no_bwb)
+    current = yaml.safe_load(source.read_text())
+    current["dns"] = {"nameserver": [
+        "https://1.1.1.1/dns-query#Auto",
+        "https://8.8.8.8/dns-query#BWB Backup",
+    ]}
+    current["proxy-groups"] = [g for g in current["proxy-groups"] if g["name"] != "BWB Backup"]
+    source.write_text(yaml.safe_dump(current, allow_unicode=True), encoding="utf-8")
+    output = directory / "dns-missing.yaml"
+    result = run_overlay(source, manifest, output)
+    check(result.returncode == 0, f"DNS prune overlay failed: {result.stderr.strip()[:400]}")
+    if result.returncode == 0:
+        servers = yaml.safe_load(output.read_text())["dns"]["nameserver"]
+        check("https://8.8.8.8/dns-query#BWB Backup" not in servers,
+              "dangling BWB Backup nameserver was kept")
+        check("https://1.1.1.1/dns-query#Auto" in servers,
+              "valid Auto nameserver was dropped")
+        check("BWB Backup" in result.stderr,
+              "prune did not name the dropped policy group")
+
+    # A present BWB Backup group must keep the second nameserver.
+    present = directory / "present"
+    present.mkdir()
+    source2, manifest2 = build_fixture(present, MANIFEST_OVERLAY, ALL_NODES)
+    current2 = yaml.safe_load(source2.read_text())
+    current2["dns"] = {"nameserver": [
+        "https://1.1.1.1/dns-query#Auto",
+        "https://8.8.8.8/dns-query#BWB Backup",
+    ]}
+    source2.write_text(yaml.safe_dump(current2, allow_unicode=True), encoding="utf-8")
+    output2 = directory / "dns-present.yaml"
+    result2 = run_overlay(source2, manifest2, output2)
+    check(result2.returncode == 0, f"DNS present overlay failed: {result2.stderr.strip()[:400]}")
+    if result2.returncode == 0:
+        servers2 = yaml.safe_load(output2.read_text())["dns"]["nameserver"]
+        check("https://8.8.8.8/dns-query#BWB Backup" in servers2,
+              "valid BWB Backup nameserver was dropped")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         directory = Path(raw)
@@ -293,6 +335,33 @@ def main() -> int:
             "cache-file" not in config or config["cache-file"] is not None,
             "cache-file handling changed",
         )
+
+        # Overrides must not be shadowed, over-broad, or duplicate a route
+        # default. github.com intentionally follows the git-transport default
+        # (bulk GitHub Download); github.io/github.dev stay on Developer.
+        rules = set(config["rules"])
+        check("DOMAIN,ghcr.io,Download" in rules,
+              "ghcr.io container pulls must use the bulk Download pool")
+        check("DOMAIN-SUFFIX,ghcr.io,Developer" not in rules,
+              "ghcr.io Developer rule is shadowed by the earlier Download rule")
+        check("DOMAIN-SUFFIX,storage.googleapis.com,Model Download" not in rules,
+              "generic GCS storage must not be labelled as a model download")
+        check("DOMAIN-SUFFIX,s3.amazonaws.com,Model Download" not in rules,
+              "generic S3 storage must not be labelled as a model download")
+        check(not any(rule.startswith("DOMAIN-KEYWORD,telegram,") for rule in rules),
+              "Telegram routing must use explicit suffixes, not a substring keyword")
+        check(not any(rule.startswith("DOMAIN-KEYWORD,google,") for rule in rules),
+              "Google routing must use explicit suffixes, not a substring keyword")
+        for suffix in ("telegram.dog", "tdesktop.com", "telegram-cdn.org", "cdn-telegram.org"):
+            check(f"DOMAIN-SUFFIX,{suffix},Telegram" in rules,
+                  f"Telegram suffix {suffix} is missing")
+        for suffix in ("google.com", "googleapis.com", "gstatic.com", "googleusercontent.com"):
+            check(f"DOMAIN-SUFFIX,{suffix},Default Proxy" in rules,
+                  f"Google asset suffix {suffix} is missing")
+        check("DOMAIN,github.com,GitHub Download" in rules,
+              "github.com must keep the git-transport route default")
+        check("DOMAIN-SUFFIX,github.com,GitHub Download" not in rules,
+              "github.com duplicate suffix rule shadows the route default")
 
         # Native routing owns delay selection within the already-authorized
         # download candidates; platform suffixes stay in their media pools.
@@ -488,6 +557,7 @@ def main() -> int:
             "failed run still wrote an output file",
         )
         check_renamed_pattern_pools(directory / 'renamed-patterns')
+        check_dns_policy_prune(directory / 'dns-policy')
 
     if FAILURES:
         print("policy overlay checks FAILED")

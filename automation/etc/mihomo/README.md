@@ -55,7 +55,7 @@
   这三个键：`bind-address`、`lan-allowed-ips`、`external-controller`。
 - `tun.route-exclude-address` 的 `10.77.0.0/16` 是占位超网，真机排除的是它自己的上游 LAN /16。
 - `sniffer.skip-src-address` 由部署端 WireGuard 对端地址计算，骨架不发布该列表，真机配置里存在。
-- `dns.nameserver` 里的 `#Default Proxy` 指向生成器创建的策略组，所以本地段只能在组已存在的配置上叠加。
+- `dns.nameserver` 里的 `#Default Proxy` 与 `#BWB Backup` 指向生成器创建的策略组。叠加时若组不存在，policy overlay 会剪掉该条并告警，不会留下会让 `mihomo -t` 失败的悬空引用。
 
 ## 规则文件不在仓库
 

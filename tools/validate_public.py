@@ -84,6 +84,7 @@ REQUIRED = (
     "assets/readme/hero.svg",
     "assets/readme/path.svg",
     "assets/readme/gates.svg",
+    "assets/readme/architecture.svg",
     "automation/install.sh",
     "automation/README.zh-CN.md",
     "automation/env/automation.env.example",
@@ -114,6 +115,7 @@ PARSEABLE_SVG = (
     "assets/readme/hero.svg",
     "assets/readme/path.svg",
     "assets/readme/gates.svg",
+    "assets/readme/architecture.svg",
 )
 
 

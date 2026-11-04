@@ -11,7 +11,7 @@ scripts/preflight.sh --staged     # pre-commit：按暂存改动映射必跑检�
 scripts/preflight.sh --profile core  # 真核二进制专属检查（CI core-build）
 ```
 
-`scripts/preflight.sh` 是薄壳，逻辑在 `scripts/preflight.py`；hook、开发机和 GitHub Actions 的两个 job 都调用
+`scripts/preflight.sh` 是薄壳，逻辑在 `scripts/preflight.py`；hook、开发机和 GitHub Actions 的三个 job 都调用
 同一个脚本，不再各自维护检查清单。检查清单与「改动→必跑检查」映射的唯一来源是
 [`tools/verification-matrix.yaml`](../../tools/verification-matrix.yaml)：
 
@@ -28,7 +28,8 @@ scripts/preflight.sh --profile core  # 真核二进制专属检查（CI core-bui
 门禁自身由 `tools/check_gate_integrity.py` 保护：它验证矩阵覆盖、CI 是否仍调用同一入口、
 Gitea token 是否离开 URL，以及 SKIP / 过期白名单在合成小仓库里确实会变红。发布闸门现在是
 GitHub Actions：[`.github/workflows/validate.yml`](../../.github/workflows/validate.yml) 的
-`preflight` 与 `core-build` 两个 job 都走同一个入口。
+`preflight`、`core-build`、`core-build-arm64` 三个 job 都走同一个入口；`core-build` 只交叉
+编译 arm64 产物，`core-build-arm64` 在原生 arm64 runner 上执行同一份版本与 tags 断言。
 
 ## 检查的分类
 

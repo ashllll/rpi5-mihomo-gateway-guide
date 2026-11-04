@@ -10,6 +10,7 @@
 <a href="#30-秒看懂">30 秒看懂</a> ·
 <a href="#安全网失败时谁兜底">安全网</a> ·
 <a href="#一次连接怎么走">数据面</a> ·
+<a href="#架构总览">架构</a> ·
 <a href="#单元15-个-enabled3-个休眠">单元表</a> ·
 <a href="#装成这台机器">安装</a> ·
 <a href="#边界">边界</a> ·
@@ -50,6 +51,12 @@
 TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/forward 默认 drop）与
 `ip rp_nat`（自身不放 LAN masquerade，VLAN20 与 WireGuard 的 NAT 在 include 文件里）完成。整张网段图见
 [`assets/network-topology.svg`](assets/network-topology.svg)，结构说明见[架构文档](docs/architecture.zh-CN.md)。
+
+## 架构总览
+
+<img src="assets/readme/architecture.svg" width="100%" alt="rp5 透明网关架构：下游客户端经 nftables 与 Mihomo TUN 进入规则与策略组，DNS 三层分流，预算 broker 与健康检查在控制面">
+
+绿色是后端数据面，红色是安全与准入，橙色是云服务，灰色是外部系统。主路径上的流动虚线只表示方向，不表示实时流量。
 
 ## 单元：15 个 enabled、3 个休眠
 
@@ -167,7 +174,7 @@ scripts/preflight.sh --list   # 只看本轮会跑哪些检查
 - 默认 = 全量：自动发现全部 `tools/check_*.py`，加上 `automation/check-release.py` 与
   `tools/validate_public.py`；含订阅更新，通常 20–40 分钟。
 - `--staged` = 按暂存改动映射必跑检查（pre-commit）；没有暂存内容时回落到全量（pre-push）。
-- `--profile core` = 真核二进制专属检查，在 CI 的 `core-build` 作业里跑。
+- `--profile core` = 真核二进制专属检查，在 CI 的 `core-build` 与 `core-build-arm64`（原生 arm64）作业里跑。
 - `--list` 打印本轮计划；`--no-cache` 忽略全量通过缓存。
 
 检查清单与「改动→必跑检查」映射只有一个来源：`tools/verification-matrix.yaml`。新增
