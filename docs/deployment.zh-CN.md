@@ -10,9 +10,9 @@
 | 硬件 | Raspberry Pi 5、arm64、单根网线接 UCG 交换机（`wan0` 与 `proxy20` 同线） |
 | 系统 | Raspberry Pi OS Lite / Debian 13，systemd 252+，NetworkManager |
 | 附加接口 | `wan0` 上的 802.1Q VLAN 20（`proxy20`）、WireGuard `wg-ucg-pilot` |
-| 网关地址 | `proxy20 192.168.20.1/24`、`wg-ucg-pilot 10.253.254.1/30`、Mihomo TUN `198.18.0.1/30` |
+| 网关地址 | `proxy20 192.168.20.1/24`、Mihomo TUN `198.18.0.1/30` |
 | 上游 | `wan0` 由上游 DHCP 分配（本机 `.117`），SSH 与 8799 只对上联私网开放 |
-| 运行层 | 15 个 enabled 单元（7 个 service + 8 个 timer）、3 个 disabled timer、7 个 `mihomo.service.d` drop-in |
+| 运行层 | 17 个 enabled 单元（8 个 service + 9 个 timer）、3 个 disabled timer、7 个 `mihomo.service.d` drop-in |
 
 ## 1. 基础包与 sysctl
 
@@ -61,7 +61,7 @@ WireGuard 只做点对点：UDP 51891 在 `wan0` 放行，对端 `10.253.254.2`�
 ## 3. 运行层安装
 
 `automation/install.sh` 按固定顺序做幂等安装：机制文件（`sbin`、`systemd`）覆盖写入；
-配置骨架与示例只在目标不存在时写入，保留部署端已改内容。脚本只 enable 发布层的 15 个单元，
+配置骨架与示例只在目标不存在时写入，保留部署端已改内容。脚本只 enable 发布层的 17 个单元，
 其余装上但保持 disabled；`enable` timer 不会立刻启动它。
 
 ```sh
@@ -93,7 +93,7 @@ sudo automation/install.sh               # 真机安装
 没有 `--enable-timers` 这一步：安装脚本按真机状态直接处理 enable/disable。
 
 验收：`systemctl list-unit-files --state=enabled | grep -E 'mihomo|mosdns|dnsmasq|homeassistant|rp5-agent'`
-正好是 15 行（7 个 service + 8 个 timer）；`ls /etc/systemd/system/mihomo.service.d/` 有 7 个 `.conf`。
+正好是 17 行（8 个 service + 9 个 timer）；`ls /etc/systemd/system/mihomo.service.d/` 有 7 个 `.conf`。
 前缀少写 `homeassistant` 或 `rp5-agent` 会各少一行；口径以 `automation/install.sh` 的 enable 清单为准。
 
 ## 4. 数据面 nftables
@@ -156,7 +156,8 @@ sudo systemctl start dnsmasq mihomo mosdns
 ```sh
 sudo /usr/local/sbin/mihomo-healthcheck --startup-check 30   # 手工跑一次启动门禁
 sudo systemctl enable --now mihomo-healthcheck.timer mihomo-watch.timer \
-  mosdns-healthcheck.timer mosdns-rules-update.timer mosdns-binary-update.timer
+  mosdns-healthcheck.timer mosdns-rules-update.timer mosdns-binary-update.timer \
+  mihomo-traffic.service mihomo-github-api-guard.timer
 sudo cat /run/mihomo-healthcheck/status
 ```
 

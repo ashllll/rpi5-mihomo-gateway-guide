@@ -1,0 +1,321 @@
+# Reviewed public policy sections from the deployed gateway.
+# Merge into the private manifest; retain account budgets and node-pool patterns.
+roles:
+  bulk_download:
+    stt_prefix: 'STT | '
+    bywave_prefix: 'BWB | '
+    glados_patterns: []
+    glados_exclude_patterns:
+    - (?i)(^|[- _|])X[0-9]
+    - (?i)NF
+    - (?i)Netflix
+    glados_explicit_allow: []
+    stt_only: false
+client_routes:
+  ai-chat:
+    group: GLaDOS AI Chat
+    parent_group: GLaDOS AI Pool
+    account: glados
+    source_cidrs:
+    - 0.0.0.0/0
+    - ::/0
+    domains:
+    - openai.com
+    - chatgpt.com
+    - oaistatic.com
+    - oaiusercontent.com
+    - oaistatsig.com
+    - openaimerge.com
+    - anthropic.com
+    - claude.ai
+    - gemini.google.com
+    - generativelanguage.googleapis.com
+    - aistudio.google.com
+    - ai.google.dev
+    - notebooklm.google.com
+    - notebooklm.google
+    - perplexity.ai
+    - x.ai
+    - grok.com
+    - cursor.com
+    - cursor.sh
+    - cursorapi.com
+    - ai.com
+    - bard.google.com
+    - makersuite.google.com
+    - gemini.google
+    - chat.google.com
+    - aiplatform.googleapis.com
+    - mistral.ai
+    - cohere.ai
+    - cohere.com
+    - groq.com
+    - together.ai
+    - replicate.com
+    - poe.com
+    - character.ai
+    - inflection.ai
+    - pi.ai
+    - deepseek.com
+    - deepseek.cn
+    - openrouter.ai
+    - aihubmix.com
+    - siliconflow.cn
+    - siliconflow.com
+    - qwen.ai
+    - qwenlm.ai
+    - dashscope.aliyuncs.com
+    - bigmodel.cn
+    - z.ai
+    - zhipuai.cn
+    - moonshot.cn
+    - moonshot.ai
+    - kimi.com
+    - kimi.ai
+    - doubao.com
+    - coze.cn
+    - coze.com
+    - ark.cn-beijing.volces.com
+    - ark.ap-southeast.bytepluses.com
+    - stability.ai
+    - midjourney.com
+    - deepmind.com
+    - deepmind.google
+    - ai.google
+    - ai.google.com
+    - labs.google
+    - labs.google.com
+    - opencode.ai
+    - lobehub.com
+    - lobechat.com
+    - codeium.com
+    - windsurf.com
+    - windsurf.ai
+    - tabnine.com
+    - trae.ai
+    - trae.com.cn
+    - augmentcode.com
+    - you.com
+    - phind.com
+    - suno.com
+    - udio.com
+    - runwayml.com
+    - elevenlabs.io
+    - elevenlabs.ai
+    - ct.sendgrid.net
+    - intercom.io
+    - intercomcdn.com
+    exact_domains:
+    - cdn.workos.com
+    - challenges.cloudflare.com
+    - forwarder.workos.com
+    - frontend-apps-multi-region.workos.com
+    - humb.apple.com
+    - images.workoscdn.com
+    - js.stripe.com
+    - o207216.ingest.sentry.io
+    - o33249.ingest.sentry.io
+    - rum.browser-intake-datadoghq.com
+    - setup.workos.com
+    - workos.imgix.net
+download_routes:
+  metered-download-exceptions:
+    group: Download
+    domains:
+    - iosapps.itunes.apple.com
+    - osxapps.itunes.apple.com
+    - appldnld.apple.com
+    - swcdn.apple.com
+    - swdist.apple.com
+    - swdownload.apple.com
+    - oscdn.apple.com
+    - updates.cdn-apple.com
+    - updates-http.cdn-apple.com
+    - use.typekit.net
+    - cursor-cdn.com
+    - downloads.cursor.com
+  ai-models:
+    group: Model Download
+    domains:
+    - huggingface.co
+    - huggingface.com
+    - hf.co
+    - xethub.hf.co
+    - civitai.com
+    - replicate.delivery
+    - kaggle.com
+    - download.pytorch.org
+    - download.tensorflow.org
+    - ngc.nvidia.com
+    - ollama.com
+    - ollama.ai
+    - lmstudio.ai
+    - jan.ai
+    - download.lmstudio.ai
+  git-transport:
+    group: GitHub Control
+    domains:
+    - github.com
+    - www.github.com
+    - alive.github.com
+    - ssh.github.com
+    - raw.githubusercontent.com
+    - avatars.githubusercontent.com
+    - github.githubassets.com
+  dev-python:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - pypi.org
+    - pythonhosted.org
+    - python.org
+    - repo.anaconda.com
+    - conda.anaconda.org
+    - api.anaconda.org
+    - repo.continuum.io
+  dev-node:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - registry.npmjs.org
+    - registry.npmjs.com
+    - registry.yarnpkg.com
+    - nodejs.org
+    - unpkg.com
+    - cdn.jsdelivr.net
+    - get.pnpm.io
+    - bun.sh
+    - deno.land
+    - dl.deno.land
+  dev-homebrew:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - formulae.brew.sh
+    - ghcr.io
+    - pkg-containers.githubusercontent.com
+  dev-rust-go:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - crates.io
+    - rust-lang.org
+    - rustup.rs
+    - go.dev
+    - golang.org
+    - dl.google.com
+  dev-java:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - repo.maven.apache.org
+    - repo1.maven.org
+    - repo.gradle.org
+    - services.gradle.org
+    - downloads.gradle.org
+    - plugins.gradle.org
+    - plugins-artifacts.gradle.org
+    - dlcdn.apache.org
+    - archive.apache.org
+    - download.java.net
+    - download.oracle.com
+    - api.adoptium.net
+    - cdn.azul.com
+    - corretto.aws
+    - repo.spring.io
+  dev-other-packages:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - rubygems.org
+    - rubyonrails.org
+    - cache.ruby-lang.org
+    - nuget.org
+    - dot.net
+    - builds.dotnet.microsoft.com
+    - ci.dot.net
+    - dotnetcli.azureedge.net
+    - dotnetcli.blob.core.windows.net
+    - packagist.org
+    - getcomposer.org
+    - repo.packagist.org
+    - get.helm.sh
+  dev-containers:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - docker.io
+    - download.docker.com
+    - desktop.docker.com
+    - hub.docker.com
+    - auth.docker.com
+    - login.docker.com
+    - production.cloudflare.docker.com
+    - production.cloudfront.docker.com
+    - quay.io
+    - gcr.io
+    - registry.k8s.io
+    - pkg.dev
+  dev-editors-sdk:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - update.code.visualstudio.com
+    - vscode.download.prss.microsoft.com
+    - vscode.cdn.azure.cn
+    - marketplace.visualstudio.com
+    - gallery.vsassets.io
+    - gallerycdn.vsassets.io
+    - download.visualstudio.microsoft.com
+    - download.jetbrains.com
+    - download-cdn.jetbrains.com
+    - download-cf.jetbrains.com
+    - plugins.jetbrains.com
+    - downloads.marketplace.jetbrains.com
+    - cache-redirector.jetbrains.com
+    - redirector.gvt1.com
+    - gvt1.com
+    - pub.dev
+    - pub.dartlang.org
+    - download.developer.apple.com
+    - download.swift.org
+    - developer.download.nvidia.com
+    - dl.espressif.com
+    - components.espressif.com
+  dev-build-tools:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - cmake.org
+    - releases.llvm.org
+    - ftp.gnu.org
+    - ftpmirror.gnu.org
+    - downloads.sourceforge.net
+    - sourceforge.net
+    - repo.msys2.org
+    - mirror.msys2.org
+    - download.qt.io
+    - download.savannah.gnu.org
+  github-api:
+    group: GitHub API
+    domains:
+    - api.github.com
+media_admission:
+  enabled: false
+selections:
+  GLaDOS AI Pool:
+    type: fallback
+    patterns:
+    - ^JP-Fixed
+    - ^US-Fixed
+  GitHub API:
+    type: select
+    patterns:
+    - '^BWB \| '
+    - '^STT \| '
+    - '^ByWave \| '
+stability:
+  groups:
+    GitHub Download:
+      url: https://github.com/robots.txt
+      expected-status: 200

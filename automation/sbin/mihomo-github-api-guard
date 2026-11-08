@@ -1,0 +1,169 @@
+#!/usr/bin/python3
+"""Select an anonymous GitHub API egress with available quota."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import runpy
+import time
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, ProxyHandler, build_opener
+
+import yaml
+
+GROUP = 'GitHub API'
+URL = 'https://api.github.com/rate_limit'
+STATE = Path('/var/lib/mihomo-github-api/state.json')
+HERE = Path(__file__).resolve().parent
+SAMPLER = runpy.run_path(str(HERE / 'mihomo-download-quality'))
+
+
+def quota_result(status, headers, body, now):
+    remaining = reset = None
+    if headers.get('x-ratelimit-remaining') is not None:
+        remaining = int(headers['x-ratelimit-remaining'])
+        reset = int(headers['x-ratelimit-reset'])
+        if not 0 <= remaining <= 1000000 or not now - 3600 < reset < now + 86400:
+            raise ValueError('invalid quota counters')
+    elif status == 200:
+        raise ValueError('quota headers missing')
+    healthy = status == 200 and remaining is not None and remaining > 5
+    retry_at = 0 if healthy else now + 60
+    if not healthy and remaining is not None and remaining <= 5 and reset > now:
+        retry_at = reset + 2
+    if headers.get('retry-after', '').isdigit():
+        retry_at = max(retry_at, now + min(86400, int(headers['retry-after'])))
+    return {'success': healthy, 'status': status, 'bytes': len(body),
+            'remaining': remaining, 'reset': reset, 'retry_at': retry_at}
+
+
+def fetch_quota(proxy_url, sample_url, sample_bytes, deadline):
+    if sample_url != URL:
+        raise ValueError('unexpected quota endpoint')
+    request = Request(URL, headers={'Accept': 'application/vnd.github+json',
+                                   'User-Agent': 'gateway-github-quota-check',
+                                   'Cache-Control': 'no-cache'})
+    try:
+        response = SAMPLER['_sample_opener'](proxy_url).open(
+            request, timeout=max(.1, deadline - time.monotonic()))
+    except HTTPError as error:
+        response = error
+    with response:
+        body = SAMPLER['_read_bounded'](response, 8193, deadline)
+        if len(body) > 8192:
+            raise ValueError('quota response too large')
+        return quota_result(response.status, {k.lower(): v for k, v in response.headers.items()}, body, time.time())
+
+
+def choose(current, candidates, state, check, now):
+    records = state.setdefault('nodes', {})
+    cursor = int(state.get('cursor', 0)) % len(candidates)
+    ordered = [current] + candidates[cursor:] + candidates[:cursor]
+    seen = set()
+    attempts = []
+    alternatives = 0
+    for name in ordered:
+        if name in seen:
+            continue
+        seen.add(name)
+        if records.get(name, {}).get('retry_at', 0) > now:
+            continue
+        if name != current:
+            if alternatives >= 4:
+                break
+            alternatives += 1
+            state['cursor'] = (candidates.index(name) + 1) % len(candidates)
+        try:
+            result = check(name, name == current)
+        except (OSError, ValueError, KeyError, TimeoutError) as error:
+            result = {'success': False, 'error': type(error).__name__}
+        record = {k: result.get(k) for k in ('status', 'remaining', 'reset', 'error')}
+        record.update(checked_at=now, retry_at=result.get('retry_at', now + 60))
+        records[name] = record
+        attempts.append({'node': name, **record})
+        if result.get('success') is True and result.get('remaining', 0) > 5:
+            return name, attempts
+    return None, attempts
+
+
+def stale_api_connections(connections, bad):
+    return {c['id']: (c.get('upload'), c.get('download')) for c in connections
+            if c.get('metadata', {}).get('host') == 'api.github.com'
+            and bad.intersection(c.get('chains', []))}
+
+
+def run():
+    config_path = Path('/etc/mihomo/config.yaml')
+    baseline = config_path.read_bytes()
+    config = yaml.safe_load(baseline)
+    secret = Path('/etc/mihomo/secrets/dashboard.secret').read_text().strip()
+    opener = build_opener(ProxyHandler({}))
+
+    def api(path, method='GET', data=None):
+        request = Request('http://127.0.0.1:9090' + path, method=method,
+                          data=json.dumps(data).encode() if data is not None else None,
+                          headers={'Authorization': 'Bearer ' + secret, 'Content-Type': 'application/json'})
+        with opener.open(request, timeout=5) as response:
+            raw = response.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise ValueError('controller response too large')
+            return json.loads(raw or b'{}')
+
+    endpoint = '/proxies/' + quote(GROUP, safe='')
+    group = api(endpoint)
+    candidates, current = group.get('all', []), group.get('now')
+    definitions = {node['name']: node for node in config['proxies']}
+    if (group.get('type') != 'Selector' or not candidates or current not in candidates
+            or any(n not in definitions or not n.startswith(('STT | ', 'BWB | ', 'ByWave | ')) for n in candidates)):
+        raise ValueError('unexpected GitHub API membership')
+    state = json.loads(STATE.read_text()) if STATE.exists() else {'nodes': {}}
+    fingerprints = {n: SAMPLER['node_fingerprint'](definitions[n]) for n in candidates}
+    state['nodes'] = {n: r for n, r in state.get('nodes', {}).items()
+                      if n in candidates and state.get('fingerprints', {}).get(n) == fingerprints[n]}
+    state['fingerprints'] = fingerprints
+
+    def check(name, is_current):
+        if is_current:
+            return fetch_quota('http://127.0.0.1:7890', URL, 8192, time.monotonic() + 8)
+        return SAMPLER['probe_candidate'](
+            Path('/usr/local/bin/mihomo'), name, candidates, definitions, URL, 8192, 8,
+            config.get('dns', {}).get('default-nameserver') or ['223.5.5.5'], sample_function=fetch_quota)
+
+    selected, attempts = choose(current, candidates, state, check, time.time())
+    if config_path.read_bytes() != baseline or api(endpoint).get('now') != current:
+        raise ValueError('configuration or selection changed during check')
+    if selected and selected != current:
+        api(endpoint, 'PUT', {'name': selected})
+        if api(endpoint).get('now') != selected:
+            raise ValueError('selection readback mismatch')
+    # Retire only idle API connections on a known depleted or failed egress.
+    bad = {n for n, r in state['nodes'].items() if r.get('retry_at', 0) > time.time() and n != selected}
+    closed = 0
+    if selected and bad:
+        def stale():
+            return stale_api_connections(api('/connections')['connections'], bad)
+        before = stale()
+        if before:
+            time.sleep(1)
+            for cid, counters in stale().items():
+                if before.get(cid) == counters:
+                    api('/connections/' + quote(cid, safe=''), 'DELETE')
+                    closed += 1
+    state.update(last_check=time.time(), selected=selected or current,
+                 status='healthy' if selected else 'no-eligible-node')
+    SAMPLER['atomic_write'](STATE, (json.dumps(state, ensure_ascii=False) + '\n').encode())
+    print(json.dumps({'status': state['status'], 'previous': current, 'selected': state['selected'],
+                      'switched': bool(selected and selected != current), 'idle_api_connections_closed': closed,
+                      'checks': attempts}, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    with Path('/run/lock/mihomo-maintenance.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('{"status":"maintenance-busy"}')
+        else:
+            run()

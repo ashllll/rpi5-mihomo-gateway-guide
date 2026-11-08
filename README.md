@@ -11,7 +11,7 @@
 <a href="#安全网失败时谁兜底">安全网</a> ·
 <a href="#一次连接怎么走">数据面</a> ·
 <a href="#架构总览">架构</a> ·
-<a href="#单元15-个-enabled3-个休眠">单元表</a> ·
+<a href="#单元17-个-enabled3-个休眠">单元表</a> ·
 <a href="#装成这台机器">安装</a> ·
 <a href="#仓库与真机的一致范围">一致性</a> ·
 <a href="#边界">边界</a> ·
@@ -19,6 +19,8 @@
 <a href="#主仓库与-ci">CI</a> ·
 <a href="docs/README.md">文档索引</a>
 </p>
+
+当前全设备分流、流量统计与 GitHub API 自动换出口见[运行策略](docs/global-routing-and-traffic.zh-CN.md)。旧 WireGuard pilot 依赖已退役。
 
 ## 读这篇
 
@@ -36,7 +38,7 @@
 
 | 你关心的事 | 这台机器的做法 |
 |---|---|
-| 四个网段 | 一根网线接 UCG 交换机：`wan0` 192.168.0.117/24（VLAN1，上游 + 管理入口）与 `proxy20` 192.168.20.1/24（同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端）→ `wg-ucg-pilot` 10.253.254.1/30（UCG 点对点）→ Mihomo TUN 198.18.0.1/30 |
+| 三个网段 | 一根网线接 UCG 交换机：`wan0` 192.168.0.117/24（VLAN1，上游 + 管理入口）与 `proxy20` 192.168.20.1/24（同一根线上的 802.1Q VLAN 20，服务 UCG 广播的 `<SSID-1>` Wi-Fi 客户端）→ Mihomo TUN 198.18.0.1/30 |
 | 三层 DNS | `dnsmasq` 两个作用域：VLAN20 `192.168.20.1:53` 直投 Mihomo DNS `127.0.0.1:1053`（fake-IP）；环回 `127.0.0.1:53`（网关自身）→ `mosdns` 127.0.0.1:5335（国内/海外分流）→ Mihomo DNS |
 | 自编译预算版核心 | `/usr/local/bin/mihomo` = `v1.19.28-budget-status-contract-v3`，`go1.27.2`，tags `no_tailscale, with_gvisor`；补丁与构建说明在 [`core/`](core/README.md) |
 | 预算外壳 | `mihomo-measurement-budget.service` 建 `/run/mihomo-measurements/budget.sock`；drop-in 用 `--run-core` 校验协议与状态后拉起核心，账本首次预扣时创建，协议 `mihomo-budget-v1` |
@@ -81,7 +83,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 
 绿色是后端数据面，红色是安全与准入，橙色是云服务，灰色是外部系统。主路径上的流动虚线只表示方向，不表示实时流量。
 
-## 单元：15 个 enabled、3 个休眠
+## 单元：17 个 enabled、3 个休眠
 
 | 单元 | 作用 | 周期 |
 |---|---|---|
@@ -90,6 +92,8 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `mihomo-healthcheck.timer` | 四要素探针 + 计数器，失败时按锁恢复进程 | 每 1 分钟（抖动 3s） |
 | `mihomo-dnsmasq-guard.timer` | 分层解析探针：`127.0.0.1:53` 无答案先查 `127.0.0.1:5335`，迟滞判定后才重启；重启有冷却与预算 | 每 30 秒 |
 | `mihomo-subscription-update.timer` | 校验候选、备份及业务检查后刷新自动来源；失败恢复 | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 |
+| `mihomo-traffic.service` | 持久化设备、机场和节点的上传下载量 | 每 0.5 秒采集 |
+| `mihomo-github-api-guard.timer` | 检查匿名 API 配额并选择 STT/ByWave 出口 | 完成后间隔 60 秒 |
 | `mihomo-media-guard.timer` | 对 Social / Streaming 做有界媒体采样；仅合格节点进入原生 fallback，默认策略关闭 | 每分钟唤醒，采样间隔由策略控制 |
 | `mihomo-watch.timer` | 单元/温度/磁盘/内存/WAN 巡检 | 开机 90s 后每 2 分钟 |
 | `mosdns.service` | 分流解析；起停时切换 dnsmasq 上游模式 | 常驻 |
@@ -101,7 +105,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 | `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 Home Assistant UI | 开机一次 |
 | `rp5-agent.service` | `0.0.0.0:8799` 只读状态（`/health` 公开；状态端点要求 Bearer token），供 T-Display-S3 监视器 | 常驻 |
 
-15 个 enabled 单元是 7 个 service + 8 个 timer；`nftables.service` 来自发行版，仓库只提供它的
+17 个 enabled 单元是 8 个 service + 9 个 timer；`nftables.service` 来自发行版，仓库只提供它的
 `ExecStop` drop-in。2026-10-26 已移除对已退休 iKuai 的 `ikuai-wan-watch.service`。
 
 其余 worker（`mihomo-healthcheck.service`、`mihomo-watch.service`、`mihomo-alert@.service`、
@@ -127,7 +131,7 @@ TCP 重定向到 `:46225`、UDP 交给 TUN。过滤由 `inet rp_filter`（input/
 sudo ip -br addr                      # wan0 / proxy20 / wg-ucg-pilot 都要有地址（TUN 由核心创建）
 # 2. 运行层：脚本、单元、env 示例、dnsmasq/mosdns/mihomo 配置骨架（同时播种 /etc/nftables.conf）
 sudo automation/install.sh --dry-run
-sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 15 个单元
+sudo automation/install.sh            # 机制文件覆盖、配置保已有；只 enable 发布层 17 个单元
 # 3. 数据面：/etc/nftables.conf → inet rp_filter + ip rp_nat（结构见架构文档）
 sudo nft -c -f /etc/nftables.conf
 # 4. 核心与配置：/usr/local/bin/mihomo 用 core/ 构建并校验版本串
@@ -143,8 +147,8 @@ sudo cat /run/mihomo-healthcheck/status
 
 | 范围 | 文件 | 状态 |
 | --- | --- | --- |
-| 机制实现 | `automation/sbin/*`（30 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
-| 单元与 drop-in | `automation/systemd/**`（41 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
+| 机制实现 | `automation/sbin/*`（32 个脚本） | 与 `/usr/local/sbin/` **逐字节一致** |
+| 单元与 drop-in | `automation/systemd/**`（44 个文件） | 与 `/etc/systemd/system/` **逐字节一致** |
 | 数据与解析 | `automation/etc/mosdns/**`、`automation/etc/dnsmasq-upstreams.*`、`automation/policy/route-defaults.yaml`、NetworkManager dispatcher | **逐字节一致** |
 | 脱敏模板 | `automation/etc/dnsmasq/{resolver.conf,vlan-pilot.conf}` | 仓库用 RFC 5737 / RFC 7042 占位，真机是真实地址，**按设计不同** |
 | 站点态 | `automation/policy/capabilities.yaml`、`automation/etc/mihomo/config.local.yaml` | 账号、开关与私有覆写只在真机 `/etc/mihomo/adaptive/` 与合并后的 `config.yaml` 里 |

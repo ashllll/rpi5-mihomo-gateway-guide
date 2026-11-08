@@ -1,0 +1,11 @@
+[Unit]
+Description=Check GitHub API quota every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=mihomo-github-api-guard.service
+
+[Install]
+WantedBy=timers.target

@@ -6,7 +6,7 @@
 
 | 能力 | 入口 |
 |---|---|
-| 部署镜像与 15 个 enabled 单元 | [`automation/install.sh`](../../automation/install.sh)、[部署](../deployment.zh-CN.md) |
+| 部署镜像与 17 个 enabled 单元 | [`automation/install.sh`](../../automation/install.sh)、[部署](../deployment.zh-CN.md) |
 | 自编译预算版核心 | [`core/`](../../core/README.md) |
 | 三层 DNS 与模式机 | `mihomo-dns-mode`、[架构](../architecture.zh-CN.md) |
 | 预算准入与账本 | `mihomo-measurement-budget`、[ADR-0007](../adr/0007-native-routing-budget.md) |

@@ -1048,6 +1048,7 @@ def probe_candidate(
     bootstrap_dns: list[str],
     git_smart_http: bool = False,
     expected_content_type: str | None = None,
+    sample_function=None,
 ) -> dict:
     node = node_defs.get(name)
     result = {
@@ -1123,7 +1124,9 @@ def probe_candidate(
             result["error"] = "TimeoutError"
             return result
         proxy_url = f"http://127.0.0.1:{port}"
-        if git_smart_http:
+        if sample_function is not None:
+            sample = sample_function(proxy_url, sample_url, sample_bytes, deadline)
+        elif git_smart_http:
             sample = fetch_git_smart_http(proxy_url, sample_url, sample_bytes, deadline)
         elif expected_content_type is None:
             sample = fetch_sample(proxy_url, sample_url, sample_bytes, deadline)

@@ -4,7 +4,7 @@
 #
 # The layer mirrors one gateway that is actually running: the scripts, units,
 # dnsmasq scopes and MosDNS config are the files from that box with site data
-# stripped out.  Fourteen units are enabled - the state of the recorded gateway -
+# stripped out.  Seventeen units are enabled - the state of the recorded gateway -
 # and everything else is installed but left off, so the tree and the runbook
 # describe a single system instead of two alternatives.
 #
@@ -220,6 +220,7 @@ for include in "$here"/etc/nftables.d/*; do
 done
 
 install_default "$here/policy/capabilities.yaml" /etc/mihomo/adaptive/capabilities.yaml 0644
+install_default "$here/policy/global-routing.example.yaml" /etc/mihomo/adaptive/global-routing.example.yaml 0644
 install_default "$here/policy/route-defaults.yaml" /etc/mihomo/adaptive/route-defaults.yaml 0644
 install_default "$here/etc/mihomo/config.local.yaml" /etc/mihomo/config.local.yaml 0644
 
@@ -258,6 +259,8 @@ if [ "$dry_run" = false ] && [ "$GATEWAY_ROOT" = "/" ] && [ -d /run/systemd/syst
   for unit in \
       mihomo.service \
       mihomo-measurement-budget.service \
+      mihomo-traffic.service \
+      mihomo-github-api-guard.timer \
       mihomo-media-guard.timer \
       mihomo-subscription-update.timer \
       mihomo-healthcheck.timer \

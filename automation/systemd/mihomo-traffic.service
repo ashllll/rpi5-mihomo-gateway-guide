@@ -1,0 +1,36 @@
+[Unit]
+Description=Persistent Mihomo traffic attribution
+Wants=mihomo.service
+After=mihomo.service
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=mihomo-traffic
+StateDirectoryMode=0700
+LoadCredential=dashboard-secret:/etc/mihomo/secrets/dashboard.secret
+LoadCredential=policy:/etc/mihomo/adaptive/capabilities.yaml
+ExecStart=/usr/local/sbin/mihomo-traffic collect
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+UMask=0077
+Nice=10
+CPUQuota=10%
+MemoryMax=256M
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

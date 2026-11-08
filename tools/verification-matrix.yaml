@@ -66,6 +66,9 @@ groups:
     - tools/check_stability.py
     - tools/check_watch_notifications.py
   policy:
+    - tools/check_global_routing.py
+    - tools/check_github_api_guard.py
+    - tools/check_traffic.py
     - tools/check_legacy_stt.py
     - tools/check_mihomo_policy.py
     - tools/check_overlay.py
@@ -159,6 +162,13 @@ changes:
       - "automation/systemd/mihomo-rules-update.*"
       - "automation/systemd/mihomo-rules-update.service.d/**"
     run: [install, gate, docfacts]
+
+  - paths:
+      - "automation/sbin/mihomo-github-api-guard"
+      - "automation/sbin/mihomo-traffic"
+      - "automation/systemd/mihomo-github-api-guard.*"
+      - "automation/systemd/mihomo-traffic.service"
+    run: [policy, install]
 
   # Route/policy generation and DNS mode.
   - paths:

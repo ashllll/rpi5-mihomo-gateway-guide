@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "release_id": "446bdd039e8ceaf2be41d60d3b03aea61b899d3435e0e71239b923e956fc5c7b",
+  "release_id": "7519ad23fdbee2995a5f0e944ef7144658dc98e558b061aae02390ddc6e80278",
   "files": [
     {
       "source": "check-release.py",
@@ -118,7 +118,7 @@
     {
       "source": "install.sh",
       "target": null,
-      "sha256": "419e0cdb9b8e8348782b4aa0c9f9f7128da94c1ed1e798bcbaa1b3645d8bab4d"
+      "sha256": "bd28dd667eae1c7ea83a0c465f99c6e0aa8367cc0231f85a23237938c4bc9bc2"
     },
     {
       "source": "policy/capabilities.yaml",
@@ -126,9 +126,14 @@
       "sha256": "62e5abaf09da7ed38e6c255eb7a804aba21c9024044ce7c414241469aacf3506"
     },
     {
+      "source": "policy/global-routing.example.yaml",
+      "target": null,
+      "sha256": "27df40d1becdd43d887160cbbeb756636696f3cbaf9343779f63bbdd6e2b1d98"
+    },
+    {
       "source": "policy/route-defaults.yaml",
       "target": null,
-      "sha256": "f96826d73f8710f1f236c5b71c415393f76172cbf73271075f0cc75359f2ec70"
+      "sha256": "635f1926c461b46c91733241553aa77e30ae0a5faf970b536989e17ea743eab6"
     },
     {
       "source": "sbin/dnsmasq-safe-start",
@@ -157,7 +162,7 @@
     {
       "source": "sbin/mihomo-alert",
       "target": "/usr/local/sbin/mihomo-alert",
-      "sha256": "028d3ff04010ad69d652292c4a049a33a3cb6055fda740c84aee52bad2e7475c",
+      "sha256": "1c2f27914a3f1dece593695d369a5abec4c035dc319a939a0b784798f89bf2c7",
       "mode": 493
     },
     {
@@ -181,7 +186,13 @@
     {
       "source": "sbin/mihomo-download-quality",
       "target": "/usr/local/sbin/mihomo-download-quality",
-      "sha256": "a0c798893c7d5b717fd33b5220d626de8d5bf1604539158af259a26c7fdec138",
+      "sha256": "99a538eee2e079af36785f273fe294ca86b447c551a1d8a2c7bf49ba9333e4e5",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-github-api-guard",
+      "target": "/usr/local/sbin/mihomo-github-api-guard",
+      "sha256": "0c7f75a511661359aa567d2efbf96cedeee8a84cc3f9f4f2727ed4a583773992",
       "mode": 493
     },
     {
@@ -217,7 +228,7 @@
     {
       "source": "sbin/mihomo-policy-overlay",
       "target": "/usr/local/sbin/mihomo-policy-overlay",
-      "sha256": "a74dc9bb364c77c3d45780bc109bfbe18f126265bbece2866677a7f79541d6a7",
+      "sha256": "4593837f669c3587d0c63c405c822f3a6a810c38fe8ec7654ea5fc6327f5219c",
       "mode": 493
     },
     {
@@ -242,6 +253,12 @@
       "source": "sbin/mihomo-subscription-normalize",
       "target": "/usr/local/sbin/mihomo-subscription-normalize",
       "sha256": "3a9a7fa53ba3f77d437e86d4450f49314a28213e4d25a74cde1417ddce3f7d13",
+      "mode": 493
+    },
+    {
+      "source": "sbin/mihomo-traffic",
+      "target": "/usr/local/sbin/mihomo-traffic",
+      "sha256": "c732f7eb5d363bad43e22b8684d9e2b2b0898cc5c2c05a352dfb8a8d7301912c",
       "mode": 493
     },
     {
@@ -365,6 +382,18 @@
       "mode": 420
     },
     {
+      "source": "systemd/mihomo-github-api-guard.service",
+      "target": "/etc/systemd/system/mihomo-github-api-guard.service",
+      "sha256": "7ed05fb32acab19a6e691193616ac303c4b17b1560c3fab73d45a48acd17af6a",
+      "mode": 420
+    },
+    {
+      "source": "systemd/mihomo-github-api-guard.timer",
+      "target": "/etc/systemd/system/mihomo-github-api-guard.timer",
+      "sha256": "b469fbce384a5d20df3d63659e28ee09db68fe9c8a48a4152eded7675093c09a",
+      "mode": 420
+    },
+    {
       "source": "systemd/mihomo-healthcheck.service",
       "target": "/etc/systemd/system/mihomo-healthcheck.service",
       "sha256": "92fdf0e728b9858ef1beff92b138b32779c81c7f26f406d0a5b2f8ffbc3ac22b",
@@ -443,6 +472,12 @@
       "mode": 420
     },
     {
+      "source": "systemd/mihomo-traffic.service",
+      "target": "/etc/systemd/system/mihomo-traffic.service",
+      "sha256": "da375725306517f72c323676a9199b402e9910c42e89e352d6f5d228949eae9b",
+      "mode": 420
+    },
+    {
       "source": "systemd/mihomo-watch.service",
       "target": "/etc/systemd/system/mihomo-watch.service",
       "sha256": "23163f382a9661c2f9e8442933108f3add3cff0dabfaa6d5cb8e67dbeb76083f",
@@ -487,7 +522,7 @@
     {
       "source": "systemd/mihomo.service.d/ucg-link.conf",
       "target": "/etc/systemd/system/mihomo.service.d/ucg-link.conf",
-      "sha256": "7efe1131bf3918d56dbfd41f9a71d2e74c43d2a059ded08b3562c9fb729d7a74",
+      "sha256": "c2b756210d6be6697276c867c9f7fbb3077d697dd903a5e9d000dffd74bc59d7",
       "mode": 420
     },
     {

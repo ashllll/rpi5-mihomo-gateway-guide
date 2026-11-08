@@ -6,7 +6,7 @@
 
 | 仓库 | 安装到 | 说明 |
 |---|---|---|
-| [`automation/install.sh`](../../automation/install.sh) | 就地执行 | 覆盖式幂等；`--dry-run` 预览；只 enable 15 个单元 |
+| [`automation/install.sh`](../../automation/install.sh) | 就地执行 | 覆盖式幂等；`--dry-run` 预览；只 enable 17 个单元 |
 | [`automation/sbin/`](../../automation/sbin/) | `/usr/local/sbin/` | 探针、预算 broker、DNS 模式机、订阅/规则/换核工具 |
 | [`automation/systemd/`](../../automation/systemd/) | `/etc/systemd/system/` | 单元与 7 个 `mihomo.service.d` drop-in |
 | [`automation/etc/dnsmasq/`](../../automation/etc/dnsmasq/) | `/etc/dnsmasq.d/resolver.conf` 等 | 两个 dnsmasq 作用域（环回 + VLAN20）+ 上游基线 |
@@ -26,6 +26,6 @@
 
 ## 单元数量
 
-发布层 enable 15 个单元（七个 service、八个 timer），订阅刷新在开机 1 分钟后运行，之后 timer 每 10 分钟 tick；更新程序成功后排 48 小时，失败后 10 分钟重试。
+发布层 enable 17 个单元（八个 service、九个 timer），订阅刷新在开机 1 分钟后运行，之后 timer 每 10 分钟 tick；更新程序成功后排 48 小时，失败后 10 分钟重试。
 `mihomo-rules-update`、`download-quality`、`social-quality` 三个 timer 随仓库安装但保持 disabled。
 清单、失败恢复与手动操作见[运维文档](../operations.zh-CN.md)。

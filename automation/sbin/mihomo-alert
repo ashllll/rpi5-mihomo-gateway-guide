@@ -1,11 +1,13 @@
 #!/bin/sh
-# Send one alert line to ServerChan and Bark. Delivery is best effort: a broken
+# Send actionable gateway status to ServerChan and Bark. Delivery is best effort: a broken
 # notifier must never take the gateway down. Callers handle delivery failure
 # without stopping forwarding and retry an unacknowledged transition.
 #
 #   mihomo-alert --test                     send a test message (bypasses the cooldown)
 #   mihomo-alert --unit-failed <unit>       report a systemd unit failure
 #   mihomo-alert --health <message> <key>   report a health transition
+# Known diagnostic-only and unknown events are logged and acknowledged without
+# pushing. Return 75 defers a selected event; other failures remain retryable.
 #
 # Configuration lives in /etc/mihomo-alert.env (mode 0600):
 #   SERVERCHAN_SENDKEY=<sendkey>            https://sct.ftqq.com
@@ -37,6 +39,195 @@ esac
 # Serialize cooldown bookkeeping with delivery; a busy sender is retryable.
 exec 9>"$state_file.lock"
 flock -w 1 9 || exit 1
+
+# Keep diagnostic records in the journal; phone notifications describe impact.
+formatted=$(python3 - "$key" "$message" "$title" <<'PYFORMAT'
+import re, sys
+key, raw, site = sys.argv[1:]
+recovered = key.endswith(('-recovered', '-recovery'))
+base = key[:-10] if key.endswith('-recovered') else key
+names = {'ai': 'AI 服务', 'github': 'GitHub', 'video': '视频',
+         'domestic': '国内网站', 'primary': '代理网站'}
+summary = current = happened = advice = ''
+level = 'passive' if recovered else 'active'
+
+def field(name):
+    match = re.search(r'\b' + name + r'=(\d)\b', raw)
+    return match.group(1) if match else None
+
+if key == 'test' or key.startswith('self-test:'):
+    summary = '通知测试'
+    current = '这是一条测试消息，不表示网络发生故障。'
+    happened = '正在检查手机能否收到网关提醒。'
+    advice = '看到这条消息即可，无需处理。'
+elif key == 'mihomo-degraded':
+    results = re.findall(r'([A-Za-z0-9_.-]+)=(ok|fail) status=([0-9]*) path=(proxy|direct)', raw)
+    failed = list(dict.fromkeys(names.get(n, '其他网站') for n, result, _, _ in results if result == 'fail'))
+    summary = ('、'.join(failed) + '访问检查异常') if failed else '网站访问检查异常'
+    current = '；'.join(names.get(n, '其他网站') + ('：检查通过' if result == 'ok' else '：未能连接' if code in ('', '000') else '：返回异常响应') for n, result, code, _ in results)
+    current = (current + '。' if current else '本轮网站访问检查未通过。') + '未通过的项目可能打不开或加载缓慢。'
+    happened = '网关本地转发仍在运行，但部分网站访问检查失败；原因尚未确定，不能据此判断所有设备都已断网。'
+    advice = '先重试受影响的网站；持续异常时检查或更换代理线路。'
+elif key == 'mihomo-failed':
+    summary = '经过树莓派的上网连接异常'
+    current = '网关转发检查未通过，连接它的设备可能无法上网。'
+    happened = '网关未能正常转发连接，自动修复是否成功还未确认。'
+    advice = '先检查网线和主路由；如果仍不能上网，需要检查树莓派。'
+    level = 'timeSensitive'
+elif key in ('mihomo-recovery', 'mihomo-egress-recovery'):
+    summary = '网关转发已恢复，网站访问待确认' if 'egress=unknown' in raw else '上网检查已恢复' if key == 'mihomo-recovery' else '网站访问检查已恢复'
+    current = '本地转发检查已通过，网站访问尚未检查。' if 'egress=unknown' in raw else '本地转发和本轮网站访问检查已通过。'
+    happened = '此前报告的异常已通过相应复查；尚未验证每台设备的实际使用。'
+    advice = '重试之前打不开的网站。能正常使用就无需处理。'
+elif key.startswith('unit:'):
+    unit = base[5:].removesuffix('.service')
+    if recovered:
+        sys.exit(0)  # Leaving the failed-unit list does not prove functional recovery.
+    if unit in ('mihomo-subscription-update', 'mihomo-update-subscription'):
+        summary = '代理线路列表更新未完成'
+        current = '本次没有确认更新成功；是否影响上网，需要看实际访问结果。'
+        happened = '更新代理线路列表时出错。'
+        advice = '如果现在还能上网，可以继续使用；下次仍失败时，检查订阅是否过期或失效。'
+    elif unit in ('mihomo', 'mosdns', 'dnsmasq', 'dnsmasq-vlan-pilot', 'mihomo-measurement-budget'):
+        summary = '网关的联网功能需要检查'
+        current = '经过树莓派的设备可能无法上网，实际访问情况尚未确认。'
+        happened = '网关的一项必要功能停止工作或启动失败。'
+        advice = '重试网页；如果仍打不开，检查树莓派，留意后续上网检查结果。'
+        level = 'timeSensitive'
+    elif unit in ('mihomo-watch', 'mihomo-healthcheck', 'mosdns-healthcheck', 'mihomo-dnsmasq-guard'):
+        summary = '网关自动检查暂时不可用'
+        current = '部分故障可能无法被及时发现或自动修复；不代表已经断网。'
+        happened = '一次自动检查执行失败。'
+        advice = '先确认设备能否上网，并检查树莓派的自动检查功能。'
+    elif unit == 'mihomo-media-guard':
+        summary = '图片和视频线路筛选暂停'
+        current = '暂时无法继续筛掉慢线路；当前播放速度尚未确认。'
+        happened = '本次图片和视频线路检查未完成。'
+        advice = '如果图片或视频卡顿，先重试或换线路；持续异常再检查树莓派。'
+    else:
+        sys.exit(0)
+elif key in ('mosdns-failed', 'mosdns-degraded', 'mosdns-recovery'):
+    if key == 'mosdns-degraded':
+        cn, proxy = field('cn'), field('proxy_fake')
+        if cn == proxy == '1':
+            # Keep the observer unacknowledged: a later real lookup failure may
+            # have the same degraded state and must still produce a notification.
+            sys.exit(75)
+        summary = '部分网站的网址查询异常'
+        parts = [('国内网站', cn), ('代理网站', proxy)]
+        current = '；'.join(label + ('：网址查询通过' if value == '1' else '：网址查询失败' if value == '0' else '：查询情况未确认') for label, value in parts) + '。部分网站可能打不开。'
+        happened = '网关查询网站地址时出现异常，仍保留能用的查询方式。'
+        advice = '重试打不开的网站；持续异常时检查树莓派。'
+    elif key == 'mosdns-recovery':
+        summary = '网址查询检查已恢复'
+        current = '国内网站和代理网站的网址查询检查均已通过。'
+        happened = '此前失败的网址查询已通过复查。'
+        advice = '重试之前打不开的网站。能正常使用就无需处理。'
+    else:
+        summary = '网址查询异常，正在尝试备用方式'
+        current = '设备可能连着 Wi-Fi 却打不开网站，备用方式是否生效尚未确认。'
+        happened = '网址查询没有正常应答，已请求切换到备用方式。'
+        advice = '稍后重试网页；如果仍打不开，需要检查树莓派。'
+        level = 'timeSensitive'
+elif base in ('temp', 'disk', 'mem', 'wan'):
+    values = re.findall(r'([0-9.]+)(C|MB|%)', raw)
+    if base == 'temp':
+        temps = [v for v, unit in values if unit == 'C']
+        bits = re.search(r'throttled=0x([0-9a-fA-F]+)', raw)
+        flags = int(bits.group(1), 16) & 7 if bits else 0
+        hot = len(temps) > 1 and float(temps[0]) >= float(temps[1])
+        summary = '树莓派温度或供电检查已恢复' if recovered else '树莓派供电不足' if flags & 1 else '树莓派温度偏高' if hot else '树莓派运行速度受到限制'
+        current = ('当前温度 ' + temps[0] + '℃。' if temps else '')
+        current += '本轮温度和供电检查已通过。' if recovered else ('检测到供电不足。' if flags & 1 else '') + ('温度达到提醒线 ' + temps[1] + '℃。' if hot else '') + ('树莓派正在降低运行速度，网络可能变慢。' if flags & 6 else '')
+        current = current or '温度或供电检查未通过，具体读数尚未确认。'
+        happened = '此前的温度或供电异常已消失。' if recovered else '硬件状态检查出现异常，可能影响网关稳定性。'
+        advice = '无需处理，留意是否再次出现。' if recovered else '检查电源适配器和供电线。' if flags & 1 and not hot else '检查散热；如同时供电不足，也要检查电源和供电线。'
+    elif base in ('disk', 'mem'):
+        disk = base == 'disk'
+        numbers = [v for v, unit in values if unit == ('%' if disk else 'MB')]
+        summary = ('树莓派存储空间' if disk else '树莓派可用内存') + ('已回到正常范围' if recovered else '不足')
+        current = ('存储空间已用 ' + numbers[0] + '%' if disk else '可用内存剩余 ' + numbers[0] + ' MB') if numbers else '本轮资源检查已通过' if recovered else '本轮资源检查低于可用要求'
+        if len(numbers) > 1:
+            current += '，提醒线为 ' + numbers[1] + ('%' if disk else ' MB')
+        current += '。'
+        happened = '此前的资源不足已缓解。' if recovered else '空间不足可能导致配置和日志无法保存。' if disk else '内存不足可能导致网关运行不稳。'
+        advice = '无需立即处理，留意是否再次不足。' if recovered else '清理不需要的文件和旧日志。' if disk else '检查是否有额外程序占用过多内存。'
+    else:
+        summary = '树莓派与主路由的连接已恢复' if recovered else '树莓派连不上主路由'
+        current = '网线连接和主路由可达检查已通过；外网是否可用尚未确认。' if recovered else '树莓派到主路由的连接检查未通过，经过它的设备可能无法上网。'
+        happened = '此前的连接异常已通过复查。' if recovered else '未检测到正常的上游连接，或主路由没有回应检查。'
+        advice = '重试网页确认上网情况。' if recovered else '检查树莓派网线、路由器端口和主路由是否通电。'
+        level = 'passive' if recovered else 'timeSensitive'
+elif base.startswith('media-empty:'):
+    group = {'Social': '推特图片和视频', 'Streaming': '视频播放'}.get(base.split(':', 1)[1], '部分图片和视频')
+    summary = group + ('已有达标线路' if recovered else '暂无达标线路')
+    current = '已有通过速度检查的线路，实际播放还需重试确认。' if recovered else '当前没有通过速度检查的可用线路，相关图片或视频可能无法加载。'
+    happened = '此前缺少的线路已补回。' if recovered else '目前没有线路通过图片和视频的速度筛选。'
+    advice = '重试图片或视频，能正常使用就无需处理。' if recovered else '等待后续检查；急需使用时检查或更换代理线路。'
+elif key in ('dnsmasq-restart', 'resolver-restart', 'dnsmasq-guard-exhausted', 'resolver-guard-exhausted', 'dns-path-down', 'resolver-silent', 'dns-path-degraded', 'dns-path-recovery'):
+    if key in ('dnsmasq-restart', 'resolver-restart'):
+        summary = '网站地址查不到，正在自动修复'
+        current = '设备可能连着 Wi-Fi 却打不开网站；修复结果还未确认。'
+        happened = '网址查询没有回应，已尝试重启相关联网功能。'
+        advice = '稍后重试网页；若收到修复失败提醒，需要检查树莓派。'
+    elif key in ('dnsmasq-guard-exhausted', 'resolver-guard-exhausted'):
+        summary = '网址查询未能自动修复'
+        current = '网址查询仍未通过检查，部分或全部网站可能打不开。'
+        happened = '自动修复失败或已达到重试上限。'
+        advice = '需要检查树莓派和主路由；不要只反复重连 Wi-Fi。'
+    elif key == 'dns-path-recovery':
+        summary = '设备的网址查询已恢复'
+        current = '面向设备的网址查询和后续查询环节均已通过检查。'
+        happened = '此前的网址查询异常已通过复查。'
+        advice = '重试之前打不开的网站。能正常使用就无需处理。'
+    elif key == 'resolver-silent':
+        summary = '新打开的网站可能无法加载'
+        current = '设备的查询入口仍能回应，但后续网址查询没有回应；已缓存的网站可能还能打开。'
+        happened = '网关暂时无法继续获取网站地址。'
+        advice = '重试受影响的网站；持续异常时检查树莓派。'
+    elif key == 'dns-path-degraded':
+        summary = '部分网址查询失败'
+        current = '部分网址查询未通过，网站可能偶尔打不开。'
+        happened = '不同查询方式的检查结果不一致，尚未确认所有设备都受影响。'
+        advice = '先重试网站；持续异常时检查树莓派。'
+    else:
+        summary = '网站地址查询没有回应'
+        current = '设备可能连着 Wi-Fi 却打不开网站。'
+        happened = '面向设备的查询入口及后续查询环节都没有回应。'
+        advice = '检查树莓派和主路由，留意后续自动修复结果。'
+    if key not in ('dns-path-recovery', 'dns-path-degraded', 'resolver-silent'):
+        level = 'timeSensitive'
+else:
+    sys.exit(0)  # Internal events require reviewed user-facing meaning before push.
+icon = '✅' if recovered else 'ℹ️' if key == 'test' or key.startswith('self-test:') else '⚠️'
+print(level)
+print(f'{icon} {summary} · {site}')
+print(f'当前：{current}\n发生了什么：{happened}\n建议：{advice}')
+PYFORMAT
+) || { result=$?; [ "$result" != 75 ] || logger -t mihomo-alert "log-only observation, recheck required: $key"; exit "$result"; }
+[ -n "$formatted" ] || { logger -t mihomo-alert "log-only event $key: $message"; exit 0; }
+level=$(printf '%s\n' "$formatted" | head -n 1)
+title=$(printf '%s\n' "$formatted" | sed -n '2p')
+message=$(printf '%s\n' "$formatted" | tail -n +3)
+
+# Pair functional recoveries only with faults accepted by a notification channel.
+# Log-only events return success so observers do not retry an intentional filter.
+incident=
+case "$key" in
+  mihomo-failed|mihomo-degraded|mihomo-recovery|mihomo-egress-recovery) incident=gateway ;;
+  mosdns-failed|mosdns-degraded|mosdns-recovery) incident=address-query ;;
+  dnsmasq-restart|resolver-restart|dnsmasq-guard-exhausted|resolver-guard-exhausted|dns-path-down|resolver-silent|dns-path-degraded|dns-path-recovery) incident=device-address-query ;;
+  temp|disk|mem|wan|media-empty:*) incident=${key%-recovered} ;;
+  temp-recovered|disk-recovered|mem-recovered|wan-recovered) incident=${key%-recovered} ;;
+esac
+recovery=0
+case "$key" in *-recovered|*-recovery) recovery=1 ;; esac
+open_file=$state_file.open
+if [ "$recovery" = 1 ] && ! grep -Fxq "$incident" "$open_file" 2>/dev/null; then
+  logger -t mihomo-alert "log-only recovery without delivered fault: $key"
+  exit 0
+fi
+
 if [ "${1:-}" != --test ]; then
   last=$(awk -F'\t' -v k="$key" '$1==k{print $2; exit}' "$state_file" 2>/dev/null || true)
   if [ -n "$last" ] && [ $(( $(date +%s) - last )) -lt "$cooldown" ]; then
@@ -47,94 +238,6 @@ if [ "${1:-}" != --test ]; then
   fi
 fi
 
-# Keep diagnostic records in the journal; phone notifications describe impact.
-formatted=$(python3 - "$key" "$message" "$title" <<'PYFORMAT'
-import re, sys
-key, raw, site = sys.argv[1:]
-recovered = key.endswith('-recovered')
-base = key[:-10] if recovered else key
-names = {'ai': 'AI 服务', 'github': 'GitHub', 'video': '视频',
-         'domestic': '国内网站', 'primary': '代理网站'}
-summary = '网关检查有新情况'
-body = '检测到未分类的网关事件。请查看网关日志确认详情。'
-if key == 'test' or key.startswith('self-test:'):
-    summary = '通知测试'
-    body = '这是一条测试消息，不表示网络发生故障。'
-elif key == 'mihomo-degraded':
-    results = re.findall(r'([A-Za-z0-9_.-]+)=(ok|fail) status=([0-9]*) path=(proxy|direct)', raw)
-    failed = [names.get(n, n) for n, result, _, _ in results if result == 'fail']
-    summary = ('、'.join(failed) + '访问检查异常') if failed else '网站访问检查异常'
-    lines = [names.get(n, n) + ('：检查通过' if result == 'ok' else '：未能连接' if code in ('', '000') else '：网站返回非预期响应') for n, result, code, _ in results]
-    if not results:
-        lines = ['未取得有效的网站检查结果，请检查探测配置。']
-    body = '\n'.join(lines + ['影响：上述失败项目可能打不开或加载缓慢；抽样结果不能代表所有设备。', '原因尚未确定，可能与节点、线路或目标网站有关。请先重试对应网站；持续异常再检查节点。'])
-elif key == 'mihomo-failed':
-    summary = '网关转发异常'
-    body = '树莓派的代理程序或转发配置检查未通过。\n影响：经过树莓派的设备可能无法上网。\n请检查网关服务、连接线路及日志，确认自动恢复结果。'
-elif key in ('mihomo-recovery', 'mihomo-egress-recovery'):
-    summary = '网关转发检查恢复' if key == 'mihomo-recovery' else '网站访问检查恢复'
-    body = '树莓派本地转发检查已通过。代理网站尚未检查，请重试之前打不开的网站。' if 'egress=unknown' in raw else '本地转发和本轮网站抽样检查已通过。请重试之前打不开的网站；这不代表所有网站和设备均已验证。'
-elif key.startswith('unit:'):
-    unit = base[5:]
-    labels = {'mihomo': '代理服务', 'mosdns': '域名查询服务',
-              'mihomo-update-subscription': '订阅更新', 'mihomo-subscription-update': '订阅更新',
-              'mihomo-update-rules': '分流规则更新', 'mosdns-rules-update': '域名分流规则更新',
-              'mosdns-binary-update': '域名查询程序更新', 'mihomo-measurement-budget': '节点检测流量管理',
-              'dnsmasq': '设备域名查询', 'dnsmasq-vlan-pilot': '设备联网地址分配与查询',
-              'mihomo-media-guard': '图片和视频节点筛选', 'mihomo-watch': '网关故障监控',
-              'mihomo-healthcheck': '上网状态检查', 'mosdns-healthcheck': '域名查询检查',
-              'mihomo-dnsmasq-guard': '设备域名查询检查'}
-    name = labels.get(unit.removesuffix('.service'), '后台任务 ' + unit)
-    summary = name + ('不再报告失败' if recovered else '失败')
-    body = ('该任务已不在系统失败列表中，实际功能仍需检查。' if recovered else '系统报告此任务执行失败，请检查任务日志。')
-    if 'update-' in unit or '-update' in unit:
-        body += '\n新内容可能尚未生效；旧配置是否仍可用需看上网检查，不能据此认定已经断网。'
-    elif 'media-guard' in unit:
-        body += '\n慢节点筛选可能暂停，请检查推特图片和视频是否正常加载。'
-elif key.startswith('mosdns-'):
-    summary = {'mosdns-failed': '域名查询服务无响应', 'mosdns-degraded': '域名查询检查有异常', 'mosdns-recovery': '域名查询检查恢复'}.get(key, '域名查询检查异常')
-    if key == 'mosdns-recovery':
-        body = '国内域名、代理域名和查询服务状态检查均已通过。请重试之前打不开的网站。'
-    elif key == 'mosdns-degraded':
-        parts = [('cn', '国内网站地址查询'), ('proxy_fake', '代理网站地址分配'), ('metrics', '查询服务状态接口')]
-        body = '\n'.join(label + ('：检查通过' if re.search(r'\b'+field+r'=1\b', raw) else '：检查异常') for field,label in parts)
-        body += '\n影响：部分网站可能打不开；仅状态接口异常不代表上网失败。请重试网站并检查查询服务。'
-    else:
-        body = '查询服务已停止或无法正常应答，已请求使用备用查询方式，切换结果仍需确认。\n影响：设备可能连着 Wi-Fi 却打不开网站。请检查后续恢复通知及实际访问。'
-elif base in ('temp', 'disk', 'mem', 'wan'):
-    labels = {'temp': '树莓派温度或供电', 'disk': '树莓派存储空间', 'mem': '树莓派可用内存', 'wan': '树莓派到主路由的连接'}
-    summary = labels[base] + ('检查恢复' if recovered else '异常')
-    advice = {'temp': '请检查散热和电源，温度或供电异常可能使网关变慢。', 'disk': '请清理日志和无用文件，空间不足可能导致配置无法保存。', 'mem': '请检查占用内存的程序，内存不足可能导致服务退出。', 'wan': '请检查树莓派网线、主路由和接口配置，经过树莓派的设备可能无法上网。'}
-    facts = re.findall(r'[0-9.]+(?:C|MB|%)', raw)
-    body = ('本轮相关检查已通过。' if recovered else advice[base]) + ('\n检测数值：' + '，'.join(facts) if facts else '')
-elif base.startswith('media-empty:'):
-    group = base.split(':', 1)[1]
-    group = {'Social': '推特图片和视频', 'Streaming': '视频播放'}.get(group, group)
-    summary = group + ('候选节点已补回' if recovered else '没有达标的候选节点')
-    body = ('节点文件中已有通过媒体测速的候选，请重试播放。实际加载速度仍需确认。' if recovered else '节点文件中已无通过媒体测速的候选，相关图片或视频可能无法加载。请检查机场节点，等待后续测速或手动更换可用节点。')
-elif key.startswith('dns-bypass:'):
-
-    summary = '有设备未使用网关的域名查询'
-    body = '设备 ' + key.split(':',1)[1] + ' 向其他服务器查询网站地址。\n这可能导致部分代理网站打不开，尚不能据此确认地址错误。请检查该设备的 DNS 设置。'
-elif key in ('dnsmasq-restart', 'dnsmasq-guard-exhausted', 'dns-path-down', 'resolver-silent', 'dns-path-degraded', 'dns-path-recovery'):
-    summary, body = {
-        'dnsmasq-restart': ('设备域名查询无响应，已请求重启', '上游查询有应答，但面向设备的查询无响应。已请求重启，恢复情况待复查。'),
-        'dnsmasq-guard-exhausted': ('设备域名查询未能自动修复', '重启失败或已达到自动重试上限，请检查域名查询服务。'),
-        'dns-path-down': ('整条域名查询链路无响应', '设备查询入口及其上游均未应答。请检查查询服务及上游，设备可能连着 Wi-Fi 却打不开网站。'),
-        'resolver-silent': ('域名查询上游无响应', '设备查询入口仍有应答，但上游查询失败。缓存中的网站可能仍可打开，请检查上游查询服务。'),
-        'dns-path-degraded': ('部分设备域名查询检查异常', '部分查询未通过，网站可能偶尔打不开。请重试网站并检查查询服务。'),
-        'dns-path-recovery': ('设备域名查询检查恢复', '本轮设备查询入口及上游的全部查询检查已通过，请重试之前打不开的网站。'),
-    }[key]
-else:
-    # Unknown callers retain their message so a new event is never silently hidden.
-    body = raw
-icon = '✅' if recovered or key.endswith(('-recovery',)) else 'ℹ️' if key == 'test' or key.startswith('self-test:') else '⚠️'
-print(f'{icon} {summary} · {site}')
-print(body)
-PYFORMAT
-) || exit 1
-title=$(printf '%s\n' "$formatted" | head -n 1)
-message=$(printf '%s\n' "$formatted" | tail -n +2)
 
 # ServerChan answers HTTP 200 even when the sendkey is wrong; only code==0 is a send.
 json_code() {
@@ -167,7 +270,7 @@ if [ -n "${SERVERCHAN_SENDKEY:-}" ]; then
 fi
 if [ -n "${BARK_URL:-}" ]; then
   configured=$((configured + 1))
-  body=$(python3 -c 'import json,sys; print(json.dumps(dict(title=sys.argv[1], body=sys.argv[2], group="mihomo", level="timeSensitive")))' "$title" "$message")
+  body=$(python3 -c 'import json,sys; print(json.dumps(dict(title=sys.argv[1], body=sys.argv[2], group="树莓派网关", level=sys.argv[3])))' "$title" "$message" "$level")
   resp=$(curl -sS -m 8 -H 'Content-Type: application/json' -d "$body" "$BARK_URL" 2>/dev/null || true)
   code=$(printf %s "$resp" | json_code)
   if [ "$code" = 200 ]; then delivered=$((delivered + 1)); sent_channels="${sent_channels:-}bark,";
@@ -183,6 +286,12 @@ else
     printf '%s\t%s\n' "$key" "$(date +%s)"
     awk -F'\t' -v k="$key" '$1!=k' "$state_file" 2>/dev/null | head -n 49 || true
   } >"$state_file.tmp" && mv "$state_file.tmp" "$state_file"
+  if [ -n "$incident" ]; then
+    {
+      awk -v incident="$incident" '$0!=incident' "$open_file" 2>/dev/null || true
+      [ "$recovery" = 1 ] || printf '%s\n' "$incident"
+    } >"$open_file.tmp" && mv "$open_file.tmp" "$open_file" || exit 1
+  fi
   # A delivered alert must leave a trace: without this, "no journal line" is
   # indistinguishable from "sent successfully".
   logger -t mihomo-alert "delivered ${sent_channels%,} ($delivered/$configured): $message"

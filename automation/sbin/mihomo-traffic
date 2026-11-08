@@ -1,0 +1,350 @@
+#!/usr/bin/python3
+"""Persist Mihomo traffic attribution without changing the proxy core."""
+import argparse
+import collections
+import datetime as dt
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import signal
+import sqlite3
+import threading
+import time
+import urllib.request
+from zoneinfo import ZoneInfo
+
+import yaml
+
+DB = Path('/var/lib/mihomo-traffic/traffic.sqlite3')
+TZ = ZoneInfo('Asia/Shanghai')
+BUCKET = 300
+RETENTION = 90 * 86400
+LABELS = {'glados': 'GLaDOS', 'bwb': 'ByWave', 'bywave': 'ByWave', 'stt': 'STT'}
+
+
+def clean(value):
+    return ''.join(c for c in str(value)[:256] if c.isprintable())
+
+
+def validate(snapshot):
+    if not isinstance(snapshot, dict):
+        raise ValueError('invalid snapshot')
+    for key in ('uploadTotal', 'downloadTotal'):
+        if type(snapshot.get(key)) is not int or not 0 <= snapshot[key] < 2**63:
+            raise ValueError('invalid total counter')
+    if not isinstance(snapshot.get('connections'), list) or len(snapshot['connections']) > 100000:
+        raise ValueError('invalid connections')
+    seen = set()
+    for c in snapshot['connections']:
+        if not isinstance(c, dict):
+            raise ValueError('invalid connection')
+        if not isinstance(c.get('id'), str) or not 0 < len(c['id']) <= 128 or c['id'] in seen:
+            raise ValueError('invalid connection ID')
+        seen.add(c['id'])
+        for key in ('upload', 'download'):
+            if type(c.get(key)) is not int or not 0 <= c[key] < 2**63:
+                raise ValueError('invalid connection counter')
+        if not isinstance(c.get('metadata'), dict):
+            raise ValueError('invalid metadata')
+        ip = c['metadata'].get('sourceIP', '')
+        if not isinstance(ip, str):
+            raise ValueError('invalid source IP')
+        if ip:
+            ipaddress.ip_address(ip)
+        if not isinstance(c.get('chains'), list) or len(c['chains']) > 64:
+            raise ValueError('invalid chain')
+        if any(not isinstance(n, str) or len(n) > 512 for n in c['chains']):
+            raise ValueError('invalid node name')
+
+
+def leases(now):
+    result = {}
+    for path in (Path('/run/dnsmasq-vlan-pilot/leases'), Path('/var/lib/misc/dnsmasq.leases')):
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4:
+                continue
+            expiry, mac, ip, name = fields[:4]
+            try:
+                ipaddress.ip_address(ip)
+                if int(expiry) != 0 and int(expiry) < now:
+                    continue
+            except ValueError:
+                continue
+            result[ip] = (clean(mac.lower()), clean(name if name != '*' else ip))
+    return result
+
+
+def dimensions(c, identities, accounts):
+    source = c['metadata'].get('sourceIP') or ''
+    if not source or ipaddress.ip_address(source).is_loopback:
+        device, name, source = 'gateway', '树莓派本机', 'localhost'
+    else:
+        device, name = identities.get(source, ('ip:' + source, source))
+    nodes, airports = [], []
+    for node in c['chains']:
+        matches = [name for name, spec in accounts.items()
+                   if any(node.startswith(prefix) for prefix in spec['prefixes'])]
+        if len(matches) > 1:
+            raise ValueError('ambiguous airport prefixes')
+        if matches:
+            nodes.append(clean(node))
+            airports.append(LABELS.get(matches[0], matches[0]))
+    if nodes:
+        airport = ' + '.join(dict.fromkeys(airports))
+        node = ' → '.join(nodes)
+    elif 'DIRECT' in c['chains']:
+        airport, node = 'DIRECT', 'DIRECT'
+    elif any(n in ('REJECT', 'REJECT-DROP') for n in c['chains']):
+        airport, node = 'REJECT', 'REJECT'
+    else:
+        airport, node = 'UNKNOWN', clean(c['chains'][0] if c['chains'] else 'unknown')
+    return (device, source, name, airport, node)
+
+
+class Ledger:
+    def __init__(self, path):
+        self.db = sqlite3.connect(path, timeout=10)
+        self.db.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.execute('PRAGMA synchronous=FULL')
+        self.db.execute('PRAGMA journal_size_limit=8388608')
+        self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS usage (
+                bucket INTEGER, device TEXT, ip TEXT, name TEXT, airport TEXT, node TEXT,
+                upload INTEGER NOT NULL, download INTEGER NOT NULL,
+                PRIMARY KEY(bucket,device,ip,name,airport,node));
+            CREATE TABLE IF NOT EXISTS totals (
+                bucket INTEGER PRIMARY KEY, upload INTEGER NOT NULL, download INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS events (at REAL, kind TEXT, seconds REAL);
+            CREATE INDEX IF NOT EXISTS events_at ON events(at);
+        ''')
+        row = self.db.execute("SELECT value FROM meta WHERE key='checkpoint'").fetchone()
+        self.state = json.loads(row[0]) if row else None
+        self.pending = collections.defaultdict(lambda: [0, 0])
+        self.totals = collections.defaultdict(lambda: [0, 0])
+        self.events = []
+        self.last_prune = 0
+
+    def consume(self, snapshot, now, core, identities, accounts):
+        validate(snapshot)
+        # Resolve all identities before mutating the ledger so a bad response is atomic.
+        current = {}
+        old = self.state
+        restarted = old is not None and old['core'] != core
+        prior = old['active'] if old and not restarted else {}
+        for c in snapshot['connections']:
+            dims = dimensions(c, identities, accounts)
+            if c['id'] in prior:
+                # Keep the original device identity when DHCP leases later change.
+                dims = tuple(prior[c['id']][2][:3]) + dims[3:]
+            current[c['id']] = [c['upload'], c['download'], dims]
+        total = [snapshot['uploadTotal'], snapshot['downloadTotal']]
+        bucket = int(now) // BUCKET * BUCKET
+        if old is not None:
+            if now - old['at'] > 3:
+                self.events.append((now, 'sampling_gap', now - old['at']))
+            reset = any(total[i] < old['total'][i] for i in (0, 1))
+            if restarted or reset:
+                self.events.append((now, 'core_restart' if restarted else 'counter_reset', 0))
+            for i in (0, 1):
+                self.totals[bucket][i] += total[i] if restarted or reset else total[i] - old['total'][i]
+            for cid, (up, down, dims) in current.items():
+                prev = prior.get(cid, [0, 0])
+                delta = [max(0, up - prev[0]), max(0, down - prev[1])]
+                if any(delta):
+                    key = (bucket, *dims)
+                    self.pending[key][0] += delta[0]
+                    self.pending[key][1] += delta[1]
+        else:
+            self.events.append((now, 'recording_started', 0))
+        self.state = {'at': now, 'core': core, 'total': total, 'active': current,
+                      'started_at': old['started_at'] if old else now}
+
+    def flush(self):
+        if self.state is None:
+            return
+        now = self.state['at']
+        with self.db:
+            self.db.executemany('''INSERT INTO usage VALUES (?,?,?,?,?,?,?,?)
+                ON CONFLICT DO UPDATE SET upload=upload+excluded.upload, download=download+excluded.download''',
+                [(*key, *value) for key, value in self.pending.items()])
+            self.db.executemany('''INSERT INTO totals VALUES (?,?,?)
+                ON CONFLICT DO UPDATE SET upload=upload+excluded.upload, download=download+excluded.download''',
+                [(key, *value) for key, value in self.totals.items()])
+            self.db.executemany('INSERT INTO events VALUES (?,?,?)', self.events)
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('checkpoint',?)",
+                            (json.dumps(self.state, separators=(',', ':'), ensure_ascii=False),))
+            if now - self.last_prune >= 3600:
+                for table, column in [('usage', 'bucket'), ('totals', 'bucket'), ('events', 'at')]:
+                    self.db.execute(f'DELETE FROM {table} WHERE {column} < ?', (now - RETENTION,))
+        self.pending.clear()
+        self.totals.clear()
+        self.events.clear()
+        if now - self.last_prune >= 3600:
+            self.db.execute('PRAGMA incremental_vacuum(128)')
+            self.last_prune = now
+
+
+class CoreIdentity:
+    def __init__(self):
+        self.pid = None
+        self.boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+    def read(self):
+        if self.pid is None or not Path(f'/proc/{self.pid}/stat').exists():
+            candidates = Path('/sys/fs/cgroup/system.slice/mihomo.service/cgroup.procs').read_text().split()
+            self.pid = next((pid for pid in candidates if pid.isdigit()
+                             and Path(f'/proc/{pid}/comm').read_text().strip() == 'mihomo'), None)
+            if self.pid is None:
+                raise OSError('Mihomo is not running')
+        stat = Path(f'/proc/{self.pid}/stat').read_text().rsplit(')', 1)[1].split()
+        return f'{self.boot}:{self.pid}:{stat[19]}'
+
+
+def collect():
+    os.umask(0o077)
+    DB.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock = (DB.parent / 'collector.lock').open('a')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    credentials = Path(os.environ.get('CREDENTIALS_DIRECTORY', '/etc/mihomo/secrets'))
+    secret_path = credentials / 'dashboard-secret' if os.environ.get('CREDENTIALS_DIRECTORY') else credentials / 'dashboard.secret'
+    policy_path = credentials / 'policy' if os.environ.get('CREDENTIALS_DIRECTORY') else Path('/etc/mihomo/adaptive/capabilities.yaml')
+    secret = secret_path.read_text().strip()
+    accounts = yaml.safe_load(policy_path.read_text())['measurement']['accounts']
+    if not secret or not isinstance(accounts, dict):
+        raise ValueError('missing collector credentials or account map')
+    for spec in accounts.values():
+        if not isinstance(spec.get('prefixes'), list) or not spec['prefixes'] or any(
+                not isinstance(p, str) or not p for p in spec['prefixes']):
+            raise ValueError('invalid airport prefixes')
+    request = urllib.request.Request('http://127.0.0.1:9090/connections',
+                                     headers={'Authorization': 'Bearer ' + secret})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    ledger, core, stop = Ledger(DB), CoreIdentity(), threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+    last_flush = last_names = last_error = 0
+    identities = {}
+    print('Traffic collector started: 0.5s sampling, 5min buckets, 90 days retention', flush=True)
+    try:
+        while not stop.is_set():
+            start = time.monotonic()
+            try:
+                before = core.read()
+                with opener.open(request, timeout=5) as response:
+                    raw = response.read(32 * 1024 * 1024 + 1)
+                if len(raw) > 32 * 1024 * 1024:
+                    raise ValueError('snapshot exceeds size limit')
+                snapshot = json.loads(raw)
+                after = core.read()
+                if before != after:
+                    continue
+                now = time.time()
+                if now - last_names >= 30:
+                    identities, last_names = leases(now), now
+                ledger.consume(snapshot, now, after, identities, accounts)
+                if time.monotonic() - last_flush >= 15:
+                    ledger.flush()
+                    last_flush = time.monotonic()
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                if time.monotonic() - last_error >= 60:
+                    print('Sampling unavailable: ' + type(error).__name__, flush=True)
+                    last_error = time.monotonic()
+            stop.wait(max(0, 0.5 - (time.monotonic() - start)))
+    finally:
+        ledger.flush()
+        ledger.db.close()
+
+
+def timestamp(value):
+    date = dt.datetime.fromisoformat(value)
+    return date.replace(tzinfo=TZ).timestamp() if date.tzinfo is None else date.timestamp()
+
+
+def iso(value):
+    return dt.datetime.fromtimestamp(value, TZ).isoformat(timespec='seconds')
+
+
+def report(args):
+    start = timestamp(args.since) if args.since else timestamp(dt.datetime.now(TZ).date().isoformat())
+    end = timestamp(args.until) if args.until else time.time()
+    if end <= start:
+        raise ValueError('--until must be after --since')
+    conn = sqlite3.connect(f'file:{DB}?mode=ro', uri=True, timeout=10)
+    conn.row_factory = sqlite3.Row
+    conn.execute('BEGIN')
+    state_row = conn.execute("SELECT value FROM meta WHERE key='checkpoint'").fetchone()
+    if state_row is None:
+        raise ValueError('collector has not saved its first sample')
+    state = json.loads(state_row['value'])
+    where = 'bucket >= ? AND bucket < ?'
+    params = [int(start) // BUCKET * BUCKET, end]
+    def total(table):
+        row = conn.execute(f'SELECT coalesce(sum(upload),0),coalesce(sum(download),0) FROM {table} WHERE {where}', params).fetchone()
+        return {'upload': row[0], 'download': row[1]}
+    all_total, observed = total('totals'), total('usage')
+    if args.airport:
+        where += ' AND airport = ? COLLATE NOCASE'
+        params.append(args.airport)
+    if args.device:
+        where += ' AND (device = ? COLLATE NOCASE OR ip = ? OR name = ? COLLATE NOCASE)'
+        params.extend([args.device] * 3)
+    def grouped(fields):
+        sql = f'SELECT {fields},sum(upload) AS upload,sum(download) AS download FROM usage WHERE {where} GROUP BY {fields} ORDER BY sum(upload)+sum(download) DESC LIMIT 40'
+        return [dict(row) for row in conn.execute(sql, params)]
+    result = {
+        'requested_since': iso(start), 'requested_until': iso(end), 'bucket_seconds': BUCKET,
+        'recording_started': iso(state['started_at']), 'last_sample': iso(state['at']),
+        'sample_age_seconds': round(max(0, time.time() - state['at']), 1),
+        'all_mihomo_bytes': all_total, 'all_attributed_bytes': observed,
+        'all_difference_bytes': {k: all_total[k] - observed[k] for k in all_total},
+        'filters': {'airport': args.airport, 'device': args.device},
+        'by_device': grouped('device,ip,name'), 'by_airport': grouped('airport'),
+        'by_device_airport_node': grouped('device,ip,name,airport,node'),
+        'events': [dict(row) for row in conn.execute('SELECT * FROM events WHERE at >= ? AND at < ? ORDER BY at DESC LIMIT 20', (start, end))],
+        'notes': '0.5s sampled attribution; short/closed connections may be missed. Signed global difference also reflects API timing/counter scope. Core restart gaps cannot be recovered. Ranges include intersecting 5-minute buckets. Excludes traffic bypassing Mihomo and provider billing multipliers.',
+    }
+    conn.close()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    print(f"记录开始：{result['recording_started']}  最近采样：{result['last_sample']}")
+    print(f"查询：{result['requested_since']} 至 {result['requested_until']}（5 分钟汇总）")
+    for title, values in [('Mihomo 总量（全网）', all_total), ('已归属（全网）', observed), ('未归属/口径差额（全网）', result['all_difference_bytes'])]:
+        print(f"{title}: 上传 {values['upload']/1048576:.2f} MiB，下载 {values['download']/1048576:.2f} MiB")
+    for title, key in [('设备排名', 'by_device'), ('机场排名', 'by_airport'), ('设备 / 机场 / 节点明细', 'by_device_airport_node')]:
+        print('\n' + title + '（上传 MiB / 下载 MiB）')
+        for row in result[key]:
+            label = ' | '.join(str(v) for k, v in row.items() if k not in ('upload', 'download', 'device'))
+            print(f"{row['upload']/1048576:10.2f} / {row['download']/1048576:10.2f}  {label}")
+    print('\n短连接可能漏采；总量差额不能强行归给设备。仅统计经过 Mihomo 的流量，不等同机场账单。')
+    if result['sample_age_seconds'] > 30:
+        print('注意：采样超过 30 秒未更新，请检查 mihomo-traffic.service。')
+    if result['events']:
+        print('采集事件：' + json.dumps(result['events'], ensure_ascii=False))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='command', required=True)
+    sub.add_parser('collect', help='Run the persistent collector (normally systemd)')
+    query = sub.add_parser('report', help='Show traffic since local midnight by default')
+    query.add_argument('--since', help='Shanghai date or ISO datetime, e.g. 2026-11-08T18:00')
+    query.add_argument('--until', help='End date/time, exclusive; default now')
+    query.add_argument('--airport', help='GLaDOS, ByWave, STT, DIRECT or UNKNOWN')
+    query.add_argument('--device', help='Device IP, MAC or DHCP hostname')
+    query.add_argument('--json', action='store_true')
+    args = parser.parse_args()
+    collect() if args.command == 'collect' else report(args)
+
+
+if __name__ == '__main__':
+    main()

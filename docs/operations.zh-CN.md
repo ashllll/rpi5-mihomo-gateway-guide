@@ -58,7 +58,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 
 ## 2. 单元清单
 
-发布层 15 个 enabled（7 个 service + 8 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
+发布层 17 个 enabled（8 个 service + 9 个 timer；安装脚本启用这些）+ 系统自带的 `nftables.service`。
 其余 worker service 是 `static`：没有 `[Install]`，由 timer 或 `OnFailure` 拉起，不算 enabled。
 
 | 单元 | 作用 | 触发 |
@@ -68,6 +68,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `dnsmasq-vlan-pilot.service` | VLAN 20 独立 DNS/DHCP | 常驻 |
 | `homeassistant-access-guard.service` | 从 `wan0`/`wlan0` REJECT `tcp/8123`，上游侧访问不到 HA UI | 开机一次（oneshot） |
 | `mihomo-dnsmasq-guard.timer` | 每 30 秒检查配置的设备查询入口和实际上游，分别测试两个域名的两种查询方式。只有入口全无应答而上游有应答才重启入口服务；链路全无响应、上游无响应或部分失败分别告警，不重启上游。重启预算 3 次/15 分钟，最短间隔 20 秒；全部查询通过后报告恢复 | 定时 |
+| `mihomo-traffic.service` | 持久化设备、机场与节点流量，查询方法见[运行策略](global-routing-and-traffic.zh-CN.md) | 常驻 |
 | `mihomo.service` | 核心（`--run-core` 校验后拉起；`ExecStartPre` 先 `mihomo -t`） | 常驻，`Restart=always` |
 | `mihomo-measurement-budget.service` | 预算准入 broker（建 socket；账本首扣创建） | 常驻（enabled） |
 | `mosdns.service` | 国内直连/代理分流 DNS | 常驻；不声明 `After=mihomo`，上游由 `mihomo-dns-mode auto` 收敛 |
@@ -76,6 +77,7 @@ systemctl list-timers --all | grep -E 'mihomo|mosdns'
 | `mosdns-healthcheck.timer` | mosdns 健康 | 开机 30s，之后每分钟 |
 | `mosdns-rules-update.timer` | 规则集每日 04:20±30min | 每日 |
 | `mihomo-subscription-update.timer` | 拉取主订阅及非手动额外来源，校验、备份、业务检查及失败恢复 | 开机 1 分钟后首跑，之后每 10 分钟 tick；成功排 48 小时，失败 10 分钟重试 |
+| `mihomo-github-api-guard.timer` | API 配额耗尽时验证并切换 STT/ByWave 出口 | 开机 30 秒，完成后间隔 60 秒 |
 | `mihomo-media-guard.timer` | 媒体速度准入，私有策略启用才采样；详见[媒体路由](wiki/x-video-routing.md) | 开机 2 分钟，之后每分钟唤醒 |
 | `mosdns-binary-update.timer` | MosDNS 二进制每周日 05:10±1h | 每周 |
 

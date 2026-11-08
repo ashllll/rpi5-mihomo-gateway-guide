@@ -11,7 +11,7 @@
                               │  一根网线：VLAN1 + VLAN20
                               ▼
    ┌─────────────────────────────────────────────────┐
-   │ rp5 · Debian 13 · 15 个 enabled 单元            │
+   │ rp5 · Debian 13 · 17 个 enabled 单元            │
    │  wan0 192.168.0.117/24（VLAN1：上游 + 管理）    │
    │  proxy20 192.168.20.1/24（802.1Q VLAN 20）      │
    │  nft: inet rp_filter / ip rp_nat                │

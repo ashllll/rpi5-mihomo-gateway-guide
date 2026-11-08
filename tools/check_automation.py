@@ -12,7 +12,7 @@ is checked the way it is shipped:
 * every environment variable a script reads is documented in
   automation/env/automation.env.example, and every documented variable is used,
 * every unit that runs an environment-dependent script loads the env file,
-* the unit tree is the recorded gateway's tree: exactly the fifteen units that
+* the unit tree is the recorded gateway's tree: exactly the seventeen units that
   box enabled, three timers installed but left off, the startup evidence gate and
   the budget wrapper drop-in, and none of the retired adaptive units,
 * the scripts and units are the recorded set (no adaptive selector), every
@@ -21,7 +21,7 @@ is checked the way it is shipped:
 * curated-pool keys match capabilities.yaml and route data comes from the
   independently installed route-defaults.yaml,
 * `automation/install.sh` installs the documented layout into a sandbox, keeps
-  operator-edited deployment data, enables exactly the fifteen recorded units and
+  operator-edited deployment data, enables exactly the seventeen recorded units and
   disables exactly the three dormant timers, and changes nothing in --dry-run
   mode,
 * the gateway address and ports really come from the environment at runtime.
@@ -64,18 +64,21 @@ CJK_ALLOWED = {
     "sbin/mihomo-subscription-candidate",
     "sbin/mihomo-subscription-normalize",
     "sbin/mihomo-alert",
+    "sbin/mihomo-traffic",
     "sbin/mihomo-healthcheck",
     "sbin/mosdns-healthcheck",
     "sbin/mihomo-watch",
 }
 
-# The recorded gateway's installed set. Fourteen units are enabled; three maintenance
+# The recorded gateway's installed set. Seventeen units are enabled; three maintenance
 # timers ship for completeness but stay off. Keeping both lists literal is the
 # point: a unit silently moving between them is exactly the drift this checker
 # exists to catch.
 ENABLED_UNITS = (
     "mihomo.service",
     "mihomo-measurement-budget.service",
+    "mihomo-traffic.service",
+    "mihomo-github-api-guard.timer",
     "mihomo-media-guard.timer",
     "mihomo-subscription-update.timer",
     "mihomo-healthcheck.timer",
@@ -104,6 +107,8 @@ SBIN_SCRIPTS = (
     "mihomo-core-swap",
     "mihomo-dns-mode",
     "mihomo-download-quality",
+    "mihomo-traffic",
+    "mihomo-github-api-guard",
     "mihomo-dnsmasq-guard",
     "mihomo-healthcheck",
     "mihomo-media-guard",
@@ -534,7 +539,7 @@ def check_manifest() -> None:
     check(isinstance(defaults, dict), "route-defaults.yaml must be a mapping")
     if not isinstance(defaults, dict):
         return
-    for key, allowed in (("download_routes", {"GitHub Download", "GitHub Control", "Package Download"}),
+    for key, allowed in (("download_routes", {"Download", "GitHub Download", "GitHub Control", "GitHub API", "Model Download", "Package Download"}),
                          ("video_routes", {"Streaming", "Social"})):
         routes = defaults.get(key)
         check(isinstance(routes, dict) and bool(routes), f"route-defaults.yaml is missing {key}")

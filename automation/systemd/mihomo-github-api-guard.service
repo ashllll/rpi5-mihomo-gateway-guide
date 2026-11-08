@@ -1,0 +1,24 @@
+[Unit]
+Description=Choose GitHub API egress with available anonymous quota
+After=mihomo.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mihomo-github-api-guard
+TimeoutStartSec=70
+StateDirectory=mihomo-github-api
+StateDirectoryMode=0700
+UMask=0077
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+ReadWritePaths=/run/lock
+

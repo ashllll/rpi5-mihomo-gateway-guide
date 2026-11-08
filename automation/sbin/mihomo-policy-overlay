@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -24,7 +25,7 @@ ROUTE_DEFAULTS_PATH = os.environ.get(
     "MIHOMO_ROUTE_DEFAULTS", "/etc/mihomo/adaptive/route-defaults.yaml"
 )
 
-DOWNLOAD_ROUTE_GROUPS = {"Download", "GitHub Download", "GitHub Control", "Model Download", "Package Download"}
+DOWNLOAD_ROUTE_GROUPS = {"Download", "GitHub Download", "GitHub Control", "GitHub API", "Model Download", "Package Download"}
 VIDEO_ROUTE_GROUPS = {"Streaming", "Social"}
 
 
@@ -94,6 +95,10 @@ def validated_routes(routes: object, key: str, allowed_groups: set[str]) -> dict
                     or any(character.isspace() or character in ",*" for character in domain)):
                 raise ValueError(f"invalid {key} domain")
         result[route_id] = {"group": spec["group"], "domains": unique(domains)}
+        if "rule_type" in spec:
+            if spec["rule_type"] not in ("DOMAIN", "DOMAIN-SUFFIX"):
+                raise ValueError(f"invalid {key} rule_type")
+            result[route_id]["rule_type"] = spec["rule_type"]
     return result
 
 
@@ -282,8 +287,96 @@ def domain_routes(capabilities: dict, key: str, rule_type: str, allowed_groups: 
     result = []
     for spec in routes.values():
         for domain in spec["domains"]:
-            result.append(f"{rule_type},{domain},{spec['group']}")
+            result.append(f"{spec.get('rule_type', rule_type)},{domain},{spec['group']}")
     return result
+
+
+def apply_client_routes(config: dict, capabilities: dict, measurement: dict) -> None:
+    """Rebuild source-scoped routes from current nodes and one explicit account."""
+    routes = capabilities.get("client_routes", {})
+    if not isinstance(routes, dict):
+        raise ValueError("client_routes must be a mapping")
+    groups = config["proxy-groups"]
+    owned = [group for group in groups if "x-client-route" in group]
+    old_rules = set()
+    for group in owned:
+        previous = group.get("x-client-route-rules")
+        owner = group.get("x-client-route")
+        name = group.get("name")
+        if (not isinstance(owner, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", owner)
+                or not isinstance(name, str) or not name.strip()
+                or any(c in name for c in ",\r\n()")
+                or not isinstance(previous, list) or not previous
+                or any(not isinstance(r, str) for r in previous)):
+            raise ValueError("invalid client route ownership")
+        # Ownership permits removing only this group's source-scoped rules.
+        pattern = r"AND,\(\(SRC-IP-CIDR,([^(),]+)\),\(DOMAIN(?:-SUFFIX)?,([A-Za-z0-9.-]+)\)\)," + re.escape(name)
+        for rule in previous:
+            match = re.fullmatch(pattern, rule)
+            if not match:
+                raise ValueError("client route ownership contains a foreign rule")
+            ipaddress.ip_network(match[1], strict=True)
+        old_rules.update(previous)
+    groups[:] = [group for group in groups if "x-client-route" not in group]
+    config["rules"] = [rule for rule in config["rules"] if rule not in old_rules]
+    parents = {group["name"]: group for group in groups}
+    nodes = {node["name"]: node for node in config["proxies"]}
+    policy = capabilities.get("measurement", {})
+    additions = []
+    names = set(parents) | set(nodes) | {"DIRECT", "REJECT", "PASS", "GLOBAL"}
+    fields = {"group", "parent_group", "account", "source_cidrs", "domains", "exact_domains"}
+    for route_id, spec in routes.items():
+        if (not isinstance(route_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", route_id)
+                or not isinstance(spec, dict) or set(spec) - fields):
+            raise ValueError("invalid client route entry")
+        name = spec.get("group")
+        if (not isinstance(name, str) or not name.strip() or name in names
+                or any(c in name for c in ",\r\n()")):
+            raise ValueError("invalid or conflicting client route group")
+        parent = parents.get(spec.get("parent_group"))
+        account = spec.get("account")
+        if (parent is None or parent.get("type") not in {"fallback", "url-test", "select"}
+                or not isinstance(account, str) or account not in policy.get("accounts", {})):
+            raise ValueError("client route requires an existing parent and account")
+        candidates = [node for node in parent.get("proxies", []) if node in nodes
+                      and measurement["account_for"](nodes[node], policy) == account]
+        if not candidates:
+            raise ValueError("client route has no nodes from its permitted account")
+        sources = spec.get("source_cidrs")
+        if not isinstance(sources, list) or not sources or any(not isinstance(x, str) for x in sources):
+            raise ValueError("client route requires source CIDRs")
+        cidrs = unique([str(ipaddress.ip_network(value, strict=True)) for value in sources])
+        domains = []
+        for key, kind in (("domains", "DOMAIN-SUFFIX"), ("exact_domains", "DOMAIN")):
+            values = spec.get(key, [])
+            if not isinstance(values, list):
+                raise ValueError("client route domains must be lists")
+            for value in values:
+                if (not isinstance(value, str) or len(value) > 253
+                        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", value)
+                        or any(not label or len(label) > 63 or label.startswith('-') or label.endswith('-')
+                               for label in value.split('.'))):
+                    raise ValueError("invalid client route domain")
+                domains.append((kind, value.lower()))
+        if not domains:
+            raise ValueError("client route requires at least one domain")
+        rules = unique([f"AND,((SRC-IP-CIDR,{cidr}),({kind},{domain})),{name}"
+                        for cidr in cidrs for kind, domain in domains])
+        # Clone health policy, never nested selectors or another account's leaves.
+        group = copy.deepcopy(parent)
+        group.update(name=name, proxies=candidates)
+        group["empty-fallback"] = "REJECT"
+        for key in ("use", "filter", "exclude-filter", "include-all", "include-all-proxies",
+                    "include-all-providers"):
+            group.pop(key, None)
+        group["x-client-route"] = route_id
+        group["x-client-route-rules"] = rules
+        groups.append(group)
+        names.add(name)
+        additions.extend(rules)
+    # Explicit downloads must precede broader AI chat domain rules.
+    downloads = domain_routes(capabilities, "download_routes", "DOMAIN", DOWNLOAD_ROUTE_GROUPS)
+    config["rules"] = unique([*downloads, *additions, *config["rules"]])
 
 
 def overlay_labels(capabilities: dict, key: str) -> list[str]:
@@ -386,9 +479,11 @@ def main() -> None:
     stt_download_nodes, bywave_download_nodes, glados_download_nodes = bulk_capable_nodes(
         nodes, capabilities
     )
-    # STT and ByWave are confirmed bulk-capable by the user.  GLaDOS enters
-    # bulk pools only through the data-driven capability manifest, which is
-    # deliberately narrower than the complete GLaDOS node set.
+    stt_only = capabilities.get("roles", {}).get("bulk_download", {}).get("stt_only", False)
+    if type(stt_only) is not bool:
+        raise ValueError("bulk_download.stt_only must be boolean")
+    if stt_only:
+        glados_download_nodes = []
     stt_bulk_nodes = stt_download_nodes
     bywave_model_nodes = bywave_download_nodes
     bywave_github_nodes = bywave_download_nodes
@@ -396,9 +491,9 @@ def main() -> None:
     stt_github_nodes = stt_bulk_nodes
     glados_model_nodes = glados_download_nodes
     glados_github_nodes = glados_download_nodes
-    model_download_nodes = unique([*bywave_model_nodes, *stt_model_nodes, *glados_model_nodes])
-    github_download_nodes = unique([*bywave_github_nodes, *stt_github_nodes, *glados_github_nodes])
-    download_nodes = unique([*stt_model_nodes, *bywave_model_nodes, *glados_model_nodes])
+    model_download_nodes = stt_bulk_nodes if stt_only else unique([*bywave_model_nodes, *stt_model_nodes, *glados_model_nodes])
+    github_download_nodes = stt_bulk_nodes if stt_only else unique([*bywave_github_nodes, *stt_github_nodes, *glados_github_nodes])
+    download_nodes = stt_bulk_nodes if stt_only else unique([*stt_model_nodes, *bywave_model_nodes, *glados_model_nodes])
     github_control_nodes = unique([*bywave_github_nodes, *stt_github_nodes])
 
     # Every pool is expressed as a pattern over the freshly merged node set
@@ -450,7 +545,7 @@ def main() -> None:
         ("Package Download", download_nodes),
         ("TW Fixed IP", tw_fixed_nodes),
     ):
-        if not candidates:
+        if not candidates and not (stt_only and name.startswith("ByWave ")):
             raise SystemExit(f"no usable subscription nodes for {name}")
 
     replace_group(
@@ -815,6 +910,11 @@ def main() -> None:
             group["proxies"] = members
             break
 
+    if stt_only:
+        # Keep old child references valid without permitting another airport.
+        for name in ("ByWave Download", "ByWave GitHub Download"):
+            upsert_group(groups, name, {"type": "select", "proxies": ["REJECT"]})
+
     direct_prefix = [
         "RULE-SET,private-ip,DIRECT,no-resolve",
         "RULE-SET,game-domain,DIRECT",
@@ -824,6 +924,7 @@ def main() -> None:
         "RULE-SET,cn-ip,DIRECT,no-resolve",
     ]
     download_overrides = [
+        "DST-PORT,7680,Download",
         *domain_routes(
             capabilities, "download_routes", "DOMAIN",
             DOWNLOAD_ROUTE_GROUPS,
@@ -905,7 +1006,16 @@ def main() -> None:
         "DOMAIN-SUFFIX,googleusercontent.com,Default Proxy",
     ]
 
-    prefix_set = set(direct_prefix)
+    # Remove exact legacy generated rules when upgrading an existing config.
+    retired_rules = {
+        'DOMAIN-SUFFIX,storage.googleapis.com,Model Download',
+        'DOMAIN-SUFFIX,s3.amazonaws.com,Model Download',
+        'DOMAIN-KEYWORD,telegram,Telegram',
+        'DOMAIN-KEYWORD,google,Default Proxy',
+        'DOMAIN-SUFFIX,github.com,GitHub Download',
+        'DOMAIN-SUFFIX,ghcr.io,Developer',
+    }
+    prefix_set = set(direct_prefix) | retired_rules
     normalized_rules = [
         *direct_prefix,
         *download_overrides,
@@ -927,6 +1037,7 @@ def main() -> None:
     # references are gone may exact legacy file-provider owners be retired.
     retire_legacy_quality_providers(config, capabilities, route_defaults)
     apply_stability(config, capabilities)
+    apply_client_routes(config, capabilities, measurement)
     media = runpy.run_path(str(Path(__file__).with_name("mihomo-media-policy")))
     media["configure"](config, capabilities)
     measurement["configure_measurement"](config, capabilities)

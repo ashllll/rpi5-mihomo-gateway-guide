@@ -19,6 +19,7 @@ class Delivery(unittest.TestCase):
             source = SOURCE.read_text().replace('/etc/mihomo-alert.env', str(root/'env'))
             source = source.replace('/run/mihomo-alert.state', str(root/'state'))
             (root/'alert').write_text(source)
+            (root/'state.open').write_text('gateway\naddress-query\ndevice-address-query\nmedia-empty:Streaming\n')
             for name in ('logger', 'flock'):
                 path = root/name; path.write_text('#!/bin/sh\nexit 0\n'); path.chmod(0o755)
             curl = root/'curl'
@@ -37,7 +38,7 @@ print(json.dumps({'code':code}))
                 env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ['PATH'],PAYLOAD=str(root/'payload')),
                 capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stderr)
-            return json.loads((root/'payload').read_text())
+            return json.loads((root/'payload').read_text()) if (root/'payload').exists() else None
 
     def test_serverchan_has_readable_unicode_title_and_body(self):
         payload = self.render('mihomo-degraded', 'github=fail status=000 path=proxy;domestic=ok status=200 path=direct;', serverchan=True)
@@ -58,22 +59,22 @@ print(json.dumps({'code':code}))
 
     def test_recovery_and_service_failure_are_specific(self):
         self.assertIn('尚未检查',self.render('mihomo-recovery','egress=unknown')['body'])
-        self.assertIn('订阅更新失败',self.render('unit:mihomo-update-subscription.service','systemd 单元失败')['title'])
-        self.assertIn('订阅更新失败',self.render('unit:mihomo-subscription-update.service','failed')['title'])
+        self.assertIn('代理线路列表更新未完成',self.render('unit:mihomo-update-subscription.service','systemd 单元失败')['title'])
+        self.assertIn('代理线路列表更新未完成',self.render('unit:mihomo-subscription-update.service','failed')['title'])
         self.assertIn('内存',self.render('mem','可用内存 128MB（下限 512MB）')['title'])
 
     def test_notification_catalog_covers_dns_hardware_and_media(self):
         cases = {
-            'mosdns-degraded': ('cn=1 proxy_fake=0 metrics=1', '域名查询检查有异常'),
-            'dnsmasq-restart': ('Requested recovery', '已请求重启'),
-            'dns-path-down': ('silent', '整条域名查询链路'),
-            'dns-path-degraded': ('degraded', '部分设备域名查询'),
-            'dns-path-recovery': ('healthy', '检查恢复'),
+            'mosdns-degraded': ('cn=1 proxy_fake=0 metrics=1', '部分网站的网址查询异常'),
+            'dnsmasq-restart': ('Requested recovery', '正在自动修复'),
+            'dns-path-down': ('silent', '网站地址查询没有回应'),
+            'dns-path-degraded': ('degraded', '部分网址查询失败'),
+            'dns-path-recovery': ('healthy', '网址查询已恢复'),
             'wan': ('WAN wan0 link missing', '主路由'),
             'disk': ('磁盘使用率 95%', '存储空间'),
-            'temp': ('throttled=0x1', '温度或供电'),
+            'temp': ('throttled=0x1', '供电不足'),
             'media-empty:Social': ('empty', '推特图片和视频'),
-            'media-empty:Streaming-recovered': ('ready', '候选节点已补回'),
+            'media-empty:Streaming-recovered': ('ready', '已有达标线路'),
         }
         for key,(message,expected) in cases.items():
             with self.subTest(key=key):
@@ -81,9 +82,10 @@ print(json.dumps({'code':code}))
                 self.assertIn(expected,payload['title'])
                 self.assertNotIn(message,payload['body'])
         body = self.render('mosdns-degraded','cn=1 proxy_fake=0 metrics=1')['body']
-        self.assertIn('代理网站地址分配：检查异常',body)
-        self.assertIn('国内网站地址查询：检查通过',body)
-        self.assertNotIn('已恢复',self.render('unit:mihomo.service-recovered','')['body'])
+        self.assertIn('代理网站：网址查询失败',body)
+        self.assertIn('国内网站：网址查询通过',body)
+        self.assertIsNone(self.render('unit:mihomo.service-recovered',''))
+        self.assertIsNone(self.render('unknown-event','diagnostic only'))
 
     def test_failed_delivery_retries_and_recovery_has_its_own_key(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -108,18 +110,18 @@ print(json.dumps({'code':code}))
             def invoke(key):
                 return subprocess.run(['sh', str(script), '--health', 'fixture', key],
                                       env=env, capture_output=True, text=True)
-            self.assertNotEqual(invoke('proxy-down').returncode, 0)
+            self.assertNotEqual(invoke('mihomo-failed').returncode, 0)
             self.assertFalse(state.exists(), 'failed delivery must not start cooldown')
             env['RESPONSE'] = '{"code":200}'
-            self.assertEqual(invoke('proxy-down').returncode, 0)
+            self.assertEqual(invoke('mihomo-failed').returncode, 0)
             self.assertTrue(state.exists())
-            self.assertEqual(invoke('proxy-down').returncode, 75)
+            self.assertEqual(invoke('mihomo-failed').returncode, 75)
             self.assertEqual(len((root / 'calls').read_text().splitlines()), 2)
-            self.assertEqual(invoke('proxy-up').returncode, 0)
+            self.assertEqual(invoke('mihomo-recovery').returncode, 0)
             self.assertEqual(len((root / 'calls').read_text().splitlines()), 3)
-            self.assertEqual(invoke('proxy-down').returncode, 75)
-            state.write_text('proxy-down\t1\n')
-            self.assertEqual(invoke('proxy-down').returncode, 0)
+            self.assertEqual(invoke('mihomo-failed').returncode, 75)
+            state.write_text('mihomo-failed\t1\n')
+            self.assertEqual(invoke('mihomo-failed').returncode, 0)
             self.assertEqual(len((root / 'calls').read_text().splitlines()), 4)
 
 

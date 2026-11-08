@@ -11,6 +11,140 @@ download_routes:
   packages:
     group: Package Download
     domains: [registry.npmjs.org, registry.yarnpkg.com, unpkg.com, cdn.jsdelivr.net, nodejs.org]
+  dev-python:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - pypi.org
+    - pythonhosted.org
+    - python.org
+    - repo.anaconda.com
+    - conda.anaconda.org
+    - api.anaconda.org
+    - repo.continuum.io
+  dev-node:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - registry.npmjs.org
+    - registry.npmjs.com
+    - registry.yarnpkg.com
+    - nodejs.org
+    - unpkg.com
+    - cdn.jsdelivr.net
+    - get.pnpm.io
+    - bun.sh
+    - deno.land
+    - dl.deno.land
+  dev-homebrew:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - formulae.brew.sh
+    - ghcr.io
+    - pkg-containers.githubusercontent.com
+  dev-rust-go:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - crates.io
+    - rust-lang.org
+    - rustup.rs
+    - go.dev
+    - golang.org
+    - dl.google.com
+  dev-java:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - repo.maven.apache.org
+    - repo1.maven.org
+    - repo.gradle.org
+    - services.gradle.org
+    - downloads.gradle.org
+    - plugins.gradle.org
+    - plugins-artifacts.gradle.org
+    - dlcdn.apache.org
+    - archive.apache.org
+    - download.java.net
+    - download.oracle.com
+    - api.adoptium.net
+    - cdn.azul.com
+    - corretto.aws
+    - repo.spring.io
+  dev-other-packages:
+    group: Package Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - rubygems.org
+    - rubyonrails.org
+    - cache.ruby-lang.org
+    - nuget.org
+    - dot.net
+    - builds.dotnet.microsoft.com
+    - ci.dot.net
+    - dotnetcli.azureedge.net
+    - dotnetcli.blob.core.windows.net
+    - packagist.org
+    - getcomposer.org
+    - repo.packagist.org
+    - get.helm.sh
+  dev-containers:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - docker.io
+    - download.docker.com
+    - desktop.docker.com
+    - hub.docker.com
+    - auth.docker.com
+    - login.docker.com
+    - production.cloudflare.docker.com
+    - production.cloudfront.docker.com
+    - quay.io
+    - gcr.io
+    - registry.k8s.io
+    - pkg.dev
+  dev-editors-sdk:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - update.code.visualstudio.com
+    - vscode.download.prss.microsoft.com
+    - vscode.cdn.azure.cn
+    - marketplace.visualstudio.com
+    - gallery.vsassets.io
+    - gallerycdn.vsassets.io
+    - download.visualstudio.microsoft.com
+    - download.jetbrains.com
+    - download-cdn.jetbrains.com
+    - download-cf.jetbrains.com
+    - plugins.jetbrains.com
+    - downloads.marketplace.jetbrains.com
+    - cache-redirector.jetbrains.com
+    - redirector.gvt1.com
+    - gvt1.com
+    - pub.dev
+    - pub.dartlang.org
+    - download.developer.apple.com
+    - download.swift.org
+    - developer.download.nvidia.com
+    - dl.espressif.com
+    - components.espressif.com
+  dev-build-tools:
+    group: Download
+    rule_type: DOMAIN-SUFFIX
+    domains:
+    - cmake.org
+    - releases.llvm.org
+    - ftp.gnu.org
+    - ftpmirror.gnu.org
+    - downloads.sourceforge.net
+    - sourceforge.net
+    - repo.msys2.org
+    - mirror.msys2.org
+    - download.qt.io
+    - download.savannah.gnu.org
 video_routes:
   youtube:
     group: Streaming

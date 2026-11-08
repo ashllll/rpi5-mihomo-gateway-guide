@@ -93,7 +93,14 @@ def build_fixture(directory: Path, overlay: dict, nodes: list[str]) -> tuple[Pat
             {"name": name, "type": "select", "proxies": ["DIRECT", *nodes]}
             for name in GROUPS
         ],
-        "rules": ["MATCH,Auto"],
+        "rules": [
+            'DOMAIN-SUFFIX,storage.googleapis.com,Model Download',
+            'DOMAIN-SUFFIX,s3.amazonaws.com,Model Download',
+            'DOMAIN-KEYWORD,telegram,Telegram',
+            'DOMAIN-KEYWORD,google,Default Proxy',
+            'DOMAIN-SUFFIX,github.com,GitHub Download',
+            'DOMAIN-SUFFIX,ghcr.io,Developer',
+            "MATCH,Auto"],
     }
     source = directory / "source.yaml"
     source.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
