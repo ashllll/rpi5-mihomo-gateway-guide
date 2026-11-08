@@ -8,6 +8,7 @@ README 回答“它在跑什么”，这里回答“为什么这样、怎么装�
 
 | 你想知道 | 读这篇 |
 |---|---|
+| 当前全设备分流、流量归属、GitHub API 配额与限制 | [当前运行策略](global-routing-and-traffic.zh-CN.md) |
 | 拓扑、nft 数据面、策略路由、三层 DNS、预算准入、门禁状态机 | [架构](architecture.zh-CN.md) |
 | 从裸 Debian 13 到本机状态的安装顺序与验收判据 | [部署](deployment.zh-CN.md) |
 | 状态文件怎么读、timer 清单、更新与回滚、账本位置 | [运维](operations.zh-CN.md) |
@@ -30,6 +31,8 @@ README 回答“它在跑什么”，这里回答“为什么这样、怎么装�
 | [调试档案](deployment-debugging-summary.zh-CN.md) | 当时发生了什么、错在哪里 | 当前 timer、配置或安装入口 |
 | [research/](research/) | 外部项目的可行性与候选路线 | 本仓库已交付的能力 |
 | [ADR](adr/README.md) | 决策与替代方案 | 现场验收声明 |
+
+首页已于 2026-11-08 对照代码和现场更新。旧拓扑图、WireGuard 试点及历史操作片段不应作为当前部署前提；当前入口与分流以[项目首页](../README.md)和[运行策略](global-routing-and-traffic.zh-CN.md)为准。
 
 机读真值优先于文档：`/etc/mihomo/config.yaml`、`/etc/nftables.conf`、
 `automation/etc/**` 与 `systemctl` 输出冲突时，以机器为准，然后回来改文档。
